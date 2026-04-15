@@ -15,10 +15,10 @@ class UserRepository:
         return User.query.get(user_id)
 
     @staticmethod
-    def create_user(username: str, email: str, password: str, role: str) -> User:
+    def create_user(username: str, password: str, role: str) -> User:
         """Creates a new user with a hashed password and saves to DB."""
         try:
-            new_user = User(username=username, email=email, role=role)
+            new_user = User(username=username, role=role)
             new_user.set_password(password)
             db.session.add(new_user)
             db.session.commit()

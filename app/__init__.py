@@ -27,8 +27,14 @@ def create_app(config_class=Config):
 
     # Register Blueprints here (Auth, Livestock, etc.)
     from app.models import user
+    from app.models import livestock
+    from app.models import supply
+    
+    from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
+
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
+    app.register_blueprint(clinical_bp, url_prefix='/api/clinical')
 
     @app.route('/health', methods=['GET'])
     def health_check():
