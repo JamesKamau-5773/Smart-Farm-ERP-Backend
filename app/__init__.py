@@ -29,6 +29,7 @@ def create_app(config_class=Config):
     from app.models import user
     from app.models import livestock
     from app.models import supply
+    from app.models import finance
     
 
     from app.api.clinical import clinical_bp
