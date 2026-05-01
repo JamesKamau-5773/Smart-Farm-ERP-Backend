@@ -35,10 +35,12 @@ def create_app(config_class=Config):
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
     from app.api.operations import operations_bp
+    from app.api.finance import finance_bp
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')
     app.register_blueprint(operations_bp, url_prefix='/api/operations')
+    app.register_blueprint(finance_bp, url_prefix='/api/finance')
 
     @app.route('/health', methods=['GET'])
     def health_check():

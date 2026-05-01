@@ -31,3 +31,13 @@ class Config:
     # --- ERP SPECIFIC ---
     # Ensure all numbers are handled with precision (MoE Compliance)
     JSON_SORT_KEYS = False
+
+   
+    
+    # M-Pesa Configuration
+    MPESA_ENVIRONMENT = os.environ.get('MPESA_ENVIRONMENT', 'sandbox')
+    MPESA_CONSUMER_KEY = os.environ.get('MPESA_CONSUMER_KEY')
+    MPESA_CONSUMER_SECRET = os.environ.get('MPESA_CONSUMER_SECRET')
+    MPESA_BUSINESS_SHORTCODE = os.environ.get('MPESA_BUSINESS_SHORTCODE')
+    MPESA_PASSKEY = os.environ.get('MPESA_PASSKEY')
+    MPESA_CALLBACK_URL = os.environ.get('MPESA_CALLBACK_URL')
