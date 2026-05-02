@@ -30,12 +30,17 @@ def create_app(config_class=Config):
     from app.models import livestock
     from app.models import supply
     from app.models import finance
-    
+    from app.models import audit
+
 
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
     from app.api.operations import operations_bp
     from app.api.finance import finance_bp
+    
+    # Register Global Error Handlers
+    from app.utils.errors import register_error_handlers
+    register_error_handlers(app)
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')

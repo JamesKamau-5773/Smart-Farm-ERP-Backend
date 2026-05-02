@@ -26,4 +26,6 @@ def toggle_farmer_hardlock(cow_id):
         return jsonify({"error": "is_locked boolean parameter is required."}), 400
         
     is_locked = bool(data.get('is_locked'))
-    return MedicalService.enforce_hardlock(cow_id, is_locked)
+    user_id = get_jwt_identity()
+    ip_address = request.remote_addr
+    return MedicalService.enforce_hardlock(cow_id, is_locked, user_id, ip_address)

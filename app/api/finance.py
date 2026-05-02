@@ -38,3 +38,26 @@ def trigger_billing():
         return jsonify({"error": "Amount must be a valid number."}), 400
 
     return MpesaService.initiate_stk_push(phone_number, amount_int, account_reference, description)
+
+
+@finance_bp.route('/mpesa/callback', methods=['POST'])
+def mpesa_callback():
+    """
+    Public webhook endpoint for Safaricom Daraja.
+    Requires NO authentication, as Safaricom cannot pass our JWT.
+    """
+    payload = request.get_json()
+    
+    if not payload:
+        return jsonify({"error": "Invalid payload"}), 400
+
+    # Process the transaction asynchronously or directly
+    MpesaService.process_stk_callback(payload)
+
+    # CRITICAL: Always acknowledge receipt to Safaricom immediately
+    safaricom_acknowledgement = {
+        "ResultCode": 0,
+        "ResultDesc": "Confirmation Received Successfully"
+    }
+    
+    return jsonify(safaricom_acknowledgement), 200

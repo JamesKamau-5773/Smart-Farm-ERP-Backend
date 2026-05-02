@@ -1,9 +1,10 @@
 from app import db
-from app.models.finance import Transaction, TransactionType
+from app.models.finance import Transaction, TransactionType, TransactionCategory
 from app.models.supply import MilkLog
 from datetime import datetime, timedelta
 from sqlalchemy import func
 from flask import jsonify
+from .audit_service import record_audit
 
 class FinanceService:
     @staticmethod
@@ -48,8 +49,8 @@ class FinanceService:
         }), 200
 
     @staticmethod
-    def record_transaction(t_type, category, amount, user_id, customer_id=None, ref_code=None, desc=None):
-        """Standardized method for recording ledger entries."""
+    def record_transaction(t_type: TransactionType, category: TransactionCategory, amount: float, user_id: int, ip_address: str, customer_id: int = None, ref_code: str = None, desc: str = None):
+        """Standardized method for recording ledger entries with audit logging."""
         try:
             tx = Transaction(
                 transaction_type=t_type,
@@ -58,6 +59,28 @@ class FinanceService:
                 recorded_by=user_id,
                 customer_id=customer_id,
                 reference_code=ref_code,
+                description=desc
+            )
+            db.session.add(tx)
+            db.session.flush()  # Flush to get the transaction ID
+
+            record_audit(
+                user_id=user_id,
+                action='RECORD_TRANSACTION',
+                entity_type='Transaction',
+                entity_id=tx.id,
+                old_value=None,
+                new_value=f"Type: {t_type.value}, Category: {category.value}, Amount: {amount}",
+                ip_address=ip_address
+            )
+
+            db.session.commit()
+            return tx
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error in record_transaction: {e}")
+            return None
+
                 description=desc
             )
             db.session.add(tx)

@@ -41,3 +41,10 @@ class Config:
     MPESA_BUSINESS_SHORTCODE = os.environ.get('MPESA_BUSINESS_SHORTCODE')
     MPESA_PASSKEY = os.environ.get('MPESA_PASSKEY')
     MPESA_CALLBACK_URL = os.environ.get('MPESA_CALLBACK_URL')
+
+
+class TestConfig(Config):
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    WTF_CSRF_ENABLED = False
+    JWT_COOKIE_CSRF_PROTECT = False

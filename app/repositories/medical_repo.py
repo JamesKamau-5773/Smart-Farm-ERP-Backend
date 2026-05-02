@@ -1,6 +1,7 @@
 from app.models.livestock import MedicalRecord, Cow
 from app import db
 from sqlalchemy.exc import SQLAlchemyError
+from app.services.audit_service import record_audit
 
 class MedicalRepository:
     @staticmethod
@@ -23,12 +24,24 @@ class MedicalRepository:
             raise Exception("Failed, Database error while saving medical record.")
 
     @staticmethod
-    def toggle_hardlock(cow_id: int, is_locked: bool) -> Cow:
+    def toggle_hardlock(cow_id: int, is_locked: bool, user_id: int, ip_address: str) -> Cow:
         """Allows the Farmer to isolate a cow's milk production."""
         try:
             cow = Cow.query.get(cow_id)
             if cow:
+                old_value = cow.is_hardlocked
                 cow.is_hardlocked = is_locked
+                
+                record_audit(
+                    user_id=user_id,
+                    action='TOGGLE_HARDLOCK',
+                    entity_type='Cow',
+                    entity_id=cow.id,
+                    old_value=old_value,
+                    new_value=is_locked,
+                    ip_address=ip_address
+                )
+                
                 db.session.commit()
             return cow
         except SQLAlchemyError as e:

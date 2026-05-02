@@ -34,13 +34,13 @@ class MedicalService:
         return jsonify(response), 201
 
     @staticmethod
-    def enforce_hardlock(cow_id, is_locked):
+    def enforce_hardlock(cow_id, is_locked, user_id, ip_address):
         """Processes the Farmer's decision to lock/unlock a cow."""
         cow = CowRepository.get_by_id(cow_id)
         if not cow:
             return jsonify({"error": "Cow not found in registry."}), 404
 
-        updated_cow = MedicalRepository.toggle_hardlock(cow_id, is_locked)
+        updated_cow = MedicalRepository.toggle_hardlock(cow_id, is_locked, user_id, ip_address)
         
         status = "LOCKED (Internal Use Only)" if is_locked else "UNLOCKED (Saleable)"
         return jsonify({"message": f"Cow {updated_cow.tag_number} is now {status}."}), 200
