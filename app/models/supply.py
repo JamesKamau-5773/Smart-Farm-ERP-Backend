@@ -49,6 +49,7 @@ class MilkLog(db.Model):
     session = db.Column(db.String(20), nullable=False) 
     timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
     recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    butterfat_pct = db.Column(db.Numeric(5, 2), nullable=True)
     
     # Critical Commercial Flags
     is_saleable = db.Column(db.Boolean, default=True, nullable=False) 

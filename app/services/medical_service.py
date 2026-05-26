@@ -6,9 +6,11 @@ class MedicalService:
     @staticmethod
     def log_clinical_visit(cow_id, vet_id, data):
         """Processes Vet input and suggests a hardlock if withdrawal days > 0."""
-        # 1. Validate Cow Exists
-        cow = CowRepository.get_by_id(cow_id)
-        if not cow:
+        livestock_id = cow_id
+
+        # 1. Validate Livestock Exists
+        livestock = CowRepository.get_by_id(livestock_id)
+        if not livestock:
             return jsonify({"error": "Cow not found in registry."}), 404
 
         # 2. Extract Data
@@ -21,7 +23,7 @@ class MedicalService:
             return jsonify({"error": "Diagnosis is required for clinical logs."}), 400
 
         # 3. Save Record
-        record = MedicalRepository.create_record(cow_id, vet_id, diagnosis, medication, withdrawal_days, remarks)
+        record = MedicalRepository.create_record(livestock_id, vet_id, diagnosis, medication, withdrawal_days, remarks)
         
         # 4. Generate Alert Payload
         response = {
@@ -35,12 +37,13 @@ class MedicalService:
 
     @staticmethod
     def enforce_hardlock(cow_id, is_locked, user_id, ip_address):
-        """Processes the Farmer's decision to lock/unlock a cow."""
-        cow = CowRepository.get_by_id(cow_id)
-        if not cow:
+        """Processes the Farmer's decision to lock/unlock livestock."""
+        livestock_id = cow_id
+        livestock = CowRepository.get_by_id(livestock_id)
+        if not livestock:
             return jsonify({"error": "Cow not found in registry."}), 404
 
-        updated_cow = MedicalRepository.toggle_hardlock(cow_id, is_locked, user_id, ip_address)
+        updated_livestock = MedicalRepository.toggle_hardlock(livestock_id, is_locked, user_id, ip_address)
         
         status = "LOCKED (Internal Use Only)" if is_locked else "UNLOCKED (Saleable)"
-        return jsonify({"message": f"Cow {updated_cow.tag_number} is now {status}."}), 200
+        return jsonify({"message": f"Livestock {updated_livestock.tag_number} is now {status}."}), 200

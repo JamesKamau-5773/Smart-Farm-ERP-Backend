@@ -9,21 +9,22 @@ class ProductionService:
     @staticmethod
     def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int):
         """Processes the milking entry, applies intelligence, and securely logs it."""
+        livestock_id = cow_id
         
-        # 1. Validate Cow and retrieve current Hardlock state
-        cow = CowRepository.get_by_id(cow_id)
-        if not cow:
+        # 1. Validate Livestock and retrieve current Hardlock state
+        livestock = CowRepository.get_by_id(livestock_id)
+        if not livestock:
             return jsonify({"error": "Cow not found."}), 404
         
-        if not cow.is_active or cow.current_status == 'Dry':
-            return jsonify({"error": f"Cow {cow.tag_number} is currently flagged as {cow.current_status} and should not be milked."}), 400
+        if not livestock.is_active or livestock.current_status == 'Dry':
+            return jsonify({"error": f"Livestock {livestock.tag_number} is currently flagged as {livestock.current_status} and should not be milked."}), 400
 
         # 2. Safety First: Inherit the Farmer's Hardlock decision
-        # If the cow is locked for medical reasons, this specific milk log is flagged as NOT saleable.
-        is_saleable = not cow.is_hardlocked
+        # If the livestock is locked for medical reasons, this specific milk log is flagged as NOT saleable.
+        is_saleable = not livestock.is_hardlocked
 
         # 3. Anomaly Detection (The 7-Day Rolling Average)
-        historical_average = MilkRepository.get_cow_average_yield(cow_id, days=7)
+        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7)
         is_anomaly = False
         warning_msg = None
 
@@ -36,7 +37,7 @@ class ProductionService:
 
         # 4. Commit the Log
         log = MilkRepository.create_log(
-            cow_id=cow_id,
+            cow_id=livestock_id,
             amount=amount,
             session=session,
             recorded_by=user_id,
@@ -54,7 +55,7 @@ class ProductionService:
         
         # Add actionable warnings to the response payload if necessary
         if not is_saleable:
-            response["alert_safety"] = "MILK IS ISOLATED. Cow is under medical isolation. Do not mix with commercial batch."
+            response["alert_safety"] = "MILK IS ISOLATED. Livestock is under medical isolation. Do not mix with commercial batch."
         if warning_msg:
             response["alert_health"] = warning_msg
 

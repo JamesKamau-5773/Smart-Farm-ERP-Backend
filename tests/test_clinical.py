@@ -1,21 +1,20 @@
 import json
 from tests.base import BaseTestCase
-from app.models.user import User, Role
+from app.models.user import Role
 from app.models.livestock import Cow
 from app import db
+from datetime import date
 
 class ClinicalTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
         # Create users with different roles
-        self.farmer = User(username='farmer', password='password', role=Role.FARMER)
-        self.vet = User(username='vet', password='password', role=Role.VET)
-        db.session.add_all([self.farmer, self.vet])
-        db.session.commit()
+        self.farmer = self.create_user(username='farmer', password='password', role=Role.FARMER)
+        self.vet = self.create_user(username='vet', password='password', role=Role.VET)
 
         # Create a cow
-        self.cow = Cow(tag_number='COW001', farmer_id=self.farmer.id)
+        self.cow = Cow(tag_number='COW001', date_of_birth=date(2022, 1, 1))
         db.session.add(self.cow)
         db.session.commit()
 
@@ -41,7 +40,7 @@ class ClinicalTestCase(BaseTestCase):
             )
             self.assertEqual(response.status_code, 201)
             data = json.loads(response.data.decode())
-            self.assertIn('Medical record created for cow', data['message'])
+            self.assertIn('Clinical record', data['message'])
 
     def test_toggle_farmer_hardlock(self):
         """Test toggling the hardlock by a farmer."""

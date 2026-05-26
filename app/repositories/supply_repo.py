@@ -6,7 +6,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 class MilkRepository:
     @staticmethod
-    def create_log(cow_id: int, amount: float, session: str, recorded_by: int, is_saleable: bool, is_anomaly: bool) -> MilkLog:
+    def create_log(cow_id: int, amount: float, session: str, recorded_by: int, is_saleable: bool, is_anomaly: bool, butterfat_pct=None) -> MilkLog:
         """Logs a milking session."""
         try:
             log = MilkLog(
@@ -14,6 +14,7 @@ class MilkRepository:
                 amount_liters=amount,
                 session=session,
                 recorded_by=recorded_by,
+                butterfat_pct=butterfat_pct,
                 is_saleable=is_saleable,
                 anomaly_flag=is_anomaly
             )
@@ -36,16 +37,28 @@ class MilkRepository:
         # If no previous records exist, return the average as 0
         return float(result) if result else 0.0
 
+    @staticmethod
+    def get_cow_average_butterfat(cow_id: int, days: int = 30) -> float:
+        """Calculates the average butterfat percentage for a specific cow over a rolling window."""
+        start_date = datetime.utcnow() - timedelta(days=days)
+        result = db.session.query(func.avg(MilkLog.butterfat_pct)).filter(
+            MilkLog.cow_id == cow_id,
+            MilkLog.timestamp >= start_date,
+            MilkLog.butterfat_pct.isnot(None),
+        ).scalar()
+
+        return float(result) if result is not None else 0.0
+
 class InventoryRepository:
     @staticmethod
     def get_item(item_id: int) -> StoreItem:
-        return StoreItem.query.get(item_id)
+        return db.session.get(StoreItem, item_id)
 
     @staticmethod
     def deduct_stock(item_id: int, amount: float, user_id: int, target_cow: int = None, notes: str = None):
         """Deducts inventory and creates a permanent Requisition Audit log."""
         try:
-            item = StoreItem.query.get(item_id)
+            item = db.session.get(StoreItem, item_id)
             if not item:
                 raise ValueError("Item not found in store.")
             

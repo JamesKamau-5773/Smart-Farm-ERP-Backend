@@ -23,8 +23,9 @@ class Cow(db.Model):
     date_of_birth = db.Column(db.Date, nullable=False)
 
     # Genetic Tracking (Self-referential foreign key for lineage)
-    dam_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=True) 
-    sire_name = db.Column(db.String(100), nullable=True) 
+    dam_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=True)
+    sire_name = db.Column(db.String(100), nullable=True)
+    genetic_score = db.Column(db.Integer, nullable=True)
 
     # Operational State
     is_hardlocked = db.Column(db.Boolean, default=False)
@@ -32,8 +33,53 @@ class Cow(db.Model):
     is_active = db.Column(db.Boolean, default=True)
 
     # Relationships
-    lactation_cycles = db.relationship('LactationCycle', backref='cow', lazy=True)
-    medical_records = db.relationship('MedicalRecord', backref='cow', lazy=True)
+    lactation_cycles = db.relationship('LactationCycle', backref=db.backref('livestock', lazy=True), lazy=True)
+    medical_records = db.relationship('MedicalRecord', backref=db.backref('livestock', lazy=True), lazy=True)
+    breeding_logs = db.relationship('BreedingLog', backref=db.backref('livestock', lazy=True), lazy=True)
+    vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True)
+
+
+class SemenInventory(db.Model):
+    __tablename__ = 'semen_inventory'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), nullable=False, index=True)
+    bull_name = db.Column(db.String(100), nullable=False)
+    straw_code = db.Column(db.String(50), nullable=False)
+    breed = db.Column(db.String(50), nullable=False)
+    provider = db.Column(db.String(100), nullable=True)
+    cost = db.Column(db.Numeric(10, 2), nullable=True)
+    stock_level = db.Column(db.Integer, nullable=False, default=0)
+    traits_to_improve = db.Column(db.JSON, nullable=True)
+
+    breeding_logs = db.relationship('BreedingLog', backref=db.backref('semen', lazy=True), lazy=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'straw_code', name='uq_semen_inventory_tenant_straw_code'),
+    )
+
+
+class BreedingLog(db.Model):
+    __tablename__ = 'breeding_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), nullable=False, index=True)
+    cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False, index=True)
+    semen_id = db.Column(db.Integer, db.ForeignKey('semen_inventory.id'), nullable=False, index=True)
+    insemination_date = db.Column(db.Date, nullable=False)
+    expected_calving_date = db.Column(db.Date, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='Pending')
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('Pending', 'Pregnant', 'Failed')",
+            name='ck_breeding_logs_status_valid'
+        ),
+    )
+
+    @property
+    def cow(self):
+        return self.livestock
 
 class LactationCycle(db.Model):
     __tablename__ = 'lactation_cycles'
@@ -51,6 +97,10 @@ class LactationCycle(db.Model):
     actual_calving_date = db.Column(db.Date, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
 
+    @property
+    def cow(self):
+        return self.livestock
+
 class MedicalRecord(db.Model):
     __tablename__ = 'medical_records'
 
@@ -63,3 +113,43 @@ class MedicalRecord(db.Model):
     medication = db.Column(db.String(255), nullable=True)
     withdrawal_days_recommended = db.Column(db.Integer, default=0)
     remarks = db.Column(db.Text, nullable=True)
+
+    @property
+    def cow(self):
+        return self.livestock
+
+
+class VetVisit(db.Model):
+    __tablename__ = 'vet_visits'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), nullable=False, index=True)
+    animal_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False, index=True)
+    vet_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False, index=True)
+    visit_date = db.Column(db.Date, nullable=False)
+    reason_for_visit = db.Column(db.Text, nullable=False)
+    diagnosis = db.Column(db.Text, nullable=True)
+    medications = db.Column(db.JSON, nullable=True)
+    recommendations = db.Column(db.Text, nullable=True)
+    remarks = db.Column(db.Text, nullable=True)
+    observations = db.Column(db.Text, nullable=True)
+    follow_up_required = db.Column(db.Boolean, nullable=False, default=False)
+    follow_up_date = db.Column(db.Date, nullable=True)
+    follow_up_status = db.Column(db.String(20), nullable=False, default='Not Required')
+    follow_up_completed_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "follow_up_status IN ('Not Required', 'Pending', 'Scheduled', 'Completed', 'Overdue', 'Cancelled')",
+            name='ck_vet_visits_follow_up_status_valid'
+        ),
+    )
+
+    @property
+    def cow(self):
+        return self.livestock
+
+    @property
+    def livestock_id(self):
+        return self.animal_id
