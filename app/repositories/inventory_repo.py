@@ -1,0 +1,1 @@
+from app.repositories.supply_repo import InventoryRepository

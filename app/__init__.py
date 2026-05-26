@@ -50,6 +50,7 @@ def create_app(config_class=Config):
     from app.api.operations import operations_bp
     from app.api.breeding import breeding_bp
     from app.api.export import export_bp
+    from app.api.inventory import inventory_bp
     from app.api.finance import finance_bp
     from app.api.hr import hr_bp
     from app.api.tenant import tenant_bp
@@ -63,6 +64,7 @@ def create_app(config_class=Config):
     app.register_blueprint(operations_bp, url_prefix='/api/operations')
     app.register_blueprint(breeding_bp, url_prefix='/api/v1/breeding')
     app.register_blueprint(export_bp)
+    app.register_blueprint(inventory_bp)
     app.register_blueprint(finance_bp, url_prefix='/api/finance')
     app.register_blueprint(hr_bp, url_prefix='/api/hr')
     app.register_blueprint(tenant_bp, url_prefix='/api/tenant')
