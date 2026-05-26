@@ -86,6 +86,36 @@ class BreedingTestCase(BaseTestCase):
             update_data = json.loads(update_response.data.decode())
             self.assertEqual(update_data['status'], 'Pregnant')
 
+    def test_exact_patch_outcome_route_updates_livestock_status(self):
+        self._login()
+
+        with self.client:
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                data=json.dumps(dict(bull_name='BULL-C', straw_code='AI-STR-004', breed='Holstein', stock_level=1)),
+                content_type='application/json'
+            )
+            semen_id = json.loads(inv_response.data.decode())['id']
+
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(dict(cow_id=self.cow.id, semen_id=semen_id, insemination_date='2026-05-23')),
+                content_type='application/json'
+            )
+            log_id = json.loads(log_response.data.decode())['breeding_log_id']
+
+            outcome_response = self.client.patch(
+                f'/api/v1/breeding/insemination/{log_id}/outcome',
+                data=json.dumps(dict(status='Pregnant')),
+                content_type='application/json'
+            )
+            self.assertEqual(outcome_response.status_code, 200)
+            outcome_data = json.loads(outcome_response.data.decode())
+            self.assertEqual(outcome_data['message'], 'Insemination marked as Pregnant')
+
+            refreshed_cow = db.session.get(Cow, self.cow.id)
+            self.assertEqual(refreshed_cow.current_status, 'Pregnant')
+
     def test_bull_performance_includes_butterfat(self):
         self._login()
 

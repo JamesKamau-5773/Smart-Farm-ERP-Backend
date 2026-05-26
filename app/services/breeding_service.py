@@ -9,6 +9,7 @@ from app.repositories.breeding_repo import (
     SemenInventoryRepository,
 )
 from app.repositories.cow_repo import CowRepository
+from app import db
 from app.services.reproduction_service import ReproductionService
 
 
@@ -144,6 +145,29 @@ class BreedingService:
         BreedingLogRepository.save()
 
         return jsonify({"message": "Breeding status updated.", "id": log.id, "status": log.status}), 200
+
+    @staticmethod
+    def update_insemination_outcome(tenant_id: int, log_id: int, data: dict):
+        status = (data.get("status") or "").strip().title()
+        if status not in {"Pregnant", "Failed"}:
+            return jsonify({"error": "Invalid outcome status"}), 400
+
+        log = BreedingLogRepository.get_by_id_for_tenant(log_id, tenant_id)
+        if not log:
+            return jsonify({"error": "Breeding log not found for this tenant."}), 404
+
+        log.status = status
+
+        livestock = CowRepository.get_by_livestock_id(log.cow_id)
+        if not livestock:
+            return jsonify({"error": "Livestock not found in registry."}), 404
+
+        if status == "Pregnant":
+            livestock.current_status = "Pregnant"
+
+        db.session.commit()
+
+        return jsonify({"message": f"Insemination marked as {status}"}), 200
 
     @staticmethod
     def bull_performance_summary(tenant_id: int):
