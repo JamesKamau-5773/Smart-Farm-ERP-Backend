@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    @page {
+      size: A4;
+      margin: 18mm 16mm;
+    }
+
+    body {
+      font-family: DejaVu Sans, Arial, sans-serif;
+      color: #1f2937;
+      font-size: 11pt;
+      line-height: 1.45;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #12372a 0%, #285943 100%);
+      color: #ffffff;
+      border-radius: 18px;
+      padding: 22px 24px;
+      margin-bottom: 18px;
+    }
+
+    .hero h1 {
+      margin: 0 0 6px 0;
+      font-size: 24pt;
+    }
+
+    .hero p {
+      margin: 0;
+      opacity: 0.92;
+    }
+
+    .grid {
+      display: table;
+      width: 100%;
+      table-layout: fixed;
+      margin-bottom: 18px;
+    }
+
+    .card {
+      border: 1px solid #d8e2da;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+      background: #ffffff;
+    }
+
+    .meta-row {
+      display: table-row;
+    }
+
+    .meta-cell {
+      display: table-cell;
+      width: 50%;
+      vertical-align: top;
+      padding-right: 12px;
+      padding-bottom: 10px;
+    }
+
+    .label {
+      font-size: 9pt;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #6b7280;
+      margin-bottom: 3px;
+    }
+
+    .value {
+      font-weight: 700;
+      color: #111827;
+    }
+
+    .section-title {
+      font-size: 14pt;
+      margin: 0 0 10px 0;
+      color: #12372a;
+    }
+
+    .timeline-item {
+      border-left: 4px solid #12372a;
+      padding-left: 12px;
+      margin-bottom: 14px;
+      page-break-inside: avoid;
+    }
+
+    .timeline-item h3 {
+      margin: 0 0 4px 0;
+      font-size: 11.5pt;
+    }
+
+    .timeline-item .meta {
+      color: #6b7280;
+      font-size: 9.5pt;
+      margin-bottom: 4px;
+    }
+
+    .empty {
+      color: #6b7280;
+      font-style: italic;
+    }
+
+    .footer {
+      margin-top: 18px;
+      color: #6b7280;
+      font-size: 9pt;
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <div class="hero">
+    <h1>Animal Passport</h1>
+    <p>Lifetime history summary for {{ animal.tag_number }}</p>
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Animal Profile</h2>
+    <div class="grid">
+      <div class="meta-row">
+        <div class="meta-cell">
+          <div class="label">Tag Number</div>
+          <div class="value">{{ animal.tag_number }}</div>
+        </div>
+        <div class="meta-cell">
+          <div class="label">Name</div>
+          <div class="value">{{ animal.name }}</div>
+        </div>
+      </div>
+      <div class="meta-row">
+        <div class="meta-cell">
+          <div class="label">Breed Status</div>
+          <div class="value">{{ animal.breed_status }}</div>
+        </div>
+        <div class="meta-cell">
+          <div class="label">Date of Birth</div>
+          <div class="value">{{ animal.date_of_birth }}</div>
+        </div>
+      </div>
+      <div class="meta-row">
+        <div class="meta-cell">
+          <div class="label">Current Status</div>
+          <div class="value">{{ animal.current_status }}</div>
+        </div>
+        <div class="meta-cell">
+          <div class="label">Hardlocked</div>
+          <div class="value">{{ 'Yes' if animal.is_hardlocked else 'No' }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="section-title">Chronological Timeline</h2>
+    {% if events %}
+      {% for event in events %}
+        <div class="timeline-item">
+          <div class="meta">{{ event.date }} | {{ event.category }}</div>
+          <h3>{{ event.title }}</h3>
+          <div>{{ event.details }}</div>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="empty">No animal history records were found for this passport.</div>
+    {% endif %}
+  </div>
+
+  <div class="footer">
+    Generated {{ generated_at }}
+  </div>
+</body>
+</html>

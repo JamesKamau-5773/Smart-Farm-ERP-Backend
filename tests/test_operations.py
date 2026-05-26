@@ -1,9 +1,11 @@
 import json
+from datetime import date, datetime
+
 from tests.base import BaseTestCase
 from app.models.user import Role
-from app.models.livestock import Cow
+from app.models.livestock import Cow, BreedingLog, SemenInventory, MedicalRecord
+from app.models.supply import MilkLog
 from app import db
-from datetime import date
 
 class OperationsTestCase(BaseTestCase):
 
@@ -36,3 +38,55 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(response.status_code, 201)
             data = json.loads(response.data.decode())
             self.assertEqual(data['message'], 'Milk logged successfully.')
+
+    def test_export_animal_passport_pdf(self):
+        """Test exporting a cow passport as a PDF."""
+        vet = self.create_user(username='vet', password='password', role=Role.VET)
+
+        semen = SemenInventory(
+            tenant_id=self.tenant.id,
+            bull_name='Jivu Prime',
+            straw_code='STRAW-001',
+            breed='Friesian',
+            provider='Farm Genetics',
+            stock_level=3,
+        )
+        db.session.add(semen)
+        db.session.flush()
+
+        db.session.add_all([
+            MilkLog(
+                cow_id=self.cow.id,
+                amount_liters=18.25,
+                session='Morning',
+                recorded_by=self.farmer.id,
+                timestamp=datetime(2026, 5, 20, 6, 30, 0),
+            ),
+            MedicalRecord(
+                cow_id=self.cow.id,
+                vet_id=vet.id,
+                visit_date=datetime(2026, 5, 18, 10, 15, 0),
+                diagnosis='Mild mastitis',
+                medication='Oxytetracycline',
+                withdrawal_days_recommended=3,
+                remarks='Improving after treatment.',
+            ),
+            BreedingLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                semen_id=semen.id,
+                insemination_date=date(2026, 5, 1),
+                expected_calving_date=date(2027, 2, 5),
+                status='Pregnant',
+            ),
+        ])
+        db.session.commit()
+
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.get(f'/api/v1/export/animal/{self.cow.id}/pdf')
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, 'application/pdf')
+            self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
+            self.assertTrue(response.data.startswith(b'%PDF'))
