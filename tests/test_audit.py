@@ -1,19 +1,18 @@
 import json
 from tests.base import BaseTestCase
-from app.models.user import User, Role
+from app.models.user import Role
 from app.models.livestock import Cow
 from app.models.audit import AuditLog
 from app import db
+from datetime import date
 
 class AuditTrailTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
-        self.farmer = User(username='farmer', password='password', role=Role.FARMER)
-        db.session.add(self.farmer)
-        db.session.commit()
+        self.farmer = self.create_user(username='farmer', password='password', role=Role.FARMER)
 
-        self.cow = Cow(tag_number='COW001', farmer_id=self.farmer.id)
+        self.cow = Cow(tag_number='COW001', date_of_birth=date(2022, 1, 1))
         db.session.add(self.cow)
         db.session.commit()
 

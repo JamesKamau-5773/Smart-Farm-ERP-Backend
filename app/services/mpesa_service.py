@@ -177,9 +177,6 @@ class MpesaService:
                     customer_id=customer_id,
                     ref_code=receipt_number,
                     desc=f"M-Pesa payment from {phone_number}"
-                    customer_id=customer_id,
-                    ref_code=receipt_number,
-                    desc=f"Automated M-Pesa STK Payment. ReqID: {merchant_request_id}"
                 )
 
                 # In production, you would trigger an SMS receipt to the farmer/customer here.

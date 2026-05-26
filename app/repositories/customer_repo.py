@@ -12,7 +12,7 @@ class CustomerRepository:
     def credit_account(customer_id: int, amount: float) -> Customer:
         """Reduces the customer's outstanding balance."""
         try:
-            customer = Customer.query.get(customer_id)
+            customer = db.session.get(Customer, customer_id)
             if customer:
                 # Assuming account_balance tracks what they owe. 
                 # A payment reduces this balance.

@@ -80,12 +80,3 @@ class FinanceService:
             db.session.rollback()
             print(f"Error in record_transaction: {e}")
             return None
-
-                description=desc
-            )
-            db.session.add(tx)
-            db.session.commit()
-            return tx
-        except Exception as e:
-            db.session.rollback()
-            raise Exception("Failed to record transaction.")

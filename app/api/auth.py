@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.services.auth_service import AuthService
 from app import limiter
 
@@ -15,7 +16,23 @@ def login():
     if not data or not data.get('username') or not data.get('password'):
         return jsonify({"error": "Username and password are required"}), 400
 
-    return AuthService.authenticate_user(data['username'], data['password'])
+    return AuthService.authenticate_user(
+        data['username'],
+        data['password'],
+        farm_id=data.get('farm_id'),
+    )
+
+
+@auth_bp.route('/switch-farm', methods=['POST'])
+@jwt_required()
+def switch_farm():
+    data = request.get_json() or {}
+    farm_id = data.get('farm_id')
+    if not farm_id:
+        return jsonify({"error": "farm_id is required"}), 400
+
+    user_id = get_jwt_identity()
+    return AuthService.switch_farm(user_id, farm_id)
 
 
 @auth_bp.route('/logout', methods=['POST'])

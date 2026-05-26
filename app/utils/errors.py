@@ -27,7 +27,10 @@ def register_error_handlers(app):
     def unhandled_exception(error):
         # Catch-all for standard Python exceptions
         if isinstance(error, HTTPException):
+            # Keep a consistent payload for 500s even when raised via abort(500).
+            if getattr(error, 'code', None) == 500:
+                return jsonify({"error": "An unexpected internal server error occurred.", "code": 500}), 500
             return jsonify({"error": error.description, "code": error.code}), error.code
-            
+        
         # Log the error trace securely here
         return jsonify({"error": "An unexpected internal server error occurred.", "code": 500}), 500

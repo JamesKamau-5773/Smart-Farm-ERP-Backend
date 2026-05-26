@@ -6,14 +6,14 @@ load_dotenv()
 
 class Config:
     try:
-        SECRET_KEY = os.environ['SECRET_KEY']
-        JWT_SECRET_KEY = os.environ['JWT_SECRET_KEY']
+        SECRET_KEY = os.environ.get('SECRET_KEY','dev-secret-key-991')
+        JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-mgmt-7734')
     except KeyError as e:
         raise RuntimeError(f"CRITICAL: Missing environment variable {e}")
     
     # Security & JWT
     
-    JWT_TOKEN_LOCATION = ['cookies']
+    JWT_TOKEN_LOCATION = ['cookies', 'headers']
     JWT_COOKIE_SECURE = os.environ.get('JWT_COOKIE_SECURE', 'False') == 'True'  # Enforce True in Production (HTTPS)
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
     JWT_COOKIE_CSRF_PROTECT = True
@@ -21,12 +21,17 @@ class Config:
     
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         'DATABASE_URL', 
-        'postgresql://postgres:password@localhost:5433/jivu_farm_db'
+        'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db'
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
     # Rate Limiting
     RATELIMIT_STORAGE_URI = os.environ.get('REDIS_URL','redis://localhost:6379/0')
     RATELIMIT_HEADERS_ENABLED = True
+
+    # Celery
+    CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/1')
+    CELERY_RESULT_BACKEND = os.environ.get('CELERY_RESULT_BACKEND', 'redis://localhost:6379/2')
 
     # --- ERP SPECIFIC ---
     # Ensure all numbers are handled with precision (MoE Compliance)
@@ -46,5 +51,6 @@ class Config:
 class TestConfig(Config):
     TESTING = True
     SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    RATELIMIT_STORAGE_URI = 'memory://'
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False

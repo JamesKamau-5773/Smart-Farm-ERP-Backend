@@ -4,7 +4,7 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 
 ## Features
 
-- **Role-Based Access Control**: Differentiated access for `FARMER` and `VET` roles using JWT.
+- **Role-Based Access Control**: Differentiated access for `FARMER`, `FARM_HAND`, `VET`, and `CUSTOMER` roles using JWT.
 - **Livestock Management**: Register and track individual cows.
 - **Clinical Records**: Log veterinary visits and manage milk withdrawal periods with a `hardlock` feature.
 - **Financial Management**: Record transactions, calculate daily unit production costs, and integrate with M-Pesa for billing.

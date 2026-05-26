@@ -12,7 +12,7 @@ class UserRepository:
     @staticmethod
     def get_by_id(user_id: int) -> User:
         """Fetches a user by their primary key."""
-        return User.query.get(user_id)
+        return db.session.get(User, user_id)
 
     @staticmethod
     def create_user(username: str, password: str, role: str) -> User:

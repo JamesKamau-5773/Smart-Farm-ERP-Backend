@@ -1,17 +1,21 @@
 import json
 from tests.base import BaseTestCase
-from app.models.user import User, Role
+from app.models.user import Role
 from app.models.finance import Transaction, TransactionType, TransactionCategory
 from app.models.supply import MilkLog
+from app.models.livestock import Cow
+from app.models.supply import MilkSession
 from app import db
 from datetime import datetime
+from datetime import date
 
 class FinanceTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
-        self.farmer = User(username='farmer', password='password', role=Role.FARMER)
-        db.session.add(self.farmer)
+        self.farmer = self.create_user(username='farmer', password='password', role=Role.FARMER)
+        self.cow = Cow(tag_number='COW001', date_of_birth=date(2022, 1, 1))
+        db.session.add(self.cow)
         db.session.commit()
 
     def _login(self, username, password):
@@ -24,13 +28,13 @@ class FinanceTestCase(BaseTestCase):
     def test_get_unit_cost(self):
         """Test calculating the unit cost of milk production."""
         # Log some expenses
-        tx1 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.FEED, amount=1000, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
-        tx2 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.MEDICINE, amount=500, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        tx1 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.FEED_PURCHASE, amount=1000, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        tx2 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.VET_FEES, amount=500, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
         db.session.add_all([tx1, tx2])
 
         # Log some milk production
-        milk_log1 = MilkLog(amount_liters=100, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
-        milk_log2 = MilkLog(amount_liters=50, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        milk_log1 = MilkLog(cow_id=self.cow.id, amount_liters=100, session=MilkSession.MORNING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        milk_log2 = MilkLog(cow_id=self.cow.id, amount_liters=50, session=MilkSession.EVENING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
         db.session.add_all([milk_log1, milk_log2])
         db.session.commit()
 
