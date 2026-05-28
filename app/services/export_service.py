@@ -37,7 +37,7 @@ class AnimalPassportService:
         events = []
 
         milk_logs = (
-            MilkLog.query.filter_by(cow_id=animal_id)
+            MilkLog.query.filter_by(cow_id=animal_id, tenant_id=tenant_id)
             .order_by(desc(MilkLog.timestamp))
             .all()
         )

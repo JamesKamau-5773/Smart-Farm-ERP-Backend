@@ -22,8 +22,32 @@ def _table_exists(conn, table_name: str) -> bool:
     return sa.inspect(conn).has_table(table_name)
 
 
+def _column_exists(conn, table_name: str, column_name: str) -> bool:
+    result = conn.execute(
+        sa.text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table
+              AND column_name = :column
+            """
+        ),
+        {"table": table_name, "column": column_name},
+    ).scalar()
+    return result is not None
+
+
+def _get_default_tenant_id(conn) -> int:
+    tenant_id = conn.execute(sa.text('SELECT id FROM tenants ORDER BY id LIMIT 1')).scalar()
+    if tenant_id is None:
+        raise RuntimeError('Cannot migrate inventory_items without at least one tenant row.')
+    return tenant_id
+
+
 def upgrade():
     conn = op.get_bind()
+    default_tenant_id = _get_default_tenant_id(conn) if _table_exists(conn, 'tenants') else None
 
     op.create_table(
         'inventory_items',
@@ -61,11 +85,23 @@ def upgrade():
 
     item_map = {}
     if _table_exists(conn, 'store_items'):
-        old_items = conn.execute(
-            sa.text(
-                "SELECT id, tenant_id, name, category, unit_of_measure, current_stock, min_threshold FROM store_items"
-            )
-        ).mappings().all()
+        has_tenant_id = _column_exists(conn, 'store_items', 'tenant_id')
+        if has_tenant_id:
+            old_items = conn.execute(
+                sa.text(
+                    "SELECT id, tenant_id, name, category, unit_of_measure, current_stock, min_threshold FROM store_items"
+                )
+            ).mappings().all()
+        else:
+            old_items = conn.execute(
+                sa.text(
+                    "SELECT id, name, category, unit_of_measure, current_stock, min_threshold FROM store_items"
+                )
+            ).mappings().all()
+
+        if not has_tenant_id and default_tenant_id is None:
+            raise RuntimeError('Cannot infer tenant_id for legacy store_items rows.')
+
         for row in old_items:
             new_id = row['id']
             item_map[row['id']] = new_id
@@ -78,7 +114,7 @@ def upgrade():
                 ),
                 {
                     'id': new_id,
-                    'tenant_id': row['tenant_id'],
+                    'tenant_id': row['tenant_id'] if has_tenant_id else default_tenant_id,
                     'name': row['name'],
                     'category': row['category'],
                     'unit': row['unit_of_measure'],

@@ -25,6 +25,10 @@ def _get_tenant_id_from_claims():
 @role_required(Role.FARM_HAND, Role.FARMER) # Only Farm Hands and Farmer log the daily yield
 def log_milk(cow_id):
     user_id = get_jwt_identity()
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant in token."}), 400
+
     data = request.get_json()
     
     amount = data.get('amount')
@@ -40,7 +44,7 @@ def log_milk(cow_id):
     except ValueError:
         return jsonify({"error": "Amount must be a valid number."}), 400
 
-    return ProductionService.log_daily_yield(cow_id, amount_float, session, user_id)
+    return ProductionService.log_daily_yield(cow_id, amount_float, session, user_id, tenant_id)
 
 
 @operations_bp.route('/semen-inventory', methods=['POST'])

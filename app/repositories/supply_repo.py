@@ -8,10 +8,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 class MilkRepository:
     @staticmethod
-    def create_log(cow_id: int, amount: float, session: str, recorded_by: int, is_saleable: bool, is_anomaly: bool, butterfat_pct=None) -> MilkLog:
+    def create_log(cow_id: int, amount: float, session: str, recorded_by: int, tenant_id: int, is_saleable: bool, is_anomaly: bool, butterfat_pct=None) -> MilkLog:
         """Logs a milking session."""
         try:
             log = MilkLog(
+                tenant_id=tenant_id,
                 cow_id=cow_id,
                 amount_liters=amount,
                 session=session,
@@ -28,26 +29,32 @@ class MilkRepository:
             raise Exception("Failed, Database error while saving milk log.")
 
     @staticmethod
-    def get_cow_average_yield(cow_id: int, days: int = 7) -> float:
+    def get_cow_average_yield(cow_id: int, days: int = 7, tenant_id: int = None) -> float:
         """Calculates the average yield for a specific cow over a rolling window."""
         start_date = datetime.utcnow() - timedelta(days=days)
-        result = db.session.query(func.avg(MilkLog.amount_liters)).filter(
+        query = db.session.query(func.avg(MilkLog.amount_liters)).filter(
             MilkLog.cow_id == cow_id,
             MilkLog.timestamp >= start_date
-        ).scalar()
+        )
+        if tenant_id is not None:
+            query = query.filter(MilkLog.tenant_id == tenant_id)
+        result = query.scalar()
         
         # If no previous records exist, return the average as 0
         return float(result) if result else 0.0
 
     @staticmethod
-    def get_cow_average_butterfat(cow_id: int, days: int = 30) -> float:
+    def get_cow_average_butterfat(cow_id: int, days: int = 30, tenant_id: int = None) -> float:
         """Calculates the average butterfat percentage for a specific cow over a rolling window."""
         start_date = datetime.utcnow() - timedelta(days=days)
-        result = db.session.query(func.avg(MilkLog.butterfat_pct)).filter(
+        query = db.session.query(func.avg(MilkLog.butterfat_pct)).filter(
             MilkLog.cow_id == cow_id,
             MilkLog.timestamp >= start_date,
             MilkLog.butterfat_pct.isnot(None),
-        ).scalar()
+        )
+        if tenant_id is not None:
+            query = query.filter(MilkLog.tenant_id == tenant_id)
+        result = query.scalar()
 
         return float(result) if result is not None else 0.0
 

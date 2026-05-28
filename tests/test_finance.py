@@ -33,8 +33,8 @@ class FinanceTestCase(BaseTestCase):
         db.session.add_all([tx1, tx2])
 
         # Log some milk production
-        milk_log1 = MilkLog(cow_id=self.cow.id, amount_liters=100, session=MilkSession.MORNING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
-        milk_log2 = MilkLog(cow_id=self.cow.id, amount_liters=50, session=MilkSession.EVENING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        milk_log1 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=100, session=MilkSession.MORNING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        milk_log2 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=50, session=MilkSession.EVENING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
         db.session.add_all([milk_log1, milk_log2])
         db.session.commit()
 

@@ -56,6 +56,7 @@ class OperationsTestCase(BaseTestCase):
 
         db.session.add_all([
             MilkLog(
+                tenant_id=self.tenant.id,
                 cow_id=self.cow.id,
                 amount_liters=18.25,
                 session='Morning',

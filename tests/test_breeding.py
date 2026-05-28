@@ -142,6 +142,7 @@ class BreedingTestCase(BaseTestCase):
             self.assertEqual(update_response.status_code, 200)
 
             milk_log = MilkLog(
+                tenant_id=self.tenant.id,
                 cow_id=self.cow.id,
                 amount_liters=18.0,
                 session=MilkSession.MORNING,

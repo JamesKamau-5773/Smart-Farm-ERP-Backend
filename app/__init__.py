@@ -54,6 +54,9 @@ def create_app(config_class=Config):
     from app.api.finance import finance_bp
     from app.api.hr import hr_bp
     from app.api.tenant import tenant_bp
+    from app.api.feed import feed_bp
+    from app.api.dashboard import dashboard_bp
+    from app.api.herdsman import herdsman_bp
     
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
@@ -68,6 +71,9 @@ def create_app(config_class=Config):
     app.register_blueprint(finance_bp, url_prefix='/api/finance')
     app.register_blueprint(hr_bp, url_prefix='/api/hr')
     app.register_blueprint(tenant_bp, url_prefix='/api/tenant')
+    app.register_blueprint(feed_bp)
+    app.register_blueprint(dashboard_bp)
+    app.register_blueprint(herdsman_bp)
 
     @app.route('/health', methods=['GET'])
     def health_check():

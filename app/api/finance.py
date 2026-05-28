@@ -1,9 +1,10 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from flask_jwt_extended import jwt_required
 from app.services.mpesa_service import MpesaService
 from app.services.finance_service import FinanceService
 from app.utils.decorators import role_required
 from app.models.user import Role
+from app.utils.jwt_payload import parse_public_int_id
 
 finance_bp = Blueprint('finance', __name__)
 
@@ -13,7 +14,15 @@ finance_bp = Blueprint('finance', __name__)
 def get_unit_cost():
     """Retrieves the real-time cost of production per liter."""
     # Target date can be passed as a query parameter in future iterations
-    return FinanceService.calculate_daily_unit_cost()
+    tenant_id = None
+    tenant_public_id = getattr(g, 'tenant_id', None)
+    if tenant_public_id:
+        try:
+            tenant_id = parse_public_int_id(tenant_public_id, 'tenant_')
+        except (TypeError, ValueError):
+            tenant_id = None
+
+    return FinanceService.calculate_daily_unit_cost(tenant_id=tenant_id)
 
 @finance_bp.route('/billing/stk-push', methods=['POST'])
 @jwt_required()

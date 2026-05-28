@@ -7,7 +7,7 @@ class ProductionService:
     ANOMALY_THRESHOLD_PERCENT = 0.15 
 
     @staticmethod
-    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int):
+    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int):
         """Processes the milking entry, applies intelligence, and securely logs it."""
         livestock_id = cow_id
         
@@ -24,7 +24,7 @@ class ProductionService:
         is_saleable = not livestock.is_hardlocked
 
         # 3. Anomaly Detection (The 7-Day Rolling Average)
-        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7)
+        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7, tenant_id=tenant_id)
         is_anomaly = False
         warning_msg = None
 
@@ -41,6 +41,7 @@ class ProductionService:
             amount=amount,
             session=session,
             recorded_by=user_id,
+            tenant_id=tenant_id,
             is_saleable=is_saleable,
             is_anomaly=is_anomaly
         )

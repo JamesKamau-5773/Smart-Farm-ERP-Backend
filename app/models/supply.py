@@ -233,6 +233,7 @@ class MilkLog(db.Model):
     __tablename__ = 'milk_logs'
     
     id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False)
     amount_liters = db.Column(db.Numeric(10, 2), nullable=False)
     session = db.Column(db.String(20), nullable=False) 

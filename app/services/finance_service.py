@@ -3,27 +3,40 @@ from app.models.finance import Transaction, TransactionType, TransactionCategory
 from app.models.supply import MilkLog
 from datetime import datetime, timedelta
 from sqlalchemy import func
-from flask import jsonify
+from flask import jsonify, g
+from app.utils.jwt_payload import parse_public_int_id
 from .audit_service import record_audit
 
 class FinanceService:
     @staticmethod
-    def calculate_daily_unit_cost(target_date: datetime.date = None):
+    def calculate_daily_unit_cost(target_date: datetime.date = None, tenant_id: int = None):
         """
         Calculates the real cost of production per liter for a specific day.
         """
         if target_date is None:
             target_date = datetime.utcnow().date()
+
+        if tenant_id is None:
+            tenant_public_id = getattr(g, 'tenant_id', None)
+            if tenant_public_id:
+                try:
+                    tenant_id = parse_public_int_id(tenant_public_id, 'tenant_')
+                except (TypeError, ValueError):
+                    tenant_id = None
             
         start_of_day = datetime.combine(target_date, datetime.min.time())
         end_of_day = start_of_day + timedelta(days=1)
 
         # 1. Calculate Total Saleable Volume (The Denominator)
-        saleable_volume = db.session.query(func.sum(MilkLog.amount_liters)).filter(
+        saleable_query = db.session.query(func.sum(MilkLog.amount_liters)).filter(
             MilkLog.timestamp >= start_of_day,
             MilkLog.timestamp < end_of_day,
             MilkLog.is_saleable == True
-        ).scalar() or 0.0
+        )
+        if tenant_id is not None:
+            saleable_query = saleable_query.filter(MilkLog.tenant_id == tenant_id)
+
+        saleable_volume = saleable_query.scalar() or 0.0
 
         if float(saleable_volume) == 0.0:
             return jsonify({
