@@ -1,5 +1,5 @@
 from app import db
-from datetime import datetime
+from datetime import datetime, timezone
 
 class TransactionType:
     REVENUE = "Revenue"
@@ -37,7 +37,7 @@ class Transaction(db.Model):
     # M-Pesa tracking
     reference_code = db.Column(db.String(50), unique=True, nullable=True, index=True) 
     
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     description = db.Column(db.String(255), nullable=True)
 
     # Optional Foreign Keys for granular auditing

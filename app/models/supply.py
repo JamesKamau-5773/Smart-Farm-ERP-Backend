@@ -1,5 +1,5 @@
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app import db
 from sqlalchemy import Computed
@@ -25,7 +25,7 @@ class InventoryItem(db.Model):
     protein_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     fiber_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     cost_per_kg = db.Column(db.Numeric(10, 2), nullable=False, default=0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     transactions = db.relationship(
         'InventoryTransaction',
@@ -94,7 +94,7 @@ class InventoryTransaction(db.Model):
     inventory_batch_id = db.Column(db.Integer, db.ForeignKey('inventory_batches.id'), nullable=True, index=True)
     reference_note = db.Column(db.Text, nullable=True)
     logged_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
-    transaction_date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
+    transaction_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     __table_args__ = (
         db.CheckConstraint("transaction_type IN ('IN', 'OUT')", name='ck_inventory_transactions_type_valid'),
@@ -146,7 +146,7 @@ class InventoryBatch(db.Model):
     cost_per_kg = db.Column(db.Numeric(10, 2), nullable=False)
     quality_rating = db.Column(db.String(20), nullable=True)
     actual_protein_percentage = db.Column(db.Numeric(5, 2), nullable=False)
-    received_date = db.Column(db.Date, nullable=False, default=lambda: datetime.utcnow().date())
+    received_date = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
 
     transactions = db.relationship(
         'InventoryTransaction',
@@ -168,7 +168,7 @@ class ExpenseLedger(db.Model):
     category = db.Column(db.String(50), nullable=False)
     description = db.Column(db.Text, nullable=False)
     amount = db.Column(db.Numeric(12, 2), nullable=False)
-    expense_date = db.Column(db.Date, nullable=False, default=lambda: datetime.utcnow().date())
+    expense_date = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
 
 
 class FeedRecipe(db.Model):
@@ -237,7 +237,7 @@ class MilkLog(db.Model):
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False)
     amount_liters = db.Column(db.Numeric(10, 2), nullable=False)
     session = db.Column(db.String(20), nullable=False) 
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     butterfat_pct = db.Column(db.Numeric(5, 2), nullable=True)
     

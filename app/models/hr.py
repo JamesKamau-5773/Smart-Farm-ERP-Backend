@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app import db
 
@@ -17,7 +17,7 @@ class Employee(db.Model):
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     id_card_doc_url = db.Column(db.String(255), nullable=True)
     contract_doc_url = db.Column(db.String(255), nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     payroll_entries = db.relationship('Payroll', backref='employee', lazy=True)
 
@@ -46,7 +46,7 @@ class Payroll(db.Model):
     payment_date = db.Column(db.Date, nullable=False)
     status = db.Column(db.String(20), default=PayrollStatus.PENDING, nullable=False)
     notes = db.Column(db.Text, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         db.CheckConstraint("status IN ('Pending', 'Paid')", name='ck_payroll_status_valid'),

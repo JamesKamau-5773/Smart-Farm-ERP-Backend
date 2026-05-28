@@ -6,7 +6,7 @@ Create Date: 2026-05-26 00:00:00.000000
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from alembic import op
 import sqlalchemy as sa
@@ -120,7 +120,7 @@ def upgrade():
                     'unit': row['unit_of_measure'],
                     'current_qty': row['current_stock'],
                     'minimum_threshold': row['min_threshold'],
-                    'created_at': datetime.utcnow(),
+                    'created_at': datetime.now(timezone.utc),
                 },
             )
 

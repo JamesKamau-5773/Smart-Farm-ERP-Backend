@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from app.models.supply import InventoryItem, MilkLog, InventoryTransaction
 from app import db
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -31,7 +31,7 @@ class MilkRepository:
     @staticmethod
     def get_cow_average_yield(cow_id: int, days: int = 7, tenant_id: int = None) -> float:
         """Calculates the average yield for a specific cow over a rolling window."""
-        start_date = datetime.utcnow() - timedelta(days=days)
+        start_date = datetime.now(timezone.utc) - timedelta(days=days)
         query = db.session.query(func.avg(MilkLog.amount_liters)).filter(
             MilkLog.cow_id == cow_id,
             MilkLog.timestamp >= start_date
@@ -46,7 +46,7 @@ class MilkRepository:
     @staticmethod
     def get_cow_average_butterfat(cow_id: int, days: int = 30, tenant_id: int = None) -> float:
         """Calculates the average butterfat percentage for a specific cow over a rolling window."""
-        start_date = datetime.utcnow() - timedelta(days=days)
+        start_date = datetime.now(timezone.utc) - timedelta(days=days)
         query = db.session.query(func.avg(MilkLog.butterfat_pct)).filter(
             MilkLog.cow_id == cow_id,
             MilkLog.timestamp >= start_date,

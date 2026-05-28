@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from flask import jsonify
@@ -133,7 +133,7 @@ class VetVisitService:
 
         visit.follow_up_required = bool(data.get('follow_up_required', False))
         visit.follow_up_status = 'Completed'
-        visit.follow_up_completed_at = datetime.utcnow()
+        visit.follow_up_completed_at = datetime.now(timezone.utc)
         VetVisitRepository.save()
 
         return jsonify({'message': 'Follow-up marked as completed.', 'visit': VetVisitService._serialize_visit(visit)}), 200

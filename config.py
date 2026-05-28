@@ -4,10 +4,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _secret_or_fallback(env_name: str, fallback: str, min_length: int = 32) -> str:
+    value = os.environ.get(env_name) or fallback
+    if len(value) < min_length:
+        value = (value + fallback * 2)[:min_length]
+    return value
+
 class Config:
     try:
-        SECRET_KEY = os.environ.get('SECRET_KEY','dev-secret-key-991')
-        JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'jwt-mgmt-7734')
+        SECRET_KEY = _secret_or_fallback('SECRET_KEY', 'dev-secret-key-991-super-long')
+        JWT_SECRET_KEY = _secret_or_fallback('JWT_SECRET_KEY', 'jwt-mgmt-7734-super-long-secret-key')
     except KeyError as e:
         raise RuntimeError(f"CRITICAL: Missing environment variable {e}")
     

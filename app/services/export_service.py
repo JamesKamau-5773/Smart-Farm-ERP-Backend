@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import desc
 
@@ -113,5 +113,5 @@ class AnimalPassportService:
         return {
             'animal': animal_context,
             'events': events,
-            'generated_at': datetime.utcnow().strftime('%d %b %Y, %H:%M UTC'),
+            'generated_at': datetime.now(timezone.utc).strftime('%d %b %Y, %H:%M UTC'),
         }

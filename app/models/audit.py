@@ -1,5 +1,5 @@
 from app import db
-from datetime import datetime
+from datetime import datetime, timezone
 
 class AuditLog(db.Model):
     """An immutable log of critical system actions."""
@@ -21,6 +21,6 @@ class AuditLog(db.Model):
     
     # Context
     ip_address = db.Column(db.String(45), nullable=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
     user = db.relationship('User', backref='actions_logged')

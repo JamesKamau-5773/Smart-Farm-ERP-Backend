@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from flask import Blueprint, request, jsonify, current_app, g
@@ -41,7 +41,7 @@ def get_command_center_summary():
     if tenant_id != current_tenant_id:
         return jsonify({"error": "Tenant context mismatch."}), 403
 
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     start_of_day = datetime.combine(today, datetime.min.time())
     next_day = start_of_day + timedelta(days=1)
 

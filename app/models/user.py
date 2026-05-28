@@ -1,5 +1,5 @@
 from app import db, bcrypt
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class Role:
@@ -22,7 +22,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(128), nullable=False)
     role = db.Column(db.String(20), default=Role.FARMER)
     is_active = db.Column(db.Boolean, default=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     def set_password(self, password):
         self.password_hash = bcrypt.generate_password_hash(

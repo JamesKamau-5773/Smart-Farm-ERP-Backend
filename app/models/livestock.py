@@ -1,5 +1,5 @@
 from app import db
-from datetime import datetime
+from datetime import datetime, timezone
 
 class BreedStatus:
     FOUNDATION = "Foundation"
@@ -126,7 +126,7 @@ class MedicalRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False)
     vet_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
-    visit_date = db.Column(db.DateTime, default=datetime.utcnow)
+    visit_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     diagnosis = db.Column(db.Text, nullable=False)
     medication = db.Column(db.String(255), nullable=True)
@@ -155,8 +155,8 @@ class VetVisit(db.Model):
     follow_up_required = db.Column(db.Boolean, nullable=False, default=False)
     follow_up_date = db.Column(db.Date, nullable=True)
     follow_up_status = db.Column(db.String(20), nullable=False, default='Not Required')
-    follow_up_completed_at = db.Column(db.DateTime, nullable=True)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    follow_up_completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         db.CheckConstraint(
@@ -198,7 +198,7 @@ class DailyTaskLog(db.Model):
     herdsman_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='RESTRICT'), nullable=False, index=True)
     issue_tag = db.Column(db.String(100), nullable=False, default='None')
     status = db.Column(db.String(20), nullable=True)
-    completed_at = db.Column(db.DateTime, default=datetime.utcnow)
+    completed_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     herdsman = db.relationship('User', backref=db.backref('daily_task_logs', lazy=True))
 

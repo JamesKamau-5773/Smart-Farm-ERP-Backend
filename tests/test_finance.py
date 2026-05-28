@@ -6,8 +6,7 @@ from app.models.supply import MilkLog
 from app.models.livestock import Cow
 from app.models.supply import MilkSession
 from app import db
-from datetime import datetime
-from datetime import date
+from datetime import datetime, date, timezone
 
 class FinanceTestCase(BaseTestCase):
 
@@ -28,13 +27,13 @@ class FinanceTestCase(BaseTestCase):
     def test_get_unit_cost(self):
         """Test calculating the unit cost of milk production."""
         # Log some expenses
-        tx1 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.FEED_PURCHASE, amount=1000, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
-        tx2 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.VET_FEES, amount=500, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        tx1 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.FEED_PURCHASE, amount=1000, recorded_by=self.farmer.id, timestamp=datetime.now(timezone.utc))
+        tx2 = Transaction(transaction_type=TransactionType.EXPENSE, category=TransactionCategory.VET_FEES, amount=500, recorded_by=self.farmer.id, timestamp=datetime.now(timezone.utc))
         db.session.add_all([tx1, tx2])
 
         # Log some milk production
-        milk_log1 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=100, session=MilkSession.MORNING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
-        milk_log2 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=50, session=MilkSession.EVENING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.utcnow())
+        milk_log1 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=100, session=MilkSession.MORNING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.now(timezone.utc))
+        milk_log2 = MilkLog(tenant_id=self.tenant.id, cow_id=self.cow.id, amount_liters=50, session=MilkSession.EVENING, is_saleable=True, recorded_by=self.farmer.id, timestamp=datetime.now(timezone.utc))
         db.session.add_all([milk_log1, milk_log2])
         db.session.commit()
 

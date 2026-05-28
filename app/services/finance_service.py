@@ -1,7 +1,7 @@
 from app import db
 from app.models.finance import Transaction, TransactionType, TransactionCategory
 from app.models.supply import MilkLog
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
 from flask import jsonify, g
 from app.utils.jwt_payload import parse_public_int_id
@@ -14,7 +14,7 @@ class FinanceService:
         Calculates the real cost of production per liter for a specific day.
         """
         if target_date is None:
-            target_date = datetime.utcnow().date()
+            target_date = datetime.now(timezone.utc).date()
 
         if tenant_id is None:
             tenant_public_id = getattr(g, 'tenant_id', None)
