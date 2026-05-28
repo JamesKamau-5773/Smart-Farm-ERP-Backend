@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app import db
+from sqlalchemy import Computed
 
 class ItemCategory:
     FEED = "Feed"
@@ -20,6 +21,10 @@ class InventoryItem(db.Model):
     unit = db.Column(db.String(20), nullable=False)
     current_qty = db.Column(db.Numeric(10, 2), nullable=False, default=0)
     minimum_threshold = db.Column(db.Numeric(10, 2), nullable=False)
+    energy_mj_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    protein_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    fiber_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    cost_per_kg = db.Column(db.Numeric(10, 2), nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     transactions = db.relationship(
@@ -80,6 +85,13 @@ class InventoryTransaction(db.Model):
     item_id = db.Column(db.Integer, db.ForeignKey('inventory_items.id'), nullable=False, index=True)
     transaction_type = db.Column(db.String(10), nullable=False)
     quantity = db.Column(db.Numeric(10, 2), nullable=False)
+    unit_cost = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    total_transaction_value = db.Column(
+        db.Numeric(12, 2),
+        Computed('quantity * unit_cost', persisted=True),
+        nullable=False,
+    )
+    inventory_batch_id = db.Column(db.Integer, db.ForeignKey('inventory_batches.id'), nullable=True, index=True)
     reference_note = db.Column(db.Text, nullable=True)
     logged_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     transaction_date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False, index=True)
@@ -121,6 +133,91 @@ class InventoryTransaction(db.Model):
     @notes.setter
     def notes(self, value):
         self.reference_note = value
+
+
+class InventoryBatch(db.Model):
+    __tablename__ = 'inventory_batches'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey('inventory_items.id', ondelete='RESTRICT'), nullable=False, index=True)
+    supplier_name = db.Column(db.String(100), nullable=False)
+    received_quantity_kg = db.Column(db.Numeric(10, 2), nullable=False)
+    cost_per_kg = db.Column(db.Numeric(10, 2), nullable=False)
+    quality_rating = db.Column(db.String(20), nullable=True)
+    actual_protein_percentage = db.Column(db.Numeric(5, 2), nullable=False)
+    received_date = db.Column(db.Date, nullable=False, default=lambda: datetime.utcnow().date())
+
+    transactions = db.relationship(
+        'InventoryTransaction',
+        backref=db.backref('inventory_batch', lazy=True),
+        lazy=True,
+    )
+
+    __table_args__ = (
+        db.CheckConstraint("quality_rating IN ('Excellent', 'Standard', 'Poor')", name='ck_inventory_batches_quality_rating_valid'),
+        db.UniqueConstraint('tenant_id', 'item_id', 'supplier_name', 'received_date', name='uq_tenant_item_supplier_date'),
+    )
+
+
+class ExpenseLedger(db.Model):
+    __tablename__ = 'expense_ledger'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    category = db.Column(db.String(50), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    amount = db.Column(db.Numeric(12, 2), nullable=False)
+    expense_date = db.Column(db.Date, nullable=False, default=lambda: datetime.utcnow().date())
+
+
+class FeedRecipe(db.Model):
+    __tablename__ = 'feed_recipes'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    recipe_name = db.Column(db.String(100), nullable=False)
+    target_protein_percentage = db.Column(db.Numeric(5, 2), nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+
+    ingredients = db.relationship(
+        'RecipeIngredient',
+        backref=db.backref('recipe', lazy=True),
+        lazy=True,
+        cascade='all, delete-orphan',
+    )
+
+
+class RecipeIngredient(db.Model):
+    __tablename__ = 'recipe_ingredients'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    recipe_id = db.Column(db.Integer, db.ForeignKey('feed_recipes.id', ondelete='CASCADE'), nullable=False, index=True)
+    inventory_item_id = db.Column(db.Integer, db.ForeignKey('inventory_items.id', ondelete='RESTRICT'), nullable=False, index=True)
+    inclusion_percentage = db.Column(db.Numeric(5, 2), nullable=False)
+
+    inventory_item = db.relationship('InventoryItem', backref=db.backref('recipe_ingredients', lazy=True))
+
+    __table_args__ = (
+        db.UniqueConstraint('recipe_id', 'inventory_item_id', name='uq_recipe_ingredient'),
+    )
+
+
+class FarmMeasurementUnit(db.Model):
+    __tablename__ = 'farm_measurement_units'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    item_id = db.Column(db.Integer, db.ForeignKey('inventory_items.id', ondelete='RESTRICT'), nullable=False, index=True)
+    unit_name = db.Column(db.String(50), nullable=False)
+    kg_equivalent = db.Column(db.Numeric(5, 2), nullable=False)
+
+    inventory_item = db.relationship('InventoryItem', backref=db.backref('measurement_units', lazy=True))
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'item_id', 'unit_name', name='uq_tenant_item_unit'),
+    )
 
 
 # Backwards-compatible aliases while the codebase migrates off the old names.

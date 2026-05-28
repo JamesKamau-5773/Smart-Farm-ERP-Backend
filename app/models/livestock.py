@@ -39,6 +39,25 @@ class Cow(db.Model):
     vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True)
 
 
+class AnimalYieldTarget(db.Model):
+    __tablename__ = 'animal_yield_targets'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    animal_id = db.Column(db.Integer, db.ForeignKey('cows.id', ondelete='CASCADE'), nullable=False, index=True)
+    target_liters = db.Column(db.Numeric(5, 2), nullable=False)
+    times_to_feed_daily = db.Column(db.Integer, default=2, nullable=False)
+    base_herd_feed_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    milking_topup_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    status = db.Column(db.String(20), default='Active', nullable=False)
+
+    cow = db.relationship('Cow', backref=db.backref('yield_targets', lazy=True))
+
+    __table_args__ = (
+        db.CheckConstraint('times_to_feed_daily IN (2, 3, 4)', name='ck_animal_yield_targets_times_to_feed_daily_valid'),
+    )
+
+
 class SemenInventory(db.Model):
     __tablename__ = 'semen_inventory'
 
@@ -153,3 +172,36 @@ class VetVisit(db.Model):
     @property
     def livestock_id(self):
         return self.animal_id
+
+
+class HerdsmanRoutineTemplate(db.Model):
+    __tablename__ = 'herdsman_routine_template'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    start_time = db.Column(db.Time, nullable=False)
+    end_time = db.Column(db.Time, nullable=False)
+    task_title = db.Column(db.String(100), nullable=False)
+    task_description = db.Column(db.Text, nullable=False)
+    display_order = db.Column(db.Integer, nullable=False)
+    is_active = db.Column(db.Boolean, default=True)
+
+    task_logs = db.relationship('DailyTaskLog', backref=db.backref('routine', lazy=True), lazy=True)
+
+
+class DailyTaskLog(db.Model):
+    __tablename__ = 'daily_task_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    routine_id = db.Column(db.Integer, db.ForeignKey('herdsman_routine_template.id', ondelete='RESTRICT'), nullable=False, index=True)
+    herdsman_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='RESTRICT'), nullable=False, index=True)
+    issue_tag = db.Column(db.String(100), nullable=False, default='None')
+    status = db.Column(db.String(20), nullable=True)
+    completed_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    herdsman = db.relationship('User', backref=db.backref('daily_task_logs', lazy=True))
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('Completed', 'Deviated')", name='ck_daily_task_logs_status_valid'),
+    )

@@ -72,6 +72,10 @@ class InventoryRepository:
         unit: str,
         current_qty=0,
         minimum_threshold=0,
+        energy_mj_per_kg=0,
+        protein_grams_per_kg=0,
+        fiber_grams_per_kg=0,
+        cost_per_kg=0,
     ) -> InventoryItem:
         try:
             item = InventoryItem(
@@ -81,6 +85,10 @@ class InventoryRepository:
                 unit=unit,
                 current_qty=current_qty,
                 minimum_threshold=minimum_threshold,
+                energy_mj_per_kg=energy_mj_per_kg,
+                protein_grams_per_kg=protein_grams_per_kg,
+                fiber_grams_per_kg=fiber_grams_per_kg,
+                cost_per_kg=cost_per_kg,
             )
             db.session.add(item)
             db.session.commit()
@@ -95,6 +103,8 @@ class InventoryRepository:
         item_id: str,
         transaction_type: str,
         quantity,
+        unit_cost=None,
+        inventory_batch_id: int = None,
         logged_by: int = None,
         reference_note: str = None,
         tenant_id: int = None,
@@ -109,6 +119,8 @@ class InventoryRepository:
             if transaction_type not in {"IN", "OUT"}:
                 raise ValueError("transaction_type must be IN or OUT.")
 
+            unit_cost_value = Decimal(str(unit_cost if unit_cost is not None else (item.cost_per_kg or 0)))
+
             if transaction_type == "OUT":
                 if item.current_qty < quantity_value:
                     raise ValueError(f"Insufficient stock for {item.name}. Available: {item.current_qty} {item.unit}")
@@ -120,6 +132,8 @@ class InventoryRepository:
                 item_id=item.id,
                 transaction_type=transaction_type,
                 quantity=quantity_value,
+                unit_cost=unit_cost_value,
+                inventory_batch_id=inventory_batch_id,
                 reference_note=reference_note,
                 logged_by=logged_by,
             )
