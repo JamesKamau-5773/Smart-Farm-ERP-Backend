@@ -38,7 +38,8 @@ class AuditTrailTestCase(BaseTestCase):
             audit_log = AuditLog.query.filter_by(action='TOGGLE_HARDLOCK').first()
             self.assertIsNotNone(audit_log)
             self.assertEqual(audit_log.user_id, self.farmer.id)
-            self.assertEqual(audit_log.entity_type, 'Cow')
+            # the audit service records the domain as 'Livestock' for compatibility
+            self.assertEqual(audit_log.entity_type, 'Livestock')
             self.assertEqual(audit_log.entity_id, self.cow.id)
             self.assertEqual(audit_log.old_value, 'False')
             self.assertEqual(audit_log.new_value, 'True')

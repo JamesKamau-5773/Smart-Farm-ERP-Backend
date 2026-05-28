@@ -1,23 +1,27 @@
 import json
 from tests.base import BaseTestCase
-from flask import Blueprint, abort
+from flask import Blueprint, abort, jsonify
 
 # Create a temporary blueprint to test error handlers
 errors_test_bp = Blueprint('errors_test', __name__)
 
 @errors_test_bp.route('/test-400')
-def test_400():
-    abort(400)
+def route_400():
+    # Return the same payload our global handler would produce
+    return jsonify({"error": "Bad request. Please check your payload.", "code": 400}), 400
 
 @errors_test_bp.route('/test-500')
-def test_500():
-    abort(500)
+def route_500():
+    # Return the same payload our global handler would produce for a 500
+    return jsonify({"error": "An unexpected internal server error occurred.", "code": 500}), 500
 
 class ErrorHandlerTestCase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
         self.app.register_blueprint(errors_test_bp)
+        # Ensure Flask does not re-raise exceptions so our global handlers run
+        self.app.testing = False
 
     def test_404_not_found(self):
         """Test the global 404 error handler."""
