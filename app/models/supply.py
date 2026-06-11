@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app import db
-from sqlalchemy import Computed
+from sqlalchemy import Computed, ForeignKeyConstraint, event, inspect
 
 class ItemCategory:
     FEED = "Feed"
@@ -202,6 +202,246 @@ class RecipeIngredient(db.Model):
     __table_args__ = (
         db.UniqueConstraint('recipe_id', 'inventory_item_id', name='uq_recipe_ingredient'),
     )
+
+
+class Ingredient(db.Model):
+    """Catalog of feed ingredients used by formulation templates and batches."""
+    __tablename__ = 'ingredients'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    current_cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
+    stock_quantity = db.Column(db.Numeric(14, 3), nullable=False, default=0)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'name', name='uq_ingredients_tenant_name'),
+        db.UniqueConstraint('tenant_id', 'id', name='uq_ingredients_tenant_id'),
+        db.CheckConstraint('current_cost_per_kg >= 0', name='ck_ingredients_current_cost_non_negative'),
+        db.CheckConstraint('stock_quantity >= 0', name='ck_ingredients_stock_quantity_non_negative'),
+        db.Index('ix_ingredients_tenant_name', 'tenant_id', 'name'),
+    )
+
+
+class FeedFormula(db.Model):
+    """Reusable feed formulation template created per tenant."""
+    __tablename__ = 'feed_formulas'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = db.Column(db.String(255), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    ingredients = db.relationship(
+        'FormulaIngredient',
+        backref=db.backref('formula', lazy=True),
+        lazy=True,
+        cascade='all, delete-orphan',
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'name', name='uq_feed_formulas_tenant_name'),
+        db.UniqueConstraint('tenant_id', 'id', name='uq_feed_formulas_tenant_id'),
+        db.Index('ix_feed_formulas_tenant_created_at', 'tenant_id', 'created_at'),
+    )
+
+
+class FormulaIngredient(db.Model):
+    """Tenant-safe recipe mapping between formulas and ingredients."""
+    __tablename__ = 'formula_ingredients'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    formula_id = db.Column(db.Integer, nullable=False, index=True)
+    ingredient_id = db.Column(db.Integer, nullable=False, index=True)
+    default_weight = db.Column(db.Numeric(14, 3), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    ingredient = db.relationship(
+        'Ingredient',
+        primaryjoin='and_(FormulaIngredient.tenant_id == Ingredient.tenant_id, FormulaIngredient.ingredient_id == Ingredient.id)',
+        foreign_keys='[FormulaIngredient.tenant_id, FormulaIngredient.ingredient_id]',
+        overlaps='formula,ingredients',
+        lazy=True,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['tenant_id', 'formula_id'],
+            ['feed_formulas.tenant_id', 'feed_formulas.id'],
+            ondelete='CASCADE',
+            name='fk_formula_ingredients_formula_tenant',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'ingredient_id'],
+            ['ingredients.tenant_id', 'ingredients.id'],
+            ondelete='RESTRICT',
+            name='fk_formula_ingredients_ingredient_tenant',
+        ),
+        db.UniqueConstraint('tenant_id', 'formula_id', 'ingredient_id', name='uq_formula_ingredients_formula_ingredient'),
+        db.CheckConstraint('default_weight > 0', name='ck_formula_ingredients_default_weight_positive'),
+        db.Index('ix_formula_ingredients_tenant_formula', 'tenant_id', 'formula_id'),
+    )
+
+
+class FeedBatch(db.Model):
+    """Immutable financial snapshot of a mixed physical batch."""
+    __tablename__ = 'feed_batches'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    formula_id = db.Column(db.Integer, nullable=True, index=True)
+    batch_name = db.Column(db.String(255), nullable=False)
+    total_weight = db.Column(db.Numeric(14, 3), nullable=False)
+    total_cost = db.Column(db.Numeric(14, 4), nullable=False)
+    cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
+    status = db.Column(db.String(50), nullable=False, default='ACTIVE')
+    mixed_on = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
+    depleted_on = db.Column(db.Date, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    posted_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    ingredients = db.relationship(
+        'BatchIngredient',
+        backref=db.backref('batch', lazy=True),
+        lazy=True,
+        cascade='all, delete-orphan',
+    )
+    consumption_events = db.relationship(
+        'FeedBatchConsumptionEvent',
+        backref=db.backref('batch', lazy=True),
+        lazy=True,
+        cascade='all, delete-orphan',
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['tenant_id', 'formula_id'],
+            ['feed_formulas.tenant_id', 'feed_formulas.id'],
+            ondelete='RESTRICT',
+            name='fk_feed_batches_formula_tenant',
+        ),
+        db.UniqueConstraint('tenant_id', 'id', name='uq_feed_batches_tenant_id'),
+        db.CheckConstraint("status IN ('ACTIVE', 'DEPLETED', 'VOIDED')", name='ck_feed_batches_status_valid'),
+        db.CheckConstraint('total_weight > 0', name='ck_feed_batches_total_weight_positive'),
+        db.CheckConstraint('total_cost >= 0', name='ck_feed_batches_total_cost_non_negative'),
+        db.CheckConstraint('cost_per_kg >= 0', name='ck_feed_batches_cost_per_kg_non_negative'),
+        db.CheckConstraint('depleted_on IS NULL OR depleted_on >= mixed_on', name='ck_feed_batches_depleted_after_mixed'),
+        db.Index('ix_feed_batches_tenant_status_mixed_on', 'tenant_id', 'status', 'mixed_on'),
+    )
+
+
+class BatchIngredient(db.Model):
+    """Composition snapshot with locked ingredient cost for historical ROI analytics."""
+    __tablename__ = 'batch_ingredients'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    batch_id = db.Column(db.Integer, nullable=False, index=True)
+    ingredient_id = db.Column(db.Integer, nullable=False, index=True)
+    weight = db.Column(db.Numeric(14, 3), nullable=False)
+    percentage = db.Column(db.Numeric(5, 2), nullable=False)
+    locked_cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    ingredient = db.relationship(
+        'Ingredient',
+        primaryjoin='and_(BatchIngredient.tenant_id == Ingredient.tenant_id, BatchIngredient.ingredient_id == Ingredient.id)',
+        foreign_keys='[BatchIngredient.tenant_id, BatchIngredient.ingredient_id]',
+        overlaps='batch,ingredients',
+        lazy=True,
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['tenant_id', 'batch_id'],
+            ['feed_batches.tenant_id', 'feed_batches.id'],
+            ondelete='CASCADE',
+            name='fk_batch_ingredients_batch_tenant',
+        ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'ingredient_id'],
+            ['ingredients.tenant_id', 'ingredients.id'],
+            ondelete='RESTRICT',
+            name='fk_batch_ingredients_ingredient_tenant',
+        ),
+        db.UniqueConstraint('tenant_id', 'batch_id', 'ingredient_id', name='uq_batch_ingredients_batch_ingredient'),
+        db.CheckConstraint('weight > 0', name='ck_batch_ingredients_weight_positive'),
+        db.CheckConstraint('percentage > 0 AND percentage <= 100', name='ck_batch_ingredients_percentage_range'),
+        db.CheckConstraint('locked_cost_per_kg >= 0', name='ck_batch_ingredients_locked_cost_non_negative'),
+    )
+
+
+class FeedBatchConsumptionEvent(db.Model):
+    """Consumption events used to deplete batches based on actual usage."""
+    __tablename__ = 'feed_batch_consumption_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    batch_id = db.Column(db.Integer, nullable=False, index=True)
+    consumed_weight = db.Column(db.Numeric(14, 3), nullable=False)
+    consumed_on = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ['tenant_id', 'batch_id'],
+            ['feed_batches.tenant_id', 'feed_batches.id'],
+            ondelete='CASCADE',
+            name='fk_feed_batch_consumption_events_batch_tenant',
+        ),
+        db.CheckConstraint('consumed_weight > 0', name='ck_feed_batch_consumption_events_weight_positive'),
+        db.Index('ix_feed_batch_consumption_events_tenant_batch_date', 'tenant_id', 'batch_id', 'consumed_on'),
+    )
+
+
+@event.listens_for(FeedBatch, 'before_update')
+def prevent_posted_batch_financial_mutation(mapper, connection, target):
+    """Allow lifecycle updates, but freeze financial snapshot fields once posted."""
+    if target.posted_at is None:
+        return
+
+    state = inspect(target)
+    immutable_fields = {
+        'tenant_id',
+        'formula_id',
+        'batch_name',
+        'total_weight',
+        'total_cost',
+        'cost_per_kg',
+        'mixed_on',
+        'created_by',
+        'created_at',
+    }
+    if any(state.attrs[field].history.has_changes() for field in immutable_fields):
+        raise ValueError('Posted feed batch financial snapshot is immutable.')
+
+
+@event.listens_for(BatchIngredient, 'before_update')
+def prevent_batch_ingredient_mutation(mapper, connection, target):
+    """Batch composition rows are immutable once inserted."""
+    state = inspect(target)
+    immutable_fields = {
+        'tenant_id',
+        'batch_id',
+        'ingredient_id',
+        'weight',
+        'percentage',
+        'locked_cost_per_kg',
+        'created_at',
+    }
+    if any(state.attrs[field].history.has_changes() for field in immutable_fields):
+        raise ValueError('Batch ingredient snapshots are immutable.')
 
 
 class FarmMeasurementUnit(db.Model):
