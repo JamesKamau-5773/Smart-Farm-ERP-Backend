@@ -1,12 +1,15 @@
 import json
+from datetime import datetime, date, timezone
+
+from sqlalchemy.exc import IntegrityError
+
 from tests.base import BaseTestCase
 from app.models.user import Role
-from app.models.finance import Transaction, TransactionType, TransactionCategory
+from app.models.finance import Buyer, SalesLedger, Transaction, TransactionType, TransactionCategory, PaymentStatus
 from app.models.supply import MilkLog
 from app.models.livestock import Cow
 from app.models.supply import MilkSession
 from app import db
-from datetime import datetime, date, timezone
 
 class FinanceTestCase(BaseTestCase):
 
@@ -61,3 +64,38 @@ class FinanceTestCase(BaseTestCase):
             # This will likely fail without proper M-Pesa credentials,
             # but we can check for a 500-level error which indicates the code is running.
             self.assertIn(response.status_code, [200, 400, 500])
+
+    def test_sales_ledger_rejects_duplicate_buyer_date(self):
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Kisii Dairy',
+            agreed_rate_per_liter=55,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        first_entry = SalesLedger(
+            tenant_id=self.tenant.id,
+            buyer_id=buyer.id,
+            date=date(2026, 5, 31),
+            liters_sold=100,
+            total_cost=5500,
+            payment_status=PaymentStatus.UNPAID,
+        )
+        db.session.add(first_entry)
+        db.session.commit()
+
+        duplicate_entry = SalesLedger(
+            tenant_id=self.tenant.id,
+            buyer_id=buyer.id,
+            date=date(2026, 5, 31),
+            liters_sold=100,
+            total_cost=5500,
+            payment_status=PaymentStatus.UNPAID,
+        )
+        db.session.add(duplicate_entry)
+
+        with self.assertRaises(IntegrityError):
+            db.session.commit()
+
+        db.session.rollback()
