@@ -50,7 +50,7 @@ class AuthTestCase(BaseTestCase):
             data = json.loads(response.data.decode())
             self.assertTrue(data['access_token'])
             for key in [
-                'sub', 'name', 'email', 'role',
+                'sub', 'name', 'phone_number', 'role',
                 'tenant_id', 'tenant_name', 'tenant_type',
                 'farm_id', 'farm_name', 'available_farms'
             ]:
@@ -112,3 +112,54 @@ class AuthTestCase(BaseTestCase):
             self.assertEqual(switch_resp.status_code, 200)
             switch_data = json.loads(switch_resp.data.decode())
             self.assertEqual(switch_data['farm_id'], f'farm_{farm_2.id}')
+
+    def test_register_workspace(self):
+        with self.client:
+            response = self.client.post(
+                '/api/auth/register',
+                data=json.dumps(dict(
+                    farm_name='Green Valley Farm',
+                    tenant_name='Green Valley Holdings',
+                    name='Amina Njeri',
+                    phone_number='+254712345678',
+                    password='StrongPass123',
+                    tenant_type='single',
+                )),
+                content_type='application/json'
+            )
+            self.assertEqual(response.status_code, 201)
+            data = json.loads(response.data.decode())
+            self.assertIn('access_token', data)
+            self.assertEqual(data['tenant_name'], 'Green Valley Holdings')
+            self.assertEqual(data['farm_name'], 'Green Valley Farm')
+            self.assertEqual(data['role'], Role.FARMER)
+            self.assertEqual(data['phone_number'], '+254712345678')
+
+    def test_register_workspace_rejects_duplicate_username(self):
+        self._create_tenant_user(tenant_type='single', farm_count=1)
+        with self.client:
+            response = self.client.post(
+                '/api/auth/register',
+                data=json.dumps(dict(
+                    farm_name='Duplicate Farm',
+                    phone_number='testuser',
+                    password='StrongPass123',
+                )),
+                content_type='application/json'
+            )
+            self.assertEqual(response.status_code, 409)
+
+    def test_login_with_phone_number_payload(self):
+        self._create_tenant_user(tenant_type='single', farm_count=1)
+        with self.client:
+            response = self.client.post(
+                '/api/auth/login',
+                data=json.dumps(dict(
+                    phone_number='testuser',
+                    password='password'
+                )),
+                content_type='application/json'
+            )
+            self.assertEqual(response.status_code, 200)
+            data = json.loads(response.data.decode())
+            self.assertTrue(data['access_token'])

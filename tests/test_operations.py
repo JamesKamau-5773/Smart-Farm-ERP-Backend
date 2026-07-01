@@ -39,6 +39,16 @@ class OperationsTestCase(BaseTestCase):
             data = json.loads(response.data.decode())
             self.assertEqual(data['message'], 'Milk logged successfully.')
 
+    def test_canonical_herd_alias_route(self):
+        """Canonical frontend path should work without /api/operations/api duplication."""
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.get('/api/herd')
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data.decode())
+            self.assertIn('items', payload)
+            self.assertIn('meta', payload)
+
     def test_export_animal_passport_pdf(self):
         """Test exporting a cow passport as a PDF."""
         vet = self.create_user(username='vet', password='password', role=Role.VET)

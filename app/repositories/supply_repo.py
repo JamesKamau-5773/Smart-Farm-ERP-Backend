@@ -71,10 +71,24 @@ class InventoryRepository:
         return InventoryItem.query.filter_by(tenant_id=tenant_id).order_by(InventoryItem.name.asc()).all()
 
     @staticmethod
+    def list_transactions_by_tenant(tenant_id: int) -> list[InventoryTransaction]:
+        return (
+            InventoryTransaction.query.join(InventoryItem, InventoryTransaction.item_id == InventoryItem.id)
+            .filter(InventoryItem.tenant_id == tenant_id)
+            .order_by(InventoryTransaction.transaction_date.desc(), InventoryTransaction.id.desc())
+            .all()
+        )
+
+    @staticmethod
+    def list_stock_snapshot(tenant_id: int) -> list[InventoryItem]:
+        return InventoryRepository.list_by_tenant(tenant_id)
+
+    @staticmethod
     def create_item(
         *,
         tenant_id: int,
         name: str,
+        sku: str = None,
         category: str,
         unit: str,
         current_qty=0,
@@ -88,6 +102,7 @@ class InventoryRepository:
             item = InventoryItem(
                 tenant_id=tenant_id,
                 name=name,
+                sku=sku,
                 category=category,
                 unit=unit,
                 current_qty=current_qty,
@@ -152,6 +167,55 @@ class InventoryRepository:
         except SQLAlchemyError:
             db.session.rollback()
             raise Exception("Database error while recording inventory transaction.")
+
+    @staticmethod
+    def update_item(
+        *,
+        item_id: int,
+        tenant_id: int,
+        name: str = None,
+        sku: str = None,
+        category: str = None,
+        unit: str = None,
+        current_qty=None,
+        minimum_threshold=None,
+    ) -> InventoryItem:
+        try:
+            item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+            if not item:
+                return None
+
+            if name is not None:
+                item.name = name
+            if sku is not None:
+                item.sku = sku
+            if category is not None:
+                item.category = category
+            if unit is not None:
+                item.unit = unit
+            if current_qty is not None:
+                item.current_qty = Decimal(str(current_qty))
+            if minimum_threshold is not None:
+                item.minimum_threshold = Decimal(str(minimum_threshold))
+
+            db.session.commit()
+            return item
+        except SQLAlchemyError:
+            db.session.rollback()
+            raise Exception("Failed, Database error while updating inventory item.")
+
+    @staticmethod
+    def delete_item(*, item_id: int, tenant_id: int) -> InventoryItem:
+        try:
+            item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+            if not item:
+                return None
+            db.session.delete(item)
+            db.session.commit()
+            return item
+        except SQLAlchemyError:
+            db.session.rollback()
+            raise Exception("Failed, Database error while deleting inventory item.")
 
     @staticmethod
     def get_by_id(item_id: str, tenant_id: int = None) -> InventoryItem:

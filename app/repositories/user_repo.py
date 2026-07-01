@@ -10,6 +10,11 @@ class UserRepository:
         return User.query.filter_by(username=username).first()
 
     @staticmethod
+    def get_by_email(email: str) -> User:
+        """Fetches a user by their exact email address."""
+        return User.query.filter_by(email=email).first()
+
+    @staticmethod
     def get_by_id(user_id: int) -> User:
         """Fetches a user by their primary key."""
         return db.session.get(User, user_id)

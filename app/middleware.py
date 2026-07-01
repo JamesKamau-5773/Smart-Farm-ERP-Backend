@@ -33,13 +33,37 @@ def set_tenant_context():
     except Exception:
         return
 
-    identity = get_jwt_identity()
+    try:
+        identity = get_jwt_identity()
+    except RuntimeError:
+        return
     if not identity:
         return
 
-    claims = get_jwt() or {}
+    try:
+        claims = get_jwt() or {}
+    except RuntimeError:
+        return
     tenant_id = claims.get("tenant_id")
+    farm_id = claims.get("farm_id")
+
+    header_tenant_id = None
+    header_farm_id = None
+    try:
+        from flask import request
+        header_tenant_id = request.headers.get('X-Tenant-ID')
+        header_farm_id = request.headers.get('X-Farm-ID')
+    except Exception:
+        header_tenant_id = None
+        header_farm_id = None
+
+    if header_tenant_id:
+        tenant_id = header_tenant_id
+    if header_farm_id:
+        farm_id = header_farm_id
+
     g.tenant_id = tenant_id
+    g.farm_id = farm_id
 
     if tenant_id:
         try:

@@ -183,6 +183,8 @@ class HerdsmanRoutineTemplate(db.Model):
     end_time = db.Column(db.Time, nullable=False)
     task_title = db.Column(db.String(100), nullable=False)
     task_description = db.Column(db.Text, nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+    checklist_items = db.Column(db.JSON, nullable=True)
     display_order = db.Column(db.Integer, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
 

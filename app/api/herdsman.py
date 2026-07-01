@@ -81,3 +81,57 @@ def mark_task_complete(routine_id):
         db.session.rollback()
         current_app.logger.error(f"Task completion failed for routine {routine_id}: {str(e)}")
         return jsonify({"error": "Failed to log task completion."}), 500
+
+
+@herdsman_bp.route('/api/routine/plans', methods=['GET'])
+@jwt_required()
+@require_tenant_context
+def list_routine_plans():
+    tenant_id = _get_current_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant context."}), 400
+    routines = HerdsmanRoutineTemplate.query.filter_by(tenant_id=tenant_id).order_by(HerdsmanRoutineTemplate.display_order.asc()).all()
+    return jsonify([
+        {
+            'id': routine.id,
+            'tenant_id': routine.tenant_id,
+            'start_time': routine.start_time.isoformat() if routine.start_time else None,
+            'end_time': routine.end_time.isoformat() if routine.end_time else None,
+            'task_title': routine.task_title,
+            'task_description': routine.task_description,
+            'notes': routine.notes,
+            'checklist_items': routine.checklist_items or [],
+            'display_order': routine.display_order,
+            'is_active': routine.is_active,
+        }
+        for routine in routines
+    ]), 200
+
+
+@herdsman_bp.route('/api/routine/plans', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+def save_routine_plan():
+    tenant_id = _get_current_tenant_id()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant context."}), 400
+    data = request.get_json() or {}
+    task_title = (data.get('task_title') or '').strip()
+    task_description = (data.get('task_description') or '').strip()
+    if not task_title or not task_description:
+        return jsonify({'error': 'task_title and task_description are required.'}), 400
+    from datetime import time
+    routine = HerdsmanRoutineTemplate(
+        tenant_id=tenant_id,
+        start_time=time.fromisoformat(data.get('start_time') or '06:00:00'),
+        end_time=time.fromisoformat(data.get('end_time') or '07:00:00'),
+        task_title=task_title,
+        task_description=task_description,
+        notes=data.get('notes'),
+        checklist_items=data.get('checklist_items'),
+        display_order=int(data.get('display_order', 0)),
+        is_active=bool(data.get('is_active', True)),
+    )
+    db.session.add(routine)
+    db.session.commit()
+    return jsonify({'id': routine.id, 'task_title': routine.task_title}), 201

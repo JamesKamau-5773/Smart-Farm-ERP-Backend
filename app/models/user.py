@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 class Role:
     FARMER = "FARMER"
+    ADMIN = "ADMIN"
+    SUPER_ADMIN = "SUPER_ADMIN"
     FARM_HAND = "FARM_HAND"
     VET = "VETERINARY_DOCTOR"
     CUSTOMER = "CUSTOMER"

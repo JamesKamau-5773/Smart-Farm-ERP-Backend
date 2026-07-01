@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
@@ -29,6 +29,26 @@ def create_app(config_class=Config):
 
     celery = make_celery(app)
 
+    @app.before_request
+    def handle_cors_preflight():
+        if request.method != 'OPTIONS':
+            return None
+        response = app.make_response(('', 200))
+        return response
+
+    @app.after_request
+    def add_cors_headers(response):
+        origin = request.headers.get('Origin', '*')
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Vary'] = 'Origin'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        response.headers['Access-Control-Allow-Headers'] = request.headers.get(
+            'Access-Control-Request-Headers',
+            'Authorization,Content-Type,X-Tenant-ID,X-Farm-ID',
+        )
+        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PATCH,PUT,DELETE,OPTIONS'
+        return response
+
     # Register the middleware
     from app.middleware import set_tenant_context
     app.before_request(set_tenant_context)
@@ -47,7 +67,7 @@ def create_app(config_class=Config):
 
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
-    from app.api.operations import operations_bp
+    from app.api.operations import operations_bp, operations_alias_bp
     from app.api.breeding import breeding_bp
     from app.api.export import export_bp
     from app.api.inventory import inventory_bp
@@ -56,8 +76,10 @@ def create_app(config_class=Config):
     from app.api.tenant import tenant_bp
     from app.api.feed import feed_bp
     from app.api.nutrition import nutrition_bp
+    from app.api.nutrition import nutrition_alias_bp
     from app.api.dashboard import dashboard_bp
     from app.api.herdsman import herdsman_bp
+    from app.api.clinical import medical_alias_bp, safety_bp, veterinary_bp
     
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
@@ -66,6 +88,7 @@ def create_app(config_class=Config):
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')
     app.register_blueprint(operations_bp, url_prefix='/api/operations')
+    app.register_blueprint(operations_alias_bp)
     app.register_blueprint(breeding_bp, url_prefix='/api/v1/breeding')
     app.register_blueprint(export_bp)
     app.register_blueprint(inventory_bp)
@@ -74,8 +97,12 @@ def create_app(config_class=Config):
     app.register_blueprint(tenant_bp, url_prefix='/api/tenant')
     app.register_blueprint(feed_bp)
     app.register_blueprint(nutrition_bp)
+    app.register_blueprint(nutrition_alias_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(herdsman_bp)
+    app.register_blueprint(medical_alias_bp)
+    app.register_blueprint(safety_bp)
+    app.register_blueprint(veterinary_bp)
 
     @app.route('/health', methods=['GET'])
     def health_check():

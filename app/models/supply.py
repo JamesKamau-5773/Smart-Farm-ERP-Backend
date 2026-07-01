@@ -17,6 +17,7 @@ class InventoryItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), nullable=False, index=True)
     name = db.Column(db.String(100), nullable=False, index=True)
+    sku = db.Column(db.String(80), nullable=True)
     category = db.Column(db.String(50), nullable=False)
     unit = db.Column(db.String(20), nullable=False)
     current_qty = db.Column(db.Numeric(10, 2), nullable=False, default=0)
@@ -36,6 +37,7 @@ class InventoryItem(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint('tenant_id', 'name', name='uq_inventory_items_tenant_name'),
+        db.UniqueConstraint('tenant_id', 'sku', name='uq_inventory_items_tenant_sku'),
     )
 
     def __init__(self, **kwargs):
@@ -484,3 +486,26 @@ class MilkLog(db.Model):
     # Critical Commercial Flags
     is_saleable = db.Column(db.Boolean, default=True, nullable=False) 
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
+
+
+class MilkDropAlert(db.Model):
+    """Manager review queue for low-milk events."""
+    __tablename__ = 'milk_drop_alerts'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False, index=True)
+    alert_date = db.Column(db.Date, nullable=False)
+    missing_milk_liters = db.Column(db.Numeric(10, 2), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='OPEN')
+    reason = db.Column(db.Text, nullable=False)
+    investigation_notes = db.Column(db.Text, nullable=True)
+    selected_reasons = db.Column(db.JSON, nullable=True)
+    investigated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    investigated_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('OPEN', 'INVESTIGATING', 'RESOLVED')", name='ck_milk_drop_alerts_status_valid'),
+        db.Index('ix_milk_drop_alerts_tenant_status_date', 'tenant_id', 'status', 'alert_date'),
+    )

@@ -1,9 +1,12 @@
 from flask import jsonify
 from flask_jwt_extended import create_access_token, set_access_cookies, unset_jwt_cookies
+from sqlalchemy.exc import IntegrityError
+from uuid import uuid4
 
 from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
+from app.models.user import User
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import (
     build_auth_payload,
@@ -12,6 +15,13 @@ from app.utils.jwt_payload import (
 )
 
 class AuthService:
+    @staticmethod
+    def _resolve_phone_number(user):
+        identifier = (getattr(user, 'identifier', None) or '').strip()
+        if identifier.startswith('phone_'):
+            return identifier[len('phone_'):]
+        return (getattr(user, 'username', None) or '').strip()
+
     @staticmethod
     def _ensure_default_tenant_and_farm(user):
         """Best-effort safety net for older DBs / seedless dev envs."""
@@ -57,11 +67,12 @@ class AuthService:
     def _issue_token_and_payload(*, user, tenant, farms, active_farm):
         tenant_type = normalize_tenant_type(getattr(tenant, "tenant_type", None))
         available_farms = [(f.id, f.name) for f in farms]
+        phone_number = AuthService._resolve_phone_number(user)
 
         payload = build_auth_payload(
             user_id=user.id,
             name=(user.name or user.username),
-            email=(user.email or user.username),
+            phone_number=phone_number,
             role=user.role,
             tenant_pk=tenant.id,
             tenant_name=tenant.name,
@@ -117,6 +128,79 @@ class AuthService:
             return response, 200
             
         return jsonify({"error": "Invalid username or password"}), 401
+
+    @staticmethod
+    def register_workspace(data):
+        data = data or {}
+        farm_name = (data.get('farm_name') or '').strip()
+        phone_number = (data.get('phone_number') or '').strip()
+        username = (data.get('username') or phone_number).strip()
+        password = data.get('password') or ''
+
+        if not farm_name:
+            return jsonify({"error": "farm_name is required"}), 400
+        if not phone_number:
+            return jsonify({"error": "phone_number is required"}), 400
+        if not username:
+            return jsonify({"error": "username or phone_number is required"}), 400
+        if len(password) < 8:
+            return jsonify({"error": "password must be at least 8 characters"}), 400
+
+        if UserRepository.get_by_username(username):
+            return jsonify({"error": "Username is already in use"}), 409
+
+        tenant_name = (data.get('tenant_name') or '').strip() or f"{farm_name} Tenant"
+        display_name = (data.get('name') or '').strip() or username
+        tenant_type_raw = data.get('tenant_type')
+
+        try:
+            tenant_type = normalize_tenant_type(tenant_type_raw)
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+
+        try:
+            tenant = Tenant(name=tenant_name, tenant_type=tenant_type)
+            db.session.add(tenant)
+            db.session.flush()
+
+            farm = Farm(tenant_id=tenant.id, name=farm_name)
+            db.session.add(farm)
+            db.session.flush()
+
+            user = User(
+                tenant_id=tenant.id,
+                identifier=data.get('identifier') or f"phone_{phone_number}",
+                username=username,
+                name=display_name,
+                email=None,
+                role=data.get('role') or 'FARMER',
+                is_active=True,
+            )
+            user.set_password(password)
+            db.session.add(user)
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({"error": "Could not complete registration due to duplicate fields"}), 409
+        except Exception:
+            db.session.rollback()
+            return jsonify({"error": "Registration failed"}), 500
+
+        access_token, payload = AuthService._issue_token_and_payload(
+            user=user,
+            tenant=tenant,
+            farms=[farm],
+            active_farm=farm,
+        )
+
+        response = jsonify({
+            "message": "Workspace registered successfully",
+            "phone_number": phone_number,
+            "access_token": access_token,
+            **payload,
+        })
+        set_access_cookies(response, access_token)
+        return response, 201
 
     @staticmethod
     def switch_farm(user_id: str, farm_id: str):

@@ -147,3 +147,7 @@ A high-level overview of the available API endpoints:
 - `GET /api/finance/unit-cost`: Calculate the daily cost per liter of milk.
 - `POST /api/finance/billing/stk-push`: Initiate an M-Pesa payment.
 - `POST /api/finance/mpesa/callback`: Webhook for M-Pesa to post transaction status.
+
+## Frontend Integration
+
+The frontend contract should use the backend as the source of truth for auth, tenant/farm context, and server-side calculations. See [backend-endpoint-map.md](backend-endpoint-map.md) for the current endpoint map and the HR gaps the frontend must not assume yet.

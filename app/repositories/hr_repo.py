@@ -8,15 +8,30 @@ from app.models.hr import Employee, Payroll
 
 class EmployeeRepository:
     @staticmethod
-    def create(*, tenant_id: int, full_name: str, hire_date: date, base_salary, id_number=None, phone_number=None, contract_type=None, id_card_doc_url=None, contract_doc_url=None) -> Employee:
+    def create(*, tenant_id: int, full_name: str, hire_date: date, base_salary, id_number=None, phone_number=None, contract_type=None, id_card_doc_url=None, contract_doc_url=None, role=None, loan_balance=0, monthly_deduction=0, status='ACTIVE', leave_type=None, leave_start_date=None, leave_end_date=None, expected_return_date=None, actual_return_date=None, unpaid_leave_days_this_month=0, medical_certifications=None, medical_notes=None, return_verified_at=None, return_verification_decision=None, return_verification_note=None) -> Employee:
         try:
             employee = Employee(
                 tenant_id=tenant_id,
                 full_name=full_name,
+                role=role,
                 id_number=id_number,
                 phone_number=phone_number,
                 hire_date=hire_date,
                 base_salary=base_salary,
+                loan_balance=loan_balance,
+                monthly_deduction=monthly_deduction,
+                status=status,
+                leave_type=leave_type,
+                leave_start_date=leave_start_date,
+                leave_end_date=leave_end_date,
+                expected_return_date=expected_return_date,
+                actual_return_date=actual_return_date,
+                unpaid_leave_days_this_month=unpaid_leave_days_this_month,
+                medical_certifications=medical_certifications,
+                medical_notes=medical_notes,
+                return_verified_at=return_verified_at,
+                return_verification_decision=return_verification_decision,
+                return_verification_note=return_verification_note,
                 contract_type=contract_type,
                 id_card_doc_url=id_card_doc_url,
                 contract_doc_url=contract_doc_url,
