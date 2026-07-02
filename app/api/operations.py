@@ -11,6 +11,7 @@ from datetime import date, datetime, timezone
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
 from app.models.user import Role
+from app.models.livestock import AnimalTimelineEvent
 
 operations_bp = Blueprint('operations', __name__)
 operations_alias_bp = Blueprint('operations_alias', __name__)
@@ -51,6 +52,21 @@ def _get_tenant_id_from_claims():
         return parse_public_int_id(tenant_public_id, 'tenant_')
     except (TypeError, ValueError):
         return None
+
+
+def _serialize_animal_event(event):
+    return {
+        'id': event.id,
+        'cow_id': event.cow_id,
+        'tenant_id': event.tenant_id,
+        'event_type': event.event_type,
+        'title': event.title,
+        'description': event.description,
+        'event_date': event.event_date.isoformat() if event.event_date else None,
+        'event_data': event.event_data or {},
+        'created_by': event.created_by,
+        'created_at': event.created_at.isoformat() if event.created_at else None,
+    }
 
 @operations_bp.route('/cows/<int:cow_id>/milk', methods=['POST'])
 @operations_bp.route('/livestock/<int:cow_id>/milk', methods=['POST'])
@@ -303,6 +319,71 @@ def animal_milk_history(cow_id):
         for log in paginated.items
     ]
     return jsonify({'items': rows, 'meta': {'page': paginated.page, 'per_page': paginated.per_page, 'total': paginated.total, 'pages': paginated.pages}}), 200
+
+
+@operations_bp.route('/api/animals/<int:cow_id>/events', methods=['GET', 'POST'])
+@operations_alias_bp.route('/api/animals/<int:cow_id>/events', methods=['GET', 'POST'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def animal_events(cow_id):
+    cow = CowRepository.get_by_id(cow_id)
+    if not cow:
+        return jsonify({'error': 'Animal not found.'}), 404
+
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    if request.method == 'GET':
+        query = AnimalTimelineEvent.query.filter_by(tenant_id=tenant_id, cow_id=cow_id).order_by(
+            AnimalTimelineEvent.event_date.desc(),
+            AnimalTimelineEvent.id.desc(),
+        )
+        paginated = _paginate_query(query)
+        rows = [_serialize_animal_event(event) for event in paginated.items]
+        return jsonify({'items': rows, 'meta': {'page': paginated.page, 'per_page': paginated.per_page, 'total': paginated.total, 'pages': paginated.pages}}), 200
+
+    data = request.get_json(silent=True) or {}
+    event_type = (data.get('event_type') or data.get('type') or '').strip()
+    title = (data.get('title') or '').strip()
+    description = (data.get('description') or data.get('notes') or '').strip() or None
+    event_date_raw = data.get('event_date') or data.get('date') or data.get('timestamp')
+    event_data = data.get('event_data') or data.get('metadata') or data.get('data') or {}
+
+    if not event_type:
+        event_type = 'general'
+    if not title:
+        title = event_type.replace('_', ' ').strip().title() or 'General Update'
+
+    event_date = datetime.now(timezone.utc)
+    if event_date_raw:
+        try:
+            event_date = datetime.fromisoformat(str(event_date_raw))
+            if event_date.tzinfo is None:
+                event_date = event_date.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return jsonify({'error': 'event_date must be ISO format.'}), 400
+
+    created_by = get_jwt_identity()
+    try:
+        created_by = int(created_by) if created_by is not None else None
+    except (TypeError, ValueError):
+        created_by = None
+
+    event = AnimalTimelineEvent(
+        tenant_id=tenant_id,
+        cow_id=cow_id,
+        event_type=event_type,
+        title=title,
+        description=description,
+        event_date=event_date,
+        event_data=event_data,
+        created_by=created_by,
+    )
+    db.session.add(event)
+    db.session.commit()
+
+    return jsonify(_serialize_animal_event(event)), 201
 
 
 @operations_bp.route('/api/production/yield', methods=['GET'])

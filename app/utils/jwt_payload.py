@@ -41,6 +41,7 @@ def build_auth_payload(*,
     name: str,
     phone_number: str,
     role: str,
+    farm_location: Optional[str],
     tenant_pk: int,
     tenant_name: str,
     tenant_type: str,
@@ -51,15 +52,19 @@ def build_auth_payload(*,
     tenant_type = normalize_tenant_type(tenant_type)
 
     farms_payload = [{"id": public_farm_id(fid), "name": fname} for fid, fname in available_farms]
+    cooperative_id = public_tenant_id(tenant_pk)
 
     return {
         "sub": str(user_id),
         "name": name,
         "phone_number": phone_number,
         "role": role,
-        "tenant_id": public_tenant_id(tenant_pk),
+        "tenant_id": cooperative_id,
+        "cooperative_id": cooperative_id,
         "tenant_name": tenant_name,
+        "cooperative_name": tenant_name,
         "tenant_type": tenant_type,
+        "farm_location": farm_location,
         "farm_id": public_farm_id(active_farm_pk),
         "farm_name": active_farm_name,
         "available_farms": farms_payload,

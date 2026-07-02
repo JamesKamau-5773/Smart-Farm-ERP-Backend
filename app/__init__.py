@@ -47,6 +47,13 @@ def create_app(config_class=Config):
             'Authorization,Content-Type,X-Tenant-ID,X-Farm-ID',
         )
         response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PATCH,PUT,DELETE,OPTIONS'
+
+        # Baseline hardening for browser responses.
+        response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+        response.headers.setdefault('X-Frame-Options', 'DENY')
+        response.headers.setdefault('Referrer-Policy', 'same-origin')
+        response.headers.setdefault('Permissions-Policy', 'geolocation=(), microphone=(), camera=()')
+        response.headers.setdefault('Content-Security-Policy', "default-src 'self'; frame-ancestors 'none'; base-uri 'self'")
         return response
 
     # Register the middleware
@@ -80,6 +87,7 @@ def create_app(config_class=Config):
     from app.api.dashboard import dashboard_bp
     from app.api.herdsman import herdsman_bp
     from app.api.clinical import medical_alias_bp, safety_bp, veterinary_bp
+    from app.api import api_bp
     
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
@@ -103,6 +111,7 @@ def create_app(config_class=Config):
     app.register_blueprint(medical_alias_bp)
     app.register_blueprint(safety_bp)
     app.register_blueprint(veterinary_bp)
+    app.register_blueprint(api_bp, url_prefix='/api')
 
     @app.route('/health', methods=['GET'])
     def health_check():

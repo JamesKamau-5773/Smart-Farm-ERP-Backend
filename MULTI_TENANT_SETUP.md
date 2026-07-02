@@ -158,7 +158,8 @@ ALTER DATABASE jivu_farm_db SET rls.enabled = true;
 #### 2. Update Credentials in `.env`
 ```bash
 # .env file
-DATABASE_URL=postgresql://jivu_app:secure_password_here@localhost:5433/jivu_farm_db
+DATABASE_URL=postgresql+psycopg://jivu_app:secure_password_here@localhost:5433/jivu_farm_db
+TEST_DATABASE_URL=postgresql+psycopg://jivu_app:secure_password_here@localhost:5433/jivu_farm_db_test
 REDIS_URL=redis://localhost:6379/0
 CELERY_BROKER_URL=redis://localhost:6379/1
 CELERY_RESULT_BACKEND=redis://localhost:6379/2
@@ -170,7 +171,7 @@ cd /home/james/projects/smart-farm-erp-system/backend
 source .venv/bin/activate
 
 # Run all migrations including RLS
-flask db upgrade
+flask db upgrade heads
 
 # Verify RLS is enabled
 flask db current
@@ -195,7 +196,8 @@ psql -U jivu_app -d jivu_farm_db -h localhost -p 5433
 ### Environment Variables (`.env`)
 ```bash
 # Database
-DATABASE_URL=postgresql://jivu_app:password@localhost:5433/jivu_farm_db
+DATABASE_URL=postgresql+psycopg://jivu_app:password@localhost:5433/jivu_farm_db
+TEST_DATABASE_URL=postgresql+psycopg://jivu_app:password@localhost:5433/jivu_farm_db_test
 
 # Redis (Rate Limiting & Celery)
 REDIS_URL=redis://localhost:6379/0
@@ -213,7 +215,7 @@ class Config:
     # Database with RLS support
     SQLALCHEMY_DATABASE_URI = os.environ.get(
         'DATABASE_URL',
-        'postgresql://postgres:password@localhost:5433/jivu_farm_db'
+        'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db'
     )
     
     # Rate Limiting via Redis
@@ -290,7 +292,7 @@ curl -H "Authorization: Bearer $TOKEN_TENANT_2" http://localhost:5000/api/livest
 - [ ] Database `jivu_farm_db` created with user `jivu_app`
 - [ ] `.env` file updated with valid credentials
 - [ ] Redis running on ports 6379/0, 6379/1, 6379/2
-- [ ] `flask db upgrade` executed successfully
+- [ ] `flask db upgrade heads` executed successfully
 - [ ] RLS policies verified in PostgreSQL: `\d+ milk_yield`
 - [ ] JWT tokens include `tenant_id` in claims
 - [ ] Middleware registered: `app.before_request(set_tenant_context)`

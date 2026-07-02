@@ -20,6 +20,13 @@ def _get_tenant_id_from_claims():
         return None
 
 
+def _parse_staff_id(staff_id):
+    try:
+        return parse_public_int_id(staff_id, 'staff_')
+    except (TypeError, ValueError):
+        return None
+
+
 @hr_bp.route('/staff', methods=['POST'])
 @hr_bp.route('/employees', methods=['POST'])
 @jwt_required()
@@ -33,8 +40,8 @@ def register_staff():
     return HRService.register_employee(tenant_id, data)
 
 
-@hr_bp.route('/staff/<int:staff_id>', methods=['GET'])
-@hr_bp.route('/employees/<int:staff_id>', methods=['GET'])
+@hr_bp.route('/staff/<staff_id>', methods=['GET'])
+@hr_bp.route('/employees/<staff_id>', methods=['GET'])
 @jwt_required()
 @role_required(Role.FARMER)
 def get_staff(staff_id):
@@ -42,11 +49,15 @@ def get_staff(staff_id):
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
-    return HRService.get_employee(tenant_id, staff_id)
+    staff_pk = _parse_staff_id(staff_id)
+    if staff_pk is None:
+        return jsonify({'error': 'Missing or invalid staff id.'}), 400
+
+    return HRService.get_employee(tenant_id, staff_pk)
 
 
-@hr_bp.route('/staff/<int:staff_id>', methods=['PATCH'])
-@hr_bp.route('/employees/<int:staff_id>', methods=['PATCH'])
+@hr_bp.route('/staff/<staff_id>', methods=['PATCH'])
+@hr_bp.route('/employees/<staff_id>', methods=['PATCH'])
 @jwt_required()
 @role_required(Role.FARMER)
 def update_staff(staff_id):
@@ -54,17 +65,21 @@ def update_staff(staff_id):
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
+    staff_pk = _parse_staff_id(staff_id)
+    if staff_pk is None:
+        return jsonify({'error': 'Missing or invalid staff id.'}), 400
+
     data = request.get_json() or {}
     actor_id = get_jwt().get('sub')
     try:
         actor_id = int(actor_id) if actor_id is not None else None
     except (TypeError, ValueError):
         actor_id = None
-    return HRService.update_employee(tenant_id, staff_id, data, actor_id=actor_id)
+    return HRService.update_employee(tenant_id, staff_pk, data, actor_id=actor_id)
 
 
-@hr_bp.route('/staff/<int:staff_id>/verify-return', methods=['POST'])
-@hr_bp.route('/employees/<int:staff_id>/verify-return', methods=['POST'])
+@hr_bp.route('/staff/<staff_id>/verify-return', methods=['POST'])
+@hr_bp.route('/employees/<staff_id>/verify-return', methods=['POST'])
 @jwt_required()
 @role_required(Role.FARMER)
 def verify_staff_return(staff_id):
@@ -72,13 +87,17 @@ def verify_staff_return(staff_id):
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
+    staff_pk = _parse_staff_id(staff_id)
+    if staff_pk is None:
+        return jsonify({'error': 'Missing or invalid staff id.'}), 400
+
     data = request.get_json() or {}
     actor_id = get_jwt().get('sub')
     try:
         actor_id = int(actor_id) if actor_id is not None else None
     except (TypeError, ValueError):
         actor_id = None
-    return HRService.verify_return(tenant_id, staff_id, data, actor_id=actor_id)
+    return HRService.verify_return(tenant_id, staff_pk, data, actor_id=actor_id)
 
 
 @hr_bp.route('/staff', methods=['GET'])

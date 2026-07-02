@@ -1,7 +1,8 @@
-from flask import jsonify
+from flask import jsonify, current_app
 from flask_jwt_extended import create_access_token, set_access_cookies, unset_jwt_cookies
 from sqlalchemy.exc import IntegrityError
 from uuid import uuid4
+from sqlalchemy import or_
 
 from app import db
 from app.models.farm import Farm
@@ -16,11 +17,39 @@ from app.utils.jwt_payload import (
 
 class AuthService:
     @staticmethod
+    def _normalize_phone_number(value):
+        raw = (value or '').strip()
+        if not raw:
+            return ''
+        digits = ''.join(ch for ch in raw if ch.isdigit())
+        if raw.startswith('+') and digits:
+            return digits
+        if digits.startswith('0') and len(digits) >= 10:
+            return f'254{digits[1:]}'
+        return digits or raw
+
+    @staticmethod
     def _resolve_phone_number(user):
         identifier = (getattr(user, 'identifier', None) or '').strip()
         if identifier.startswith('phone_'):
             return identifier[len('phone_'):]
         return (getattr(user, 'username', None) or '').strip()
+
+    @staticmethod
+    def _find_user_by_phone(phone_number: str):
+        normalized = AuthService._normalize_phone_number(phone_number)
+        candidates = {phone_number.strip(), normalized}
+        candidates = {candidate for candidate in candidates if candidate}
+        if not candidates:
+            return None
+
+        identifier_candidates = {f'phone_{candidate}' for candidate in candidates}
+        return User.query.filter(
+            or_(
+                User.username.in_(candidates),
+                User.identifier.in_(identifier_candidates),
+            )
+        ).first()
 
     @staticmethod
     def _ensure_default_tenant_and_farm(user):
@@ -74,6 +103,7 @@ class AuthService:
             name=(user.name or user.username),
             phone_number=phone_number,
             role=user.role,
+            farm_location=getattr(user, 'farm_location', None),
             tenant_pk=tenant.id,
             tenant_name=tenant.name,
             tenant_type=tenant_type,
@@ -94,7 +124,8 @@ class AuthService:
 
     @staticmethod
     def authenticate_user(username, password, farm_id=None):
-        user = UserRepository.get_by_username(username)
+        lookup_value = AuthService._normalize_phone_number(username) or username
+        user = UserRepository.get_by_username(lookup_value) or UserRepository.get_by_username(username)
         
         # 1. Verify User Exists and Password Matches
         if user and user.check_password(password):
@@ -133,9 +164,11 @@ class AuthService:
     def register_workspace(data):
         data = data or {}
         farm_name = (data.get('farm_name') or '').strip()
-        phone_number = (data.get('phone_number') or '').strip()
+        phone_number = AuthService._normalize_phone_number(data.get('phone_number'))
         username = (data.get('username') or phone_number).strip()
         password = data.get('password') or ''
+        requested_role = (data.get('role') or '').strip().upper()
+        bootstrap_key = (data.get('bootstrap_key') or data.get('bootstrapKey') or '').strip()
 
         if not farm_name:
             return jsonify({"error": "farm_name is required"}), 400
@@ -146,8 +179,44 @@ class AuthService:
         if len(password) < 8:
             return jsonify({"error": "password must be at least 8 characters"}), 400
 
-        if UserRepository.get_by_username(username):
-            return jsonify({"error": "Username is already in use"}), 409
+        if requested_role == 'SUPER_ADMIN':
+            expected_bootstrap_key = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
+            if not expected_bootstrap_key:
+                return jsonify({"error": "SUPER_ADMIN bootstrap is not enabled."}), 403
+            if not bootstrap_key or bootstrap_key != expected_bootstrap_key:
+                return jsonify({"error": "Invalid bootstrap key for SUPER_ADMIN registration."}), 403
+            role = 'SUPER_ADMIN'
+        else:
+            role = 'FARMER'
+
+        existing_user = AuthService._find_user_by_phone(phone_number) or UserRepository.get_by_username(username)
+        if existing_user:
+            if existing_user.check_password(password):
+                tenant = getattr(existing_user, 'tenant', None) or db.session.get(Tenant, existing_user.tenant_id)
+                if tenant is None:
+                    return jsonify({"error": "Registration failed"}), 500
+                farms = list(getattr(tenant, 'farms', []) or [])
+                if not farms:
+                    farm = Farm(tenant_id=tenant.id, name=farm_name)
+                    db.session.add(farm)
+                    db.session.flush()
+                    farms = [farm]
+                active_farm = farms[0]
+                access_token, payload = AuthService._issue_token_and_payload(
+                    user=existing_user,
+                    tenant=tenant,
+                    farms=farms,
+                    active_farm=active_farm,
+                )
+                response = jsonify({
+                    "message": "Workspace already exists",
+                    "phone_number": AuthService._resolve_phone_number(existing_user),
+                    "access_token": access_token,
+                    **payload,
+                })
+                set_access_cookies(response, access_token)
+                return response, 200
+            return jsonify({"error": "phone_number is already in use"}), 409
 
         tenant_name = (data.get('tenant_name') or '').strip() or f"{farm_name} Tenant"
         display_name = (data.get('name') or '').strip() or username
@@ -170,10 +239,10 @@ class AuthService:
             user = User(
                 tenant_id=tenant.id,
                 identifier=data.get('identifier') or f"phone_{phone_number}",
-                username=username,
+                username=username or phone_number,
                 name=display_name,
                 email=None,
-                role=data.get('role') or 'FARMER',
+                role=role,
                 is_active=True,
             )
             user.set_password(password)

@@ -37,6 +37,12 @@ class Cow(db.Model):
     medical_records = db.relationship('MedicalRecord', backref=db.backref('livestock', lazy=True), lazy=True)
     breeding_logs = db.relationship('BreedingLog', backref=db.backref('livestock', lazy=True), lazy=True)
     vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True)
+    timeline_events = db.relationship(
+        'AnimalTimelineEvent',
+        backref=db.backref('animal', lazy=True),
+        lazy=True,
+        cascade='all, delete-orphan',
+    )
 
 
 class AnimalYieldTarget(db.Model):
@@ -207,3 +213,18 @@ class DailyTaskLog(db.Model):
     __table_args__ = (
         db.CheckConstraint("status IN ('Completed', 'Deviated')", name='ck_daily_task_logs_status_valid'),
     )
+
+
+class AnimalTimelineEvent(db.Model):
+    __tablename__ = 'animal_events'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    cow_id = db.Column(db.Integer, db.ForeignKey('cows.id', ondelete='CASCADE'), nullable=False, index=True)
+    event_type = db.Column(db.String(50), nullable=False)
+    title = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    event_date = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    event_data = db.Column(db.JSON, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

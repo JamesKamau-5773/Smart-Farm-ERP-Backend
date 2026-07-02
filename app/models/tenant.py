@@ -9,6 +9,8 @@ class Tenant(db.Model):
 
     # 'single' or 'cooperative' 
     tenant_type = db.Column(db.String(20), default='single') 
+    region = db.Column(db.String(100), nullable=True)
+    registration_number = db.Column(db.String(100), nullable=True, unique=True)
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

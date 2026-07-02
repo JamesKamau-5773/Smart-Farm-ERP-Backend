@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app.services.auth_service import AuthService
+from app.services.cooperative_service import CooperativeService
 from app import limiter
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import parse_public_int_id
@@ -55,6 +56,16 @@ def logout():
     return AuthService.logout_user()
 
 
+@auth_bp.route('/claim-account', methods=['POST'])
+def claim_account():
+    data = request.get_json(silent=True) or {}
+    token = (data.get('token') or '').strip()
+    password = data.get('password') or ''
+    if not token or not password:
+        return jsonify({"error": "token and password are required"}), 400
+    return CooperativeService.claim_member_invite(token, password)
+
+
 @auth_bp.route('/me', methods=['GET'])
 @jwt_required()
 def me():
@@ -76,6 +87,7 @@ def me():
         'phone_number': phone_number,
         'role': user.role,
         'is_active': user.is_active,
+        'farm_location': getattr(user, 'farm_location', None),
         'tenant_id': claims.get('tenant_id') or (f'tenant_{tenant.id}' if tenant else None),
         'tenant_name': claims.get('tenant_name') or (tenant.name if tenant else None),
         'tenant_type': claims.get('tenant_type') or (getattr(tenant, 'tenant_type', None) if tenant else None),

@@ -55,14 +55,15 @@ pip install -r requirements.txt
 
 ### 3. Configure Environment Variables
 
-Create a `.env` file in the `backend` directory. Use the `.env.example` as a template:
+Create a `.env` file in the `backend` directory:
 
 ```
 FLASK_APP=run.py
 FLASK_ENV=development
 SECRET_KEY=a-strong-and-secret-key
 JWT_SECRET_KEY=another-strong-and-secret-key
-DATABASE_URL=postgresql://postgres:password@localhost:5432/jivu_farm_db
+DATABASE_URL=postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db
+TEST_DATABASE_URL=postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db_test
 REDIS_URL=redis://localhost:6379/0
 
 # M-Pesa Sandbox Credentials
@@ -83,14 +84,14 @@ If you have a `docker-compose.yml` file for your PostgreSQL instance, you can st
 docker-compose up -d
 ```
 
-Otherwise, ensure your PostgreSQL Docker container is running and accessible at the URI specified in `DATABASE_URL`.
+Otherwise, ensure your PostgreSQL server is running and accessible at the URI specified in `DATABASE_URL`.
 
 ### 5. Run Database Migrations
 
 Apply the database schema to your database:
 
 ```bash
-flask db upgrade
+flask db upgrade heads
 ```
 
 ### 6. Run the Application
@@ -111,7 +112,7 @@ To run the test suite, execute the following command from the `backend` director
 python -m unittest discover -s tests
 ```
 
-The tests run against a separate in-memory SQLite database to avoid interfering with your development data.
+The tests run against a separate PostgreSQL database defined by `TEST_DATABASE_URL` to avoid interfering with your development data.
 
 ## Database Backups
 

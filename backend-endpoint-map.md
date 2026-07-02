@@ -65,6 +65,8 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/animals/<cow_id>`
 - `PATCH /api/animals/<cow_id>`
 - `GET /api/animals/<cow_id>/milk-history`
+- `GET /api/animals/<cow_id>/events`
+- `POST /api/animals/<cow_id>/events`
 - `GET /api/production/milk-drop-alerts`
 - `POST /api/production/milk-drop-alerts/<alert_id>/investigate`
 
@@ -170,6 +172,9 @@ Legacy compatibility:
 ## Tenant, Export, Tasking
 
 - `GET /api/tenant/profile`
+- `POST /api/tenant/cooperatives`
+- `POST /api/tenant/cooperatives/<cooperative_id>/members`
+- `POST /api/tenant/cooperatives/<cooperative_id>/members/bulk`
 - `GET /api/v1/export/animal/<animal_id>/pdf`
 - `POST /api/v1/tasks/<routine_id>/complete`
 - `GET /api/routine/plans`

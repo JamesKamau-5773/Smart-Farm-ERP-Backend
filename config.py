@@ -1,6 +1,7 @@
 import os
 from datetime import timedelta
 from dotenv import load_dotenv
+from sqlalchemy.engine import make_url
 
 load_dotenv()
 
@@ -9,6 +10,14 @@ def _secret_or_fallback(env_name: str, fallback: str, min_length: int = 32) -> s
     value = os.environ.get(env_name) or fallback
     if len(value) < min_length:
         value = (value + fallback * 2)[:min_length]
+    return value
+
+
+def _postgres_database_uri(env_name: str, fallback: str) -> str:
+    value = os.environ.get(env_name) or fallback
+    parsed = make_url(value)
+    if not parsed.drivername.startswith('postgresql'):
+        raise RuntimeError(f"{env_name} must use a PostgreSQL URI.")
     return value
 
 class Config:
@@ -25,10 +34,11 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
     JWT_COOKIE_CSRF_PROTECT = True
     JWT_CSRF_IN_COOKIES = True
+    BOOTSTRAP_SUPER_ADMIN_KEY = os.environ.get('BOOTSTRAP_SUPER_ADMIN_KEY', '')
     
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        'DATABASE_URL', 
-        'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db'
+    SQLALCHEMY_DATABASE_URI = _postgres_database_uri(
+        'DATABASE_URL',
+        'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db',
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
@@ -57,7 +67,10 @@ class Config:
 
 class TestConfig(Config):
     TESTING = True
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    SQLALCHEMY_DATABASE_URI = _postgres_database_uri(
+        'TEST_DATABASE_URL',
+        'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db_test',
+    )
     RATELIMIT_STORAGE_URI = 'memory://'
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False

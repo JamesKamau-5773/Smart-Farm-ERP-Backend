@@ -15,6 +15,33 @@ def _parse_tenant_pk(tenant_id_value):
     except ValueError:
         return None
 
+
+def _looks_like_bearer_jwt(value):
+    if not value:
+        return False
+
+    raw_value = str(value).strip()
+    if not raw_value.lower().startswith('bearer '):
+        return False
+
+    token = raw_value[7:].strip()
+    if not token or token.lower() in {'null', 'undefined', 'none'}:
+        return False
+
+    parts = token.split('.')
+    return len(parts) == 3 and all(parts)
+
+
+def _drop_invalid_authorization_header():
+    try:
+        from flask import request
+    except Exception:
+        return
+
+    authorization_header = request.headers.get('Authorization')
+    if authorization_header and not _looks_like_bearer_jwt(authorization_header):
+        request.environ.pop('HTTP_AUTHORIZATION', None)
+
 def set_tenant_context():
     """
     Sets the 'app.current_tenant_id' for the current database session and g.tenant_id.
@@ -28,6 +55,8 @@ def set_tenant_context():
     If no user is authenticated (i.e., for public routes), this setting 
     is not applied, and access is determined by the default RLS behavior.
     """
+    _drop_invalid_authorization_header()
+
     try:
         verify_jwt_in_request(optional=True)
     except Exception:
@@ -49,20 +78,26 @@ def set_tenant_context():
 
     header_tenant_id = None
     header_farm_id = None
+    header_cooperative_id = None
     try:
         from flask import request
         header_tenant_id = request.headers.get('X-Tenant-ID')
         header_farm_id = request.headers.get('X-Farm-ID')
+        header_cooperative_id = request.headers.get('X-Cooperative-ID')
     except Exception:
         header_tenant_id = None
         header_farm_id = None
+        header_cooperative_id = None
 
     if header_tenant_id:
         tenant_id = header_tenant_id
+    if header_cooperative_id:
+        tenant_id = header_cooperative_id
     if header_farm_id:
         farm_id = header_farm_id
 
     g.tenant_id = tenant_id
+    g.cooperative_id = tenant_id
     g.farm_id = farm_id
 
     if tenant_id:
@@ -72,7 +107,10 @@ def set_tenant_context():
                 # Set the tenant_id for the current transaction (used by RLS)
                 # Only supported/needed on PostgreSQL.
                 if db.engine.dialect.name == 'postgresql':
-                    db.session.execute(text("SET app.current_tenant_id = :tenant_id"), {"tenant_id": str(tenant_pk)})
+                    db.session.execute(
+                        text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
+                        {"tenant_id": str(tenant_pk)},
+                    )
         except Exception as e:
             print(f"Error setting tenant context: {e}")
 

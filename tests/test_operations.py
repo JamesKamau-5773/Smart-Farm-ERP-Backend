@@ -49,6 +49,34 @@ class OperationsTestCase(BaseTestCase):
             self.assertIn('items', payload)
             self.assertIn('meta', payload)
 
+    def test_animal_timeline_events_can_be_saved_and_listed(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            create_resp = self.client.post(
+                f'/api/operations/api/animals/{self.cow.id}/events',
+                data=json.dumps({
+                    'event_type': 'vaccination',
+                    'title': 'Vaccination administered',
+                    'description': 'Annual FMD vaccine given.',
+                    'event_date': '2026-07-02T08:30:00+00:00',
+                    'event_data': {'product': 'FMD', 'batch': 'B-100'},
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(create_resp.status_code, 201)
+            created = json.loads(create_resp.data.decode())
+            self.assertEqual(created['cow_id'], self.cow.id)
+            self.assertEqual(created['event_type'], 'vaccination')
+            self.assertEqual(created['title'], 'Vaccination administered')
+
+            list_resp = self.client.get(f'/api/operations/api/animals/{self.cow.id}/events')
+            self.assertEqual(list_resp.status_code, 200)
+            payload = json.loads(list_resp.data.decode())
+            self.assertIn('items', payload)
+            self.assertEqual(len(payload['items']), 1)
+            self.assertEqual(payload['items'][0]['title'], 'Vaccination administered')
+
     def test_export_animal_passport_pdf(self):
         """Test exporting a cow passport as a PDF."""
         vet = self.create_user(username='vet', password='password', role=Role.VET)
