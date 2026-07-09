@@ -486,6 +486,8 @@ class MilkLog(db.Model):
     # Critical Commercial Flags
     is_saleable = db.Column(db.Boolean, default=True, nullable=False) 
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
+    verified_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
 
 
 class MilkDropAlert(db.Model):
