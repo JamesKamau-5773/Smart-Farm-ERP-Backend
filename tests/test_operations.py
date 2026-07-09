@@ -1,11 +1,12 @@
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from tests.base import BaseTestCase
 from app.models.user import Role
 from app.models.livestock import Cow, BreedingLog, SemenInventory, MedicalRecord
 from app.models.supply import MilkLog
 from app import db
+from flask_jwt_extended import create_access_token
 
 class OperationsTestCase(BaseTestCase):
 
@@ -129,3 +130,119 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(response.mimetype, 'application/pdf')
             self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
             self.assertTrue(response.data.startswith(b'%PDF'))
+
+    def test_admin_can_verify_production_yield(self):
+        admin = self.create_user(username='admin', password='password', role=Role.ADMIN)
+        log = MilkLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            amount_liters=11.0,
+            session='Morning',
+            recorded_by=self.farmer.id,
+            is_saleable=True,
+            anomaly_flag=False,
+        )
+        db.session.add(log)
+        db.session.commit()
+
+        token = create_access_token(
+            identity=str(admin.id),
+            additional_claims={'role': Role.ADMIN, 'tenant_id': self.tenant.id, 'farm_id': self.farm.id},
+        )
+
+        response = self.client.patch(
+            f'/api/production/yield/{log.id}/verify',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['id'], log.id)
+        self.assertEqual(payload['log_id'], log.id)
+        self.assertEqual(payload['status'], 'VERIFIED')
+        self.assertEqual(payload['verified_by'], admin.id)
+        self.assertIsNotNone(payload['verified_at'])
+
+        db.session.refresh(log)
+        self.assertEqual(log.verified_by, admin.id)
+        self.assertIsNotNone(log.verified_at)
+
+    def test_verify_production_yield_is_idempotent(self):
+        admin = self.create_user(username='admin2', password='password', role=Role.ADMIN)
+        verified_at = datetime(2026, 7, 9, 8, 30, tzinfo=timezone.utc)
+        log = MilkLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            amount_liters=9.5,
+            session='Evening',
+            recorded_by=self.farmer.id,
+            is_saleable=True,
+            anomaly_flag=False,
+            verified_by=admin.id,
+            verified_at=verified_at,
+        )
+        db.session.add(log)
+        db.session.commit()
+
+        token = create_access_token(
+            identity=str(admin.id),
+            additional_claims={'role': Role.ADMIN, 'tenant_id': self.tenant.id, 'farm_id': self.farm.id},
+        )
+
+        response = self.client.patch(
+            f'/api/production/yield/{log.id}/verify',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['status'], 'VERIFIED')
+        self.assertEqual(payload['verified_by'], admin.id)
+        self.assertEqual(
+            datetime.fromisoformat(payload['verified_at']).astimezone(timezone.utc),
+            verified_at,
+        )
+
+    def test_farmer_cannot_verify_production_yield(self):
+        self._login('farmer', 'password')
+        log = MilkLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            amount_liters=13.0,
+            session='Morning',
+            recorded_by=self.farmer.id,
+            is_saleable=True,
+            anomaly_flag=False,
+        )
+        db.session.add(log)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.patch(f'/api/production/yield/{log.id}/verify')
+            self.assertEqual(response.status_code, 403)
+
+    def test_verify_production_yield_respects_tenant_scope(self):
+        other_tenant = self.create_tenant(name='Other Tenant')
+        other_farm = self.create_farm(tenant=other_tenant, name='Other Farm')
+        other_admin = self.create_user(username='otheradmin', password='password', role=Role.ADMIN, tenant=other_tenant)
+
+        log = MilkLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            amount_liters=7.0,
+            session='Morning',
+            recorded_by=self.farmer.id,
+            is_saleable=True,
+            anomaly_flag=False,
+        )
+        db.session.add(log)
+        db.session.commit()
+
+        token = create_access_token(
+            identity=str(other_admin.id),
+            additional_claims={'role': Role.ADMIN, 'tenant_id': other_tenant.id, 'farm_id': other_farm.id},
+        )
+
+        response = self.client.patch(
+            f'/api/production/yield/{log.id}/verify',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        self.assertEqual(response.status_code, 404)

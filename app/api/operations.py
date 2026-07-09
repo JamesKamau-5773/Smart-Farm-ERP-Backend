@@ -54,6 +54,42 @@ def _get_tenant_id_from_claims():
         return None
 
 
+def _milk_log_status(log):
+    if getattr(log, 'verified_at', None) is not None:
+        return 'VERIFIED'
+    if log.anomaly_flag:
+        return 'FLAGGED'
+    if not log.is_saleable:
+        return 'ISOLATED'
+    return 'RECORDED'
+
+
+def _user_can_verify_yield():
+    claims = get_jwt() or {}
+    role = (claims.get('role') or '').strip().upper()
+    return role in {'FARM_ADMIN', Role.ADMIN, Role.SUPER_ADMIN}
+
+
+def _serialize_milk_session(log):
+    milking_date = log.timestamp.date().isoformat() if log.timestamp else None
+    return {
+        'id': log.id,
+        'log_id': log.id,
+        'cow_id': log.cow_id,
+        'amount': float(log.amount_liters),
+        'session': log.session,
+        'milkingDate': milking_date,
+        'status': _milk_log_status(log),
+        'milker': log.recorded_by,
+        'recorded_by': log.recorded_by,
+        'timestamp': log.timestamp.isoformat() if log.timestamp else None,
+        'is_saleable': log.is_saleable,
+        'anomaly_detected': log.anomaly_flag,
+        'verified_by': log.verified_by,
+        'verified_at': log.verified_at.isoformat() if log.verified_at else None,
+    }
+
+
 def _serialize_animal_event(event):
     return {
         'id': event.id,
@@ -445,6 +481,29 @@ def production_yield_legacy(log_id=None):
         return jsonify({'message': 'Production record deleted successfully.'}), 200
 
 
+@operations_bp.route('/api/production/yield/<int:log_id>/verify', methods=['PATCH'])
+@jwt_required()
+def verify_production_yield(log_id):
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    if not _user_can_verify_yield():
+        return jsonify({'error': 'Forbidden.'}), 403
+
+    log = db.session.query(MilkLog).filter_by(id=log_id, tenant_id=tenant_id).first()
+    if not log:
+        return jsonify({'error': 'Production record not found.'}), 404
+
+    if log.verified_at is not None:
+        return jsonify(_serialize_milk_session(log)), 200
+
+    log.verified_by = int(get_jwt_identity())
+    log.verified_at = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify(_serialize_milk_session(log)), 200
+
+
 @operations_bp.route('/api/production/summary', methods=['GET'])
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
@@ -657,9 +716,14 @@ def animal_milk_history_alias(cow_id):
 
 
 @operations_alias_bp.route('/api/production/yield', methods=['GET', 'POST'])
-@operations_alias_bp.route('/api/production/yield/<int:log_id>', methods=['GET', 'DELETE'])
+@operations_alias_bp.route('/api/production/yield/<int:log_id>', methods=['GET', 'PATCH', 'DELETE'])
 def production_yield_alias(log_id=None):
     return production_yield_legacy(log_id)
+
+
+@operations_alias_bp.route('/api/production/yield/<int:log_id>/verify', methods=['PATCH'])
+def verify_production_yield_alias(log_id):
+    return verify_production_yield(log_id)
 
 
 @operations_alias_bp.route('/api/production/summary', methods=['GET'])
