@@ -38,8 +38,9 @@ def create_app(config_class=Config):
 
     @app.after_request
     def add_cors_headers(response):
-        origin = request.headers.get('Origin', '*')
-        response.headers['Access-Control-Allow-Origin'] = origin
+        origin = request.headers.get('Origin')
+        if origin and origin in app.config['CORS_ALLOWED_ORIGINS']:
+            response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Vary'] = 'Origin'
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Headers'] = request.headers.get(
@@ -92,6 +93,16 @@ def create_app(config_class=Config):
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
     register_error_handlers(app)
+
+    from app.utils.db_init import ensure_super_admin_account
+    app.extensions.setdefault('super_admin_bootstrapped', False)
+
+    @app.before_request
+    def ensure_bootstrapped_super_admin():
+        if app.extensions.get('super_admin_bootstrapped'):
+            return None
+        ensure_super_admin_account()
+        app.extensions['super_admin_bootstrapped'] = True
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')

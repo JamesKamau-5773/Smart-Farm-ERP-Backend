@@ -1,3 +1,6 @@
+from flask import current_app, has_app_context
+from sqlalchemy import event, inspect
+
 from app import db, bcrypt
 from datetime import datetime, timezone
 
@@ -6,6 +9,8 @@ class Role:
     FARMER = "FARMER"
     ADMIN = "ADMIN"
     SUPER_ADMIN = "SUPER_ADMIN"
+    FARM_ADMIN = "FARM_ADMIN"
+    FARM_MANAGER = "FARM_MANAGER"
     FARM_HAND = "FARM_HAND"
     VET = "VETERINARY_DOCTOR"
     CUSTOMER = "CUSTOMER"
@@ -33,3 +38,28 @@ class User(db.Model):
 
     def check_password(self, password):
         return bcrypt.check_password_hash(self.password_hash, password)
+
+
+def _super_admin_removal_allowed() -> bool:
+    if not has_app_context():
+        return False
+    return bool(current_app.config.get('ALLOW_SUPER_ADMIN_REMOVAL', False))
+
+
+@event.listens_for(User, 'before_delete')
+def prevent_super_admin_delete(mapper, connection, target):
+    if target.role == Role.SUPER_ADMIN and not _super_admin_removal_allowed():
+        raise ValueError('Super Admin removal is disabled. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')
+
+
+@event.listens_for(User, 'before_update')
+def prevent_super_admin_deactivation(mapper, connection, target):
+    if target.role != Role.SUPER_ADMIN or _super_admin_removal_allowed():
+        return
+
+    state = inspect(target)
+    if state.attrs.is_active.history.has_changes() and not target.is_active:
+        raise ValueError('Super Admin cannot be deactivated. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')
+
+    if state.attrs.role.history.has_changes() and target.role != Role.SUPER_ADMIN:
+        raise ValueError('Super Admin role cannot be changed. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')

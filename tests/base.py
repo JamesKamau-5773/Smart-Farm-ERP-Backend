@@ -1,4 +1,5 @@
 import unittest
+from typing import Optional
 from app import create_app, db
 from config import TestConfig
 
@@ -38,7 +39,7 @@ class BaseTestCase(unittest.TestCase):
         db.session.flush()
         return farm
 
-    def create_user(self, *, username: str, password: str, role: str, tenant: Tenant | None = None, name: str | None = None, email: str | None = None, identifier: str | None = None):
+    def create_user(self, *, username: str, password: str, role: str, tenant: Optional[Tenant] = None, name: Optional[str] = None, email: Optional[str] = None, identifier: Optional[str] = None):
         tenant = tenant or self.tenant
         user = User(
             tenant_id=tenant.id,

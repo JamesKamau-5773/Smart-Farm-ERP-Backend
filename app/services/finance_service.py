@@ -48,7 +48,8 @@ class FinanceService:
         daily_expenses = db.session.query(func.sum(Transaction.amount)).filter(
             Transaction.timestamp >= start_of_day,
             Transaction.timestamp < end_of_day,
-            Transaction.transaction_type == TransactionType.EXPENSE
+            Transaction.transaction_type == TransactionType.EXPENSE,
+            Transaction.tenant_id == tenant_id,
         ).scalar() or 0.0
 
         # 3. Calculate Unit Cost
@@ -66,6 +67,7 @@ class FinanceService:
         """Standardized method for recording ledger entries with audit logging."""
         try:
             tx = Transaction(
+                tenant_id=getattr(g, 'tenant_id', None),
                 transaction_type=t_type,
                 category=category,
                 amount=amount,

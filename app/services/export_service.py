@@ -7,9 +7,20 @@ from sqlalchemy import desc
 from app import db
 from app.models.livestock import BreedingLog, Cow, MedicalRecord, SemenInventory
 from app.models.supply import MilkLog
+from app.repositories.cow_repo import CowRepository
 
 
 class AnimalPassportService:
+    @staticmethod
+    def _normalize_sort_value(value):
+        if value is None:
+            return datetime.min
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                return value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value
+        return datetime.combine(value, datetime.min.time())
+
     @staticmethod
     def _format_datetime(value):
         if value is None:
@@ -25,12 +36,12 @@ class AnimalPassportService:
             'category': category,
             'title': title,
             'details': details,
-            'sort_value': sort_value,
+            'sort_value': AnimalPassportService._normalize_sort_value(sort_value),
         }
 
     @staticmethod
     def build_passport_context(*, animal_id: int, tenant_id: int):
-        animal = db.session.get(Cow, animal_id)
+        animal = CowRepository.get_by_id(animal_id, tenant_id=tenant_id)
         if animal is None:
             return None
 
@@ -56,7 +67,7 @@ class AnimalPassportService:
             )
 
         medical_records = (
-            MedicalRecord.query.filter_by(cow_id=animal_id)
+            MedicalRecord.query.filter_by(cow_id=animal_id, tenant_id=tenant_id)
             .order_by(desc(MedicalRecord.visit_date))
             .all()
         )
@@ -76,19 +87,21 @@ class AnimalPassportService:
 
         breeding_logs = (
             db.session.query(BreedingLog, SemenInventory)
-            .join(SemenInventory, SemenInventory.id == BreedingLog.semen_id)
+            .outerjoin(SemenInventory, SemenInventory.id == BreedingLog.inventory_semen_id)
             .filter(BreedingLog.cow_id == animal_id, BreedingLog.tenant_id == tenant_id)
             .order_by(desc(BreedingLog.insemination_date))
             .all()
         )
         for breeding_log, semen in breeding_logs:
+            sire_label = semen.bull_name if semen else (breeding_log.external_sire_code or 'Unknown sire')
+            straw_label = semen.straw_code if semen else (breeding_log.external_sire_code or 'N/A')
             events.append(
                 AnimalPassportService._build_event(
                     date_value=breeding_log.insemination_date,
                     category='Breeding',
-                    title=f'Inseminated with {semen.bull_name}',
+                    title=f'Inseminated with {sire_label}',
                     details=(
-                        f"Straw: {semen.straw_code} | Status: {breeding_log.status} | "
+                        f"Straw: {straw_label} | Status: {breeding_log.status} | "
                         f"Expected calving: {AnimalPassportService._format_datetime(breeding_log.expected_calving_date) or 'N/A'}"
                     ),
                     sort_value=datetime.combine(breeding_log.insemination_date, datetime.min.time()),

@@ -99,3 +99,110 @@ class FinanceTestCase(BaseTestCase):
             db.session.commit()
 
         db.session.rollback()
+
+    def test_create_buyer_conflict_returns_409(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            first = self.client.post(
+                '/api/finance/buyers',
+                data=json.dumps({
+                    'name': 'Kisii Dairy',
+                    'agreed_rate_per_liter': 55,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(first.status_code, 201)
+
+            duplicate = self.client.post(
+                '/api/finance/buyers',
+                data=json.dumps({
+                    'name': 'Kisii Dairy',
+                    'agreed_rate_per_liter': 55,
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(duplicate.status_code, 409)
+
+    def test_create_buyer_accepts_frontend_rate_per_liter_alias(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            response = self.client.post(
+                '/api/finance/buyers',
+                data=json.dumps({
+                    'name': 'peter',
+                    'contact': '+2541234560789',
+                    'type': 'Individual',
+                    'rate_per_liter': 41,
+                    'balance': 0,
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['name'], 'peter')
+        self.assertEqual(payload['agreed_rate_per_liter'], 41.0)
+        self.assertEqual(payload['rate_per_liter'], 41.0)
+
+    def test_create_customer_conflict_returns_409(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            first = self.client.post(
+                '/api/finance/customers',
+                data=json.dumps({
+                    'name': 'Mary',
+                    'phone_number': '254712345678',
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(first.status_code, 201)
+
+            duplicate = self.client.post(
+                '/api/finance/customers',
+                data=json.dumps({
+                    'name': 'Mary',
+                    'phone_number': '254712345678',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(duplicate.status_code, 409)
+
+    def test_ledger_returns_server_computed_summary(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            expense_response = self.client.post(
+                '/api/finance/ledger',
+                data=json.dumps({
+                    'transaction_type': 'Expense',
+                    'category': 'Feed Purchase',
+                    'amount': 1000,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(expense_response.status_code, 201)
+
+            revenue_response = self.client.post(
+                '/api/finance/ledger',
+                data=json.dumps({
+                    'transaction_type': 'Revenue',
+                    'category': 'Milk Sale',
+                    'amount': 2500,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(revenue_response.status_code, 201)
+
+            list_response = self.client.get('/api/finance/ledger')
+            self.assertEqual(list_response.status_code, 200)
+            payload = json.loads(list_response.data.decode())
+            self.assertIn('summary', payload)
+            self.assertEqual(payload['summary']['transaction_count'], 2)
+            self.assertAlmostEqual(payload['summary']['total_income'], 2500.0)
+            self.assertAlmostEqual(payload['summary']['total_costs'], 1000.0)
+            self.assertAlmostEqual(payload['summary']['total_profit'], 1500.0)

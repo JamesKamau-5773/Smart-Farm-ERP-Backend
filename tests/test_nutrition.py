@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from app import db
 from app.models.livestock import Cow
-from app.models.supply import FeedBatch, Ingredient, MilkLog
+from app.models.supply import FeedBatch, FeedRecipe, FeedBatchConsumptionEvent, FeedFormula, Ingredient, InventoryItem, MilkLog
 from app.models.user import Role
 from tests.base import BaseTestCase
 
@@ -64,6 +64,169 @@ class NutritionRouteTestCase(BaseTestCase):
         db.session.refresh(ingredient_2)
         self.assertEqual(float(ingredient_1.stock_quantity), 140.0)
         self.assertEqual(float(ingredient_2.stock_quantity), 110.0)
+
+    def test_batch_creation_treats_string_false_template_flag_as_false(self):
+        ingredient = Ingredient(
+            tenant_id=self.tenant.id,
+            name='Wheat Bran',
+            current_cost_per_kg=Decimal('45.00'),
+            stock_quantity=Decimal('120.000'),
+        )
+        db.session.add(ingredient)
+        db.session.commit()
+
+        payload = {
+            'batchName': 'String False Flag Batch',
+            'formulaId': None,
+            'isSavedAsTemplate': 'false',
+            'totalWeight': 20,
+            'totalCost': 900,
+            'costPerKg': 45,
+            'ingredients': [
+                {'ingredientId': ingredient.id, 'weight': 20, 'percentage': 100},
+            ],
+        }
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/nutrition/batches',
+                data=json.dumps(payload),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        body = json.loads(response.data.decode())
+        self.assertIsNone(body['formulaId'])
+
+        formulas = FeedFormula.query.filter_by(tenant_id=self.tenant.id, name='String False Flag Batch').all()
+        self.assertEqual(len(formulas), 0)
+
+    def test_batch_creation_accepts_empty_string_formula_id_as_null(self):
+        ingredient = Ingredient(
+            tenant_id=self.tenant.id,
+            name='Sunflower Meal',
+            current_cost_per_kg=Decimal('52.00'),
+            stock_quantity=Decimal('80.000'),
+        )
+        db.session.add(ingredient)
+        db.session.commit()
+
+        payload = {
+            'batchName': 'Empty Formula ID Batch',
+            'formulaId': '',
+            'isSavedAsTemplate': False,
+            'totalWeight': 10,
+            'totalCost': 520,
+            'costPerKg': 52,
+            'ingredients': [
+                {'ingredientId': ingredient.id, 'weight': 10, 'percentage': 100},
+            ],
+        }
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/nutrition/batches',
+                data=json.dumps(payload),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        body = json.loads(response.data.decode())
+        self.assertIsNone(body['formulaId'])
+
+    def test_batch_creation_rejects_invalid_ingredient_id_with_400(self):
+        payload = {
+            'batchName': 'Invalid Ingredient ID Batch',
+            'formulaId': None,
+            'isSavedAsTemplate': False,
+            'totalWeight': 10,
+            'totalCost': 500,
+            'costPerKg': 50,
+            'ingredients': [
+                {'ingredientId': '', 'weight': 10, 'percentage': 100},
+            ],
+        }
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/nutrition/batches',
+                data=json.dumps(payload),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.data.decode())
+        self.assertIn('ingredientId must be a valid positive integer', body['error'])
+
+    def test_recipe_and_unit_conversion_conflicts_return_409(self):
+        ingredient = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Maize Germ',
+            sku='mg-001',
+            category='Feed',
+            unit='KG',
+            current_qty=Decimal('200.000'),
+            minimum_threshold=Decimal('10.000'),
+            cost_per_kg=Decimal('55.00'),
+        )
+        db.session.add(ingredient)
+        db.session.commit()
+
+        self._login()
+        with self.client:
+            first_recipe = self.client.post(
+                '/api/v1/nutrition/recipes',
+                data=json.dumps({
+                    'name': 'Winter Mix',
+                    'target_protein_percentage': 18,
+                    'ingredients': [{
+                        'inventory_item_id': ingredient.id,
+                        'inclusion_percentage': 100,
+                    }],
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(first_recipe.status_code, 201)
+
+            invalid_recipe = self.client.post(
+                '/api/v1/nutrition/recipes',
+                data=json.dumps({
+                    'name': 'Winter Mix Copy',
+                    'target_protein_percentage': 18,
+                    'ingredients': [{
+                        'inventory_item_id': 999999,
+                        'inclusion_percentage': 100,
+                    }],
+                }),
+                content_type='application/json',
+            )
+
+            first_unit = self.client.post(
+                '/api/v1/nutrition/units/conversions',
+                data=json.dumps({
+                    'item_id': ingredient.id,
+                    'unit_name': 'Bag',
+                    'kg_equivalent': 50,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(first_unit.status_code, 201)
+
+            duplicate_unit = self.client.post(
+                '/api/v1/nutrition/units/conversions',
+                data=json.dumps({
+                    'item_id': ingredient.id,
+                    'unit_name': 'Bag',
+                    'kg_equivalent': 50,
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(invalid_recipe.status_code, 404)
+        self.assertEqual(duplicate_unit.status_code, 409)
 
     def test_feed_cost_efficiency_applies_three_day_biological_lag(self):
         cow = Cow(tag_number='COW-NUTRITION-01', date_of_birth=date(2022, 1, 1))

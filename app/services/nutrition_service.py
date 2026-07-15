@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from flask import jsonify
-from sqlalchemy.exc import SQLAlchemyError
+from flask import current_app, jsonify
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy import func
 
 from app import db
@@ -20,6 +20,44 @@ from app.models.supply import (
 
 
 class NutritionService:
+    @staticmethod
+    def _optional_int(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'', 'null', 'none'}:
+                return None
+            value = normalized
+        try:
+            parsed = int(value)
+            return parsed if parsed > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _required_int(value, field_name: str) -> int:
+        parsed = NutritionService._optional_int(value)
+        if parsed is None:
+            raise ValueError(f'{field_name} must be a valid positive integer.')
+        return parsed
+
+    @staticmethod
+    def _to_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+                return True
+            if normalized in {'0', 'false', 'no', 'n', 'off', ''}:
+                return False
+        return default
+
     @staticmethod
     def _lag_window_for_batch(batch: FeedBatch):
         start_date = batch.mixed_on + timedelta(days=3)
@@ -37,9 +75,12 @@ class NutritionService:
     @staticmethod
     def process_and_save_batch(*, tenant_id: int, user_id: int | None, data: dict):
         batch_name = (data.get('batchName') or 'Custom Quick Mix').strip()
-        is_saved_as_template = bool(data.get('isSavedAsTemplate', False))
+        is_saved_as_template = NutritionService._to_bool(data.get('isSavedAsTemplate'), default=False)
         formula_name = (data.get('formulaName') or batch_name).strip()
-        formula_id = data.get('formulaId')
+        formula_id_raw = data.get('formulaId')
+        formula_id = NutritionService._optional_int(formula_id_raw)
+        if formula_id is None and formula_id_raw not in (None, '') and str(formula_id_raw).strip().lower() not in {'null', 'none'}:
+            return jsonify({'error': 'formulaId must be a valid positive integer or null.'}), 400
         ingredients_payload = data.get('ingredients') or []
 
         if not ingredients_payload:
@@ -65,9 +106,19 @@ class NutritionService:
                 if not formula:
                     return jsonify({'error': 'Formula not found for this tenant.'}), 404
 
+            formula_for_save = formula
+            if is_saved_as_template and formula_for_save is None:
+                formula_for_save = FeedFormula(
+                    tenant_id=tenant_id,
+                    name=formula_name,
+                    created_by=user_id,
+                )
+                db.session.add(formula_for_save)
+                db.session.flush()
+
             batch = FeedBatch(
                 tenant_id=tenant_id,
-                formula_id=formula.id if formula else None,
+                formula_id=formula_for_save.id if formula_for_save else None,
                 batch_name=batch_name,
                 total_weight=total_weight,
                 total_cost=total_cost,
@@ -79,20 +130,9 @@ class NutritionService:
             db.session.add(batch)
             db.session.flush()
 
-            formula_for_save = formula
-            if is_saved_as_template and formula_for_save is None:
-                formula_for_save = FeedFormula(
-                    tenant_id=tenant_id,
-                    name=formula_name,
-                    created_by=user_id,
-                )
-                db.session.add(formula_for_save)
-                db.session.flush()
-                batch.formula_id = formula_for_save.id
-
             created_rows = []
             for entry in ingredients_payload:
-                ingredient_id = entry.get('ingredientId')
+                ingredient_id = NutritionService._required_int(entry.get('ingredientId'), 'ingredientId')
                 try:
                     weight = Decimal(str(entry.get('weight')))
                 except (TypeError, InvalidOperation):
@@ -169,8 +209,12 @@ class NutritionService:
         except ValueError as exc:
             db.session.rollback()
             return jsonify({'error': str(exc)}), 400
-        except SQLAlchemyError:
+        except IntegrityError:
             db.session.rollback()
+            return jsonify({'error': 'Batch or formula already exists for this tenant.'}), 409
+        except SQLAlchemyError as exc:
+            db.session.rollback()
+            current_app.logger.exception('Batch processing DB failure: %s', exc)
             return jsonify({'error': 'Database transaction failed while processing batch.'}), 500
 
     @staticmethod

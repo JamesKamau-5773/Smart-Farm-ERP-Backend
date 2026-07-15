@@ -2,7 +2,7 @@ import json
 from datetime import date
 
 from app import db
-from app.models.livestock import Cow
+from app.models.livestock import BreedingLog, Cow
 from app.models.supply import MilkLog, MilkSession
 from app.models.user import Role
 from tests.base import BaseTestCase
@@ -58,6 +58,7 @@ class BreedingTestCase(BaseTestCase):
             self.assertEqual(log_response.status_code, 201)
             log_data = json.loads(log_response.data.decode())
             self.assertIn('expected_calving_date', log_data)
+            self.assertEqual(log_data['semen_source_label'], 'Farm Inventory')
 
     def test_update_breeding_status(self):
         self._login()
@@ -85,6 +86,204 @@ class BreedingTestCase(BaseTestCase):
             self.assertEqual(update_response.status_code, 200)
             update_data = json.loads(update_response.data.decode())
             self.assertEqual(update_data['status'], 'Pregnant')
+
+    def test_log_insemination_accepts_tag_and_straw_code_identifiers(self):
+        self._login()
+
+        with self.client:
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                data=json.dumps(
+                    dict(
+                        bull_name='BULL-D',
+                        straw_code='FR-789',
+                        breed='Friesian',
+                        stock_level=2,
+                    )
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(inv_response.status_code, 201)
+
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cowId='COWBR001',
+                        semen_id='FR-789',
+                        inseminationDate='2026-05-25',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            log_data = json.loads(log_response.data.decode())
+            self.assertIn('breeding_log_id', log_data)
+
+    def test_log_insemination_falls_back_to_straw_code_when_numeric_like(self):
+        self._login()
+
+        with self.client:
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                data=json.dumps(
+                    dict(
+                        bull_name='BULL-E',
+                        straw_code='56423',
+                        breed='Friesian',
+                        stock_level=1,
+                    )
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(inv_response.status_code, 201)
+
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cow_id='COWBR001',
+                        semen_id='56423',
+                        insemination_date='2026-05-26',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            log_data = json.loads(log_response.data.decode())
+            self.assertIn('breeding_log_id', log_data)
+
+    def test_log_insemination_accepts_cow_name_and_bull_name(self):
+        self._login()
+
+        with self.client:
+            named_cow = Cow(tag_number='COWBR009', name='Bella', date_of_birth=date(2022, 2, 2))
+            db.session.add(named_cow)
+            db.session.commit()
+
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                data=json.dumps(
+                    dict(
+                        bull_name='Falcon Prime',
+                        straw_code='AI-STR-999',
+                        breed='Friesian',
+                        stock_level=1,
+                    )
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(inv_response.status_code, 201)
+
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cow_id='Bella',
+                        semen_id='Falcon Prime',
+                        insemination_date='2026-05-27',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            log_data = json.loads(log_response.data.decode())
+            self.assertIn('breeding_log_id', log_data)
+
+    def test_log_insemination_allows_zero_stock(self):
+        self._login()
+
+        with self.client:
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                data=json.dumps(
+                    dict(
+                        bull_name='BULL-ZERO',
+                        straw_code='AI-STR-000',
+                        breed='Friesian',
+                        stock_level=0,
+                    )
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(inv_response.status_code, 201)
+            semen_id = json.loads(inv_response.data.decode())['id']
+
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cow_id=self.cow.id,
+                        semen_id=semen_id,
+                        insemination_date='2026-05-28',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            log_data = json.loads(log_response.data.decode())
+            self.assertIn('breeding_log_id', log_data)
+            self.assertEqual(log_data['stock_level_remaining'], 0)
+
+    def test_log_insemination_allows_vet_provided_external_sire_code(self):
+        self._login()
+
+        with self.client:
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cow_id=self.cow.id,
+                        provided_by='VET',
+                        external_sire_code='FR-234',
+                        insemination_date='2026-05-29',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            payload = json.loads(log_response.data.decode())
+            self.assertEqual(payload['provided_by'], 'VET')
+            self.assertEqual(payload['semen_source_label'], 'Vet Provided')
+            self.assertEqual(payload['external_sire_code'], 'FR-234')
+            self.assertIsNone(payload['inventory_semen_id'])
+
+            saved_log = db.session.get(BreedingLog, payload['breeding_log_id'])
+            self.assertIsNotNone(saved_log)
+            self.assertEqual(saved_log.provided_by, 'VET')
+            self.assertEqual(saved_log.external_sire_code, 'FR-234')
+            self.assertIsNone(saved_log.inventory_semen_id)
+
+    def test_log_insemination_accepts_frontend_vet_alias_payload(self):
+        self._login()
+
+        with self.client:
+            log_response = self.client.post(
+                '/api/operations/breeding-logs',
+                data=json.dumps(
+                    dict(
+                        cow_id=self.cow.tag_number,
+                        cowId=self.cow.tag_number,
+                        semen_id='JY-4536',
+                        semen_source='vet_provided',
+                        semenSource='vet_provided',
+                        sireCode='JY-4536',
+                        aiDate='2026-06-02',
+                    )
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(log_response.status_code, 201)
+            payload = json.loads(log_response.data.decode())
+            self.assertEqual(payload['provided_by'], 'VET')
+            self.assertEqual(payload['external_sire_code'], 'JY-4536')
+            self.assertIsNone(payload['inventory_semen_id'])
 
     def test_exact_patch_outcome_route_updates_livestock_status(self):
         self._login()

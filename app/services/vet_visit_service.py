@@ -59,7 +59,7 @@ class VetVisitService:
         except (TypeError, ValueError):
             return jsonify({'error': 'Invalid animal_id or visit_date format (YYYY-MM-DD).'}), 400
 
-        livestock = CowRepository.get_by_id(animal_id)
+        livestock = CowRepository.get_by_id(animal_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({'error': 'Livestock not found in registry.'}), 404
 
@@ -142,3 +142,86 @@ class VetVisitService:
     def list_pending_follow_ups(tenant_id: int):
         visits = VetVisitRepository.list_pending_follow_ups(tenant_id)
         return jsonify([VetVisitService._serialize_visit(visit) for visit in visits]), 200
+
+    @staticmethod
+    def update_visit(tenant_id: int, visit_id: int, data: dict):
+        visit = VetVisitRepository.get_by_id_for_tenant(visit_id, tenant_id)
+        if not visit:
+            return jsonify({'error': 'Vet visit not found for this tenant.'}), 404
+
+        animal_id = data.get('animal_id') or data.get('cow_id')
+        if animal_id not in (None, ''):
+            try:
+                animal_id = int(animal_id)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'Invalid animal_id format.'}), 400
+
+            livestock = CowRepository.get_by_id(animal_id, tenant_id=tenant_id)
+            if not livestock:
+                return jsonify({'error': 'Livestock not found in registry.'}), 404
+            visit.animal_id = animal_id
+
+        visit_date_raw = data.get('visit_date')
+        if visit_date_raw not in (None, ''):
+            try:
+                visit.visit_date = date.fromisoformat(str(visit_date_raw))
+            except (TypeError, ValueError):
+                return jsonify({'error': 'visit_date must be in YYYY-MM-DD format.'}), 400
+
+        reason_for_visit = data.get('reason_for_visit')
+        if reason_for_visit is not None:
+            cleaned_reason = str(reason_for_visit).strip()
+            if cleaned_reason:
+                visit.reason_for_visit = cleaned_reason
+
+        if 'diagnosis' in data:
+            diagnosis = data.get('diagnosis')
+            visit.diagnosis = diagnosis.strip() if isinstance(diagnosis, str) else diagnosis
+
+        if 'medications' in data:
+            visit.medications = VetVisitService._normalize_medications(data.get('medications'))
+
+        if 'recommendations' in data:
+            recommendations = data.get('recommendations')
+            visit.recommendations = recommendations.strip() if isinstance(recommendations, str) else recommendations
+
+        if 'remarks' in data:
+            remarks = data.get('remarks')
+            visit.remarks = remarks.strip() if isinstance(remarks, str) else remarks
+
+        if 'observations' in data:
+            observations = data.get('observations')
+            visit.observations = observations.strip() if isinstance(observations, str) else observations
+
+        follow_up_required = data.get('follow_up_required')
+        if follow_up_required is not None:
+            visit.follow_up_required = bool(follow_up_required)
+
+        if 'follow_up_date' in data:
+            follow_up_date_raw = data.get('follow_up_date')
+            if follow_up_date_raw in (None, ''):
+                visit.follow_up_date = None
+                if not visit.follow_up_required:
+                    visit.follow_up_status = 'Not Required'
+            else:
+                try:
+                    visit.follow_up_date = date.fromisoformat(str(follow_up_date_raw))
+                    visit.follow_up_required = True
+                    if visit.follow_up_status == 'Not Required':
+                        visit.follow_up_status = 'Scheduled'
+                except (TypeError, ValueError):
+                    return jsonify({'error': 'follow_up_date must be in YYYY-MM-DD format.'}), 400
+
+        follow_up_status = data.get('follow_up_status')
+        if follow_up_status is not None:
+            cleaned_status = str(follow_up_status).strip()
+            if cleaned_status and cleaned_status not in VetVisitService.VALID_FOLLOW_UP_STATUSES:
+                return jsonify({'error': 'Invalid follow_up_status value.'}), 400
+            if cleaned_status:
+                visit.follow_up_status = cleaned_status
+
+        if visit.follow_up_status == 'Completed' and visit.follow_up_completed_at is None:
+            visit.follow_up_completed_at = datetime.now(timezone.utc)
+
+        VetVisitRepository.save()
+        return jsonify({'message': 'Vet visit updated successfully.', 'visit': VetVisitService._serialize_visit(visit)}), 200

@@ -5,8 +5,15 @@ This is the current backend contract for the frontend integration.
 ## Access Model
 
 - Protected routes require `Authorization: Bearer <token>`.
-- Role parity is enabled for elevated users: `FARMER`, `ADMIN`, and `SUPER_ADMIN` are treated as equivalent for endpoint authorization.
-- Tenant and farm are read from JWT claims. Header override support exists for `X-Tenant-ID` and `X-Farm-ID`.
+- Elevated access policy: `FARMER`, `ADMIN`, and `SUPER_ADMIN` have full endpoint access across protected routes.
+- Tenant and farm are read from JWT claims. The backend does not rely on `X-Tenant-ID` or `X-Farm-ID` headers for request scoping.
+
+## Mutation Semantics
+
+- `400` means the request body is missing required fields or contains malformed values.
+- `404` means a referenced tenant-scoped record does not exist.
+- `409` means the create or update hits a tenant-scoped uniqueness conflict.
+- Frontend create flows should treat `409` as a business conflict and allow the user to retry with new data.
 
 ## Pagination And Filters
 
@@ -65,10 +72,95 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/animals/<cow_id>`
 - `PATCH /api/animals/<cow_id>`
 - `GET /api/animals/<cow_id>/milk-history`
+- `GET /api/production/history/<cow_id>`
 - `GET /api/animals/<cow_id>/events`
 - `POST /api/animals/<cow_id>/events`
 - `GET /api/production/milk-drop-alerts`
 - `POST /api/production/milk-drop-alerts/<alert_id>/investigate`
+
+`POST /api/herd` accepts `tag_number` and `date_of_birth` as the canonical fields. For frontend compatibility, the backend also accepts `id`/`tag`/`tagNumber` for the tag and `dob`/`dateOfBirth` for the birth date.
+
+### Herd create schema
+
+Request body:
+
+```json
+{
+	"tag_number": "C-002",
+	"name": "Ruby",
+	"breed_status": "Foundation",
+	"date_of_birth": "2026-07-01"
+}
+```
+
+Frontend aliases accepted by the backend:
+
+- `id`, `tag`, `tagNumber` -> `tag_number`
+- `dob`, `dateOfBirth` -> `date_of_birth`
+
+Response body:
+
+```json
+{
+	"id": 7,
+	"tag": "C-002",
+	"tag_number": "C-002",
+	"name": "Ruby",
+	"dob": "2026-07-01",
+	"date_of_birth": "2026-07-01",
+	"current_status": "Lactating"
+}
+```
+
+Conflict behavior:
+
+- `409` when `tag_number` already exists for the tenant
+- `400` when `tag_number` or `date_of_birth` is missing/invalid
+
+The browser payload `{ id, name, breed, dob, hasCalved }` is accepted because `id` maps to `tag_number` and `dob` maps to `date_of_birth`. `breed` is treated as an alias for `breed_status`; if omitted, the backend defaults to `Foundation`.
+
+### Animal milk history schema
+
+`GET /api/animals/<cow_id>/milk-history` and `GET /api/production/history/<cow_id>` return the same animal-scoped payload.
+
+Response body:
+
+```json
+{
+	"animal": {
+		"id": 7,
+		"tag_number": "C-002",
+		"name": "Ruby",
+		"breed": "Foundation",
+		"breed_status": "Foundation",
+		"date_of_birth": "2026-07-01",
+		"current_status": "Lactating",
+		"is_active": true
+	},
+	"sessions": [
+		{
+			"id": 44,
+			"cow_id": 7,
+			"amount": 16.5,
+			"session": "Morning",
+			"milkingDate": "2026-07-03",
+			"status": "RECORDED",
+			"milker": 3,
+			"timestamp": "2026-07-03T05:32:10+00:00"
+		}
+	],
+	"meta": {
+		"page": 1,
+		"per_page": 20,
+		"total": 1,
+		"pages": 1
+	}
+}
+```
+
+Volume field convention:
+
+- API responses use `amount` as the canonical milk-volume field.
 
 ## Frontend-Critical Clinical/Safety Routes
 
@@ -93,6 +185,7 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/production/yield`
 - `POST /api/production/yield`
 - `GET /api/production/yield/<log_id>`
+- `PATCH /api/production/yield/<log_id>`
 - `DELETE /api/production/yield/<log_id>`
 - `GET /api/production/summary`
 - `GET /api/breeding`
@@ -118,6 +211,51 @@ Legacy compatibility:
 - `POST /api/inventory/movements`
 - `GET /api/inventory/stock`
 
+### Inventory item create schema
+
+Request body:
+
+```json
+{
+	"name": "hay",
+	"sku": "h-001",
+	"category": "Bulk Feed",
+	"unit": "KG",
+	"currentStock": 164,
+	"reorderLevel": 10,
+	"energy_mj_per_kg": 0,
+	"protein_grams_per_kg": 0,
+	"fiber_grams_per_kg": 0,
+	"cost_per_kg": 0
+}
+```
+
+Accepted aliases:
+
+- `current_qty` -> `currentStock`
+- `minimum_threshold` -> `reorderLevel`
+
+Response body:
+
+```json
+{
+	"id": 1,
+	"name": "hay",
+	"sku": "h-001",
+	"category": "Bulk Feed",
+	"unit": "KG",
+	"reorderLevel": 10.0,
+	"currentStock": 164.0
+}
+```
+
+Conflict behavior:
+
+- `409` when `name` or `sku` already exists for the tenant
+- `400` when `name`, `category`, or `unit` is missing
+
+Frontend should treat `409` as a duplicate-item conflict, not a transport failure.
+
 ## Finance
 
 - `GET /api/finance/unit-cost`
@@ -134,18 +272,148 @@ Legacy compatibility:
 - `POST /api/finance/billing/stk-push`
 - `POST /api/finance/mpesa/callback`
 
+### Finance create schemas
+
+Buyer create request:
+
+```json
+{
+	"name": "Kisii Dairy",
+	"agreed_rate_per_liter": 55,
+	"is_active": true
+}
+```
+
+Buyer response:
+
+```json
+{
+	"id": 3,
+	"name": "Kisii Dairy"
+}
+```
+
+Conflict behavior:
+
+- `409` when buyer name already exists for the tenant
+
+Customer create request:
+
+```json
+{
+	"name": "Mary",
+	"phone_number": "254712345678",
+	"account_balance": 0,
+	"daily_contract_liters": 0,
+	"is_active": true
+}
+```
+
+Customer response:
+
+```json
+{
+	"id": 5,
+	"name": "Mary",
+	"phone_number": "254712345678",
+	"account_balance": 0.0,
+	"daily_contract_liters": 0.0,
+	"is_active": true
+}
+```
+
+Conflict behavior:
+
+- `409` when phone number already exists for the tenant
+
+Ledger entry create request:
+
+```json
+{
+	"transaction_type": "Expense",
+	"category": "Feed Purchase",
+	"amount": 1000,
+	"reference_code": "REF-123",
+	"description": "Morning feed",
+	"customer_id": null
+}
+```
+
 ## Dashboard
 
 - `GET /api/v1/dashboard/summary`
 - `GET /api/production/summary`
 
+Dashboard tenant scope behavior:
+
+- `/api/v1/dashboard/summary` and `/api/production/summary` resolve tenant scope from JWT request context.
+- Optional compatibility check: `X-Tenant-ID` can be supplied and must match the authenticated tenant.
+- The client does not need to pass `tenant_id` as a query parameter.
+
 ## Breeding Alias
 
 - `PATCH /api/v1/breeding/insemination/<log_id>/outcome`
 
+### Production yield create and edit schema
+
+Yield create request:
+
+```json
+{
+	"cow_id": 7,
+	"amount": 18.0,
+	"session": "Morning"
+}
+```
+
+Yield create response:
+
+```json
+{
+	"id": 55,
+	"cow_id": 7,
+	"cow_name": "Ruby",
+	"amount": 18.0,
+	"session": "Morning",
+	"milkingDate": "2026-07-03",
+	"status": "RECORDED"
+}
+```
+
+Yield edit request (`PATCH /api/production/yield/<log_id>`):
+
+```json
+{
+	"amount": 17.5,
+	"session": "Evening",
+	"milkingDate": "2026-07-03T16:30:00+00:00"
+}
+```
+
+Yield detail response (`GET /api/production/yield/<log_id>`) includes:
+
+- `cow_id`
+- `cow_name`
+- `breed`
+- `average`
+- `peak`
+- `sessions` (animal session history)
+
 ## Nutrition And Feed
 
-- `POST /api/v1/feed/calculate-schedule`
+### Feed Schedule & Per-Cow Yield Targets (NEW)
+
+- `POST /api/v1/feed/calculate-schedule` - Legacy herd-level calculation
+- `POST /api/v1/animals/<cow_id>/yield-target` - Set/update cow milk target
+- `GET /api/v1/animals/<cow_id>/yield-target` - Get cow milk target
+- `PATCH /api/v1/animals/<cow_id>/yield-target` - Update cow target fields
+- `DELETE /api/v1/animals/<cow_id>/yield-target` - Deactivate cow target
+- `GET /api/v1/herd/yield-targets` - List all active yield targets
+- `GET /api/v1/herd/feeding-plan/from-targets` - Calculate plan from saved targets (LACTATING cows only)
+- `POST /api/v1/herd/feeding-plan/custom` - Calculate plan from custom cow targets
+
+### Nutrition & Feed Batch Management
+
 - `POST /api/v1/nutrition/batches`
 - `POST /api/v1/nutrition/batches/<batch_id>/consumption-events`
 - `GET /api/v1/nutrition/analytics/feed-cost-efficiency`
@@ -168,6 +436,243 @@ Legacy compatibility:
 - `POST /api/units/conversions`
 - `GET /api/v1/nutrition/feed/costing`
 - `GET /api/feed/costing`
+
+### Per-Cow Yield Target Endpoints (NEW)
+
+#### POST /api/v1/animals/<cow_id>/yield-target
+Set or update milk production target for a specific cow.
+
+Request body:
+```json
+{
+  "target_liters": 2.5,
+  "base_herd_feed_kg": 0.5,
+  "times_to_feed_daily": 2
+}
+```
+
+Response (201 Created or 200 OK):
+```json
+{
+  "id": 12,
+  "cow_id": 5,
+  "cow_tag": "C-001",
+  "target_liters": 2.5,
+  "base_herd_feed_kg": 0.5,
+  "times_to_feed_daily": 2,
+  "status": "Active",
+  "action": "created"
+}
+```
+
+Error behavior:
+- `400` when `target_liters` is missing or invalid
+- `400` when `times_to_feed_daily` not in {2, 3, 4}
+- `400` when cow is not LACTATING or DRY status
+- `400` when cow is inactive
+
+#### GET /api/v1/animals/<cow_id>/yield-target
+Retrieve yield target for a specific cow.
+
+Response (200 OK):
+```json
+{
+  "id": 12,
+  "cow_id": 5,
+  "cow_tag": "C-001",
+  "cow_name": "Bessie",
+  "cow_status": "Lactating",
+  "target_liters": 2.5,
+  "base_herd_feed_kg": 0.5,
+  "times_to_feed_daily": 2,
+  "status": "Active"
+}
+```
+
+Error behavior:
+- `404` when no yield target exists for cow
+
+#### GET /api/v1/herd/yield-targets
+List all active yield targets for the herd.
+
+Response (200 OK):
+```json
+{
+  "count": 3,
+  "targets": [
+    {
+      "id": 12,
+      "cow_id": 5,
+      "cow_tag": "C-001",
+      "cow_name": "Bessie",
+      "cow_status": "Lactating",
+      "target_liters": 2.5,
+      "base_herd_feed_kg": 0.5,
+      "times_to_feed_daily": 2,
+      "status": "Active"
+    }
+  ]
+}
+```
+
+#### PATCH /api/v1/animals/<cow_id>/yield-target
+Update specific fields of a yield target (partial update).
+
+Request body (any combination):
+```json
+{
+  "target_liters": 3.0,
+  "times_to_feed_daily": 3
+}
+```
+
+Response (200 OK): Same as POST response
+
+Error behavior:
+- `400` for invalid field values
+- `404` when target doesn't exist
+
+#### DELETE /api/v1/animals/<cow_id>/yield-target
+Deactivate a yield target (soft delete).
+
+Response (200 OK):
+```json
+{
+  "id": 12,
+  "cow_id": 5,
+  "cow_tag": "C-001",
+  "status": "Inactive",
+  "message": "Yield target for C-001 deactivated."
+}
+```
+
+Error behavior:
+- `404` when target doesn't exist
+
+### Herd Feeding Plan Endpoints (NEW)
+
+#### GET /api/v1/herd/feeding-plan/from-targets?milking_frequency=2
+Calculate herd feeding plan from saved yield targets (LACTATING cows only).
+
+Query parameters:
+- `milking_frequency` (optional): Override recommended frequency with 2, 3, or 4
+
+Response (200 OK):
+```json
+{
+  "herd_total_target_liters": 6.3,
+  "total_meal_needed_kg": 1.2,
+  "total_milking_topup_kg": 0.5,
+  "per_milking_session_kg": 0.25,
+  "suggested_yard_feedings": 2,
+  "used_milking_frequency": 2,
+  "farmer_reasoning": "Standard layout. 2 daily feedings.",
+  "cow_breakdown": [
+    {
+      "cow_id": 5,
+      "cow_tag": "C-001",
+      "cow_name": "Bessie",
+      "target_liters": 2.5,
+      "feed_allocation_kg": 0.48,
+      "topup_per_session_kg": 0.12,
+      "times_to_feed": 2
+    }
+  ],
+  "active_lactating_count": 3,
+  "dry_or_inactive_count": 1,
+  "total_herd_count": 4
+}
+```
+
+Error behavior:
+- `400` when no active yield targets exist for lactating cows
+
+#### POST /api/v1/herd/feeding-plan/custom
+Calculate herd feeding plan from manually provided cow targets.
+
+Request body:
+```json
+{
+  "cow_targets": [
+    {"cow_id": 1, "target_liters": 2.5},
+    {"cow_id": 2, "target_liters": 2.0}
+  ],
+  "baseline_herd_meal_kg": 4.0,
+  "milking_frequency": null
+}
+```
+
+Response (200 OK): Same structure as `/from-targets`
+
+Error behavior:
+- `400` when `cow_targets` is empty
+- `400` when any target lacks `cow_id` or `target_liters`
+- `400` when `target_liters` is not > 0
+
+### Nutrition create schemas
+
+Recipe create request:
+
+```json
+{
+	"name": "Winter Mix",
+	"target_protein_percentage": 18,
+	"is_active": true,
+	"ingredients": [
+		{
+			"inventory_item_id": 1,
+			"inclusion_percentage": 100
+		}
+	]
+}
+```
+
+Conflict / validation behavior:
+
+- `404` when an ingredient `inventory_item_id` does not exist for the tenant
+- `409` when the recipe insert hits a tenant-scoped uniqueness conflict
+
+Unit conversion create request:
+
+```json
+{
+	"item_id": 1,
+	"unit_name": "Bag",
+	"kg_equivalent": 50
+}
+```
+
+Conflict behavior:
+
+- `409` when the unit conversion already exists for the tenant
+
+Batch create request:
+
+```json
+{
+	"batchName": "June Feed Mix A",
+	"formulaId": null,
+	"isSavedAsTemplate": false,
+	"formulaName": "June Feed Mix A",
+	"totalWeight": 100,
+	"totalCost": 6200,
+	"costPerKg": 62,
+	"ingredients": [
+		{
+			"ingredientId": 1,
+			"weight": 60,
+			"percentage": 60,
+			"lockedCostPerKg": 55
+		}
+	]
+}
+```
+
+Validation behavior:
+
+- `400` for malformed totals or ingredient data
+- `404` when `formulaId` or ingredient references are invalid for the tenant
+- `409` when a tenant-scoped uniqueness violation occurs during save
 
 ## Tenant, Export, Tasking
 

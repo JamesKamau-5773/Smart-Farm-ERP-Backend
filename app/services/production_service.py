@@ -12,7 +12,7 @@ class ProductionService:
         livestock_id = cow_id
         
         # 1. Validate Livestock and retrieve current Hardlock state
-        livestock = CowRepository.get_by_id(livestock_id)
+        livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({"error": "Cow not found."}), 404
         
@@ -49,9 +49,17 @@ class ProductionService:
         # 5. Prepare the Smart Response
         response = {
             "message": "Milk logged successfully.",
+            "id": log.id,
             "log_id": log.id,
+            "cow_id": log.cow_id,
+            "cow_name": livestock.name,
+            "amount": float(log.amount_liters),
+            "session": log.session,
+            "milkingDate": log.timestamp.date().isoformat() if log.timestamp else None,
+            "status": log.status,
             "saleable": is_saleable,
-            "anomaly_detected": is_anomaly
+            "anomaly_detected": is_anomaly,
+            "recorded_by": log.recorded_by,
         }
         
         # Add actionable warnings to the response payload if necessary

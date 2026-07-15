@@ -1,3 +1,6 @@
+from flask import current_app, g, has_app_context
+from sqlalchemy import event
+
 from app import db
 from datetime import datetime, timezone
 
@@ -17,7 +20,8 @@ class Cow(db.Model):
     __tablename__ = 'cows'
 
     id = db.Column(db.Integer, primary_key=True)
-    tag_number = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    tag_number = db.Column(db.String(50), nullable=False, index=True)
     name = db.Column(db.String(100))
     breed_status = db.Column(db.String(50), default=BreedStatus.FOUNDATION, nullable=False)
     date_of_birth = db.Column(db.Date, nullable=False)
@@ -31,6 +35,13 @@ class Cow(db.Model):
     is_hardlocked = db.Column(db.Boolean, default=False)
     current_status = db.Column(db.String(50), default=CowStatus.LACTATING, nullable=False)
     is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     # Relationships
     lactation_cycles = db.relationship('LactationCycle', backref=db.backref('livestock', lazy=True), lazy=True)
@@ -44,6 +55,33 @@ class Cow(db.Model):
         cascade='all, delete-orphan',
     )
 
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'tag_number', name='uq_cows_tenant_tag_number'),
+    )
+
+
+def _resolve_default_tenant_id():
+    if has_app_context():
+        tenant_public_id = getattr(g, 'tenant_id', None)
+        if tenant_public_id:
+            try:
+                from app.utils.jwt_payload import parse_public_int_id
+
+                return parse_public_int_id(tenant_public_id, 'tenant_')
+            except (TypeError, ValueError):
+                pass
+
+    from app.models.tenant import Tenant
+
+    tenant = Tenant.query.order_by(Tenant.id.asc()).first()
+    return tenant.id if tenant else None
+
+
+@event.listens_for(Cow, 'before_insert')
+def set_cow_tenant(mapper, connection, target):
+    if target.tenant_id is None:
+        target.tenant_id = _resolve_default_tenant_id()
+
 
 class AnimalYieldTarget(db.Model):
     __tablename__ = 'animal_yield_targets'
@@ -56,6 +94,8 @@ class AnimalYieldTarget(db.Model):
     base_herd_feed_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     milking_topup_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     status = db.Column(db.String(20), default='Active', nullable=False)
+    is_active = db.Column(db.Boolean, default=True, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     cow = db.relationship('Cow', backref=db.backref('yield_targets', lazy=True))
 
@@ -90,12 +130,18 @@ class BreedingLog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), nullable=False, index=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False, index=True)
-    semen_id = db.Column(db.Integer, db.ForeignKey('semen_inventory.id'), nullable=False, index=True)
+    inventory_semen_id = db.Column(db.Integer, db.ForeignKey('semen_inventory.id'), nullable=True, index=True)
+    external_sire_code = db.Column(db.String(100), nullable=True)
+    provided_by = db.Column(db.String(20), nullable=False, default='FARM')
     insemination_date = db.Column(db.Date, nullable=False)
     expected_calving_date = db.Column(db.Date, nullable=True)
     status = db.Column(db.String(20), nullable=False, default='Pending')
 
     __table_args__ = (
+        db.CheckConstraint(
+            "provided_by IN ('FARM', 'VET')",
+            name='ck_breeding_logs_provided_by_valid'
+        ),
         db.CheckConstraint(
             "status IN ('Pending', 'Pregnant', 'Failed')",
             name='ck_breeding_logs_status_valid'
@@ -105,6 +151,14 @@ class BreedingLog(db.Model):
     @property
     def cow(self):
         return self.livestock
+
+    @property
+    def semen_id(self):
+        return self.inventory_semen_id
+
+    @semen_id.setter
+    def semen_id(self, value):
+        self.inventory_semen_id = value
 
 class LactationCycle(db.Model):
     __tablename__ = 'lactation_cycles'
@@ -130,6 +184,7 @@ class MedicalRecord(db.Model):
     __tablename__ = 'medical_records'
 
     id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False)
     vet_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     visit_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -142,6 +197,27 @@ class MedicalRecord(db.Model):
     @property
     def cow(self):
         return self.livestock
+
+
+@event.listens_for(MedicalRecord, 'before_insert')
+def set_medical_record_tenant(mapper, connection, target):
+    if target.tenant_id is not None:
+        return
+
+    if has_app_context():
+        tenant_public_id = getattr(g, 'tenant_id', None)
+        if tenant_public_id:
+            try:
+                from app.utils.jwt_payload import parse_public_int_id
+
+                target.tenant_id = parse_public_int_id(tenant_public_id, 'tenant_')
+                return
+            except (TypeError, ValueError):
+                pass
+
+    cow = db.session.get(Cow, target.cow_id) if target.cow_id is not None else None
+    if cow is not None:
+        target.tenant_id = cow.tenant_id
 
 
 class VetVisit(db.Model):

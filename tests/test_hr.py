@@ -166,6 +166,7 @@ class HRTestCase(BaseTestCase):
             payroll_run_data = json.loads(payroll_run_response.data.decode())
             self.assertIn('run', payroll_run_data)
             self.assertIn('lineItems', payroll_run_data)
+            self.assertIn('summary', payroll_run_data)
             self.assertGreaterEqual(len(payroll_run_data['lineItems']), 1)
             line_item = payroll_run_data['lineItems'][0]
             self.assertIn('approvedLeaveDays', line_item)
@@ -173,6 +174,36 @@ class HRTestCase(BaseTestCase):
             self.assertIn('advanceDeduction', line_item)
             self.assertIn('grossPay', line_item)
             self.assertIn('netPay', line_item)
+            self.assertIn('totalLeaveDeductions', payroll_run_data['run'])
+            self.assertIn('totalOverduePenaltyDeductions', payroll_run_data['run'])
+            self.assertIn('totalAdvanceDeductions', payroll_run_data['run'])
+            self.assertIn('totalDeductions', payroll_run_data['run'])
+
+    def test_staff_status_is_authoritatively_overdue_on_read(self):
+        self._login()
+
+        with self.client:
+            staff_response = self.client.post(
+                '/api/hr/staff',
+                data=json.dumps(
+                    dict(
+                        full_name='Late Return Staff',
+                        hire_date='2026-05-01',
+                        base_salary=30000,
+                        status='ON_LEAVE',
+                        leave_start_date='2026-06-01',
+                        expected_return_date='2026-06-10',
+                    )
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(staff_response.status_code, 201)
+            staff_id = json.loads(staff_response.data.decode())['id']
+
+            detail_response = self.client.get(f'/api/hr/staff/{staff_id}')
+            self.assertEqual(detail_response.status_code, 200)
+            detail_data = json.loads(detail_response.data.decode())
+            self.assertEqual(detail_data['status'], 'OVERDUE')
 
     def test_list_staff_and_payroll(self):
         self._login()

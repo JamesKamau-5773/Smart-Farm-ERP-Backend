@@ -76,26 +76,6 @@ def set_tenant_context():
     tenant_id = claims.get("tenant_id")
     farm_id = claims.get("farm_id")
 
-    header_tenant_id = None
-    header_farm_id = None
-    header_cooperative_id = None
-    try:
-        from flask import request
-        header_tenant_id = request.headers.get('X-Tenant-ID')
-        header_farm_id = request.headers.get('X-Farm-ID')
-        header_cooperative_id = request.headers.get('X-Cooperative-ID')
-    except Exception:
-        header_tenant_id = None
-        header_farm_id = None
-        header_cooperative_id = None
-
-    if header_tenant_id:
-        tenant_id = header_tenant_id
-    if header_cooperative_id:
-        tenant_id = header_cooperative_id
-    if header_farm_id:
-        farm_id = header_farm_id
-
     g.tenant_id = tenant_id
     g.cooperative_id = tenant_id
     g.farm_id = farm_id

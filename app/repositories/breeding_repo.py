@@ -42,6 +42,18 @@ class SemenInventoryRepository:
         return SemenInventory.query.filter_by(straw_code=straw_code, tenant_id=tenant_id).first()
 
     @staticmethod
+    def get_by_bull_name_for_tenant(bull_name: str, tenant_id: int) -> SemenInventory:
+        cleaned_name = (bull_name or "").strip()
+        if not cleaned_name:
+            return None
+        return (
+            SemenInventory.query
+            .filter(SemenInventory.tenant_id == tenant_id)
+            .filter(func.lower(SemenInventory.bull_name) == cleaned_name.lower())
+            .first()
+        )
+
+    @staticmethod
     def save() -> None:
         try:
             db.session.commit()
@@ -52,12 +64,24 @@ class SemenInventoryRepository:
 
 class BreedingLogRepository:
     @staticmethod
-    def create(*, tenant_id: int, cow_id: int, semen_id: int, insemination_date: date, expected_calving_date=None, status: str = "Pending") -> BreedingLog:
+    def create(
+        *,
+        tenant_id: int,
+        cow_id: int,
+        inventory_semen_id: int | None,
+        external_sire_code: str | None,
+        provided_by: str,
+        insemination_date: date,
+        expected_calving_date=None,
+        status: str = "Pending",
+    ) -> BreedingLog:
         try:
             log = BreedingLog(
                 tenant_id=tenant_id,
                 cow_id=cow_id,
-                semen_id=semen_id,
+                inventory_semen_id=inventory_semen_id,
+                external_sire_code=external_sire_code,
+                provided_by=provided_by,
                 insemination_date=insemination_date,
                 expected_calving_date=expected_calving_date,
                 status=status,
@@ -93,7 +117,7 @@ class BreedingAnalyticsRepository:
                 func.count(BreedingLog.id).label("total_services"),
                 func.sum(case((BreedingLog.status == "Pregnant", 1), else_=0)).label("pregnant_cases"),
             )
-            .join(BreedingLog, BreedingLog.semen_id == SemenInventory.id)
+            .join(BreedingLog, BreedingLog.inventory_semen_id == SemenInventory.id)
             .filter(SemenInventory.tenant_id == tenant_id, BreedingLog.tenant_id == tenant_id)
             .group_by(SemenInventory.id, SemenInventory.bull_name, SemenInventory.straw_code)
             .all()
@@ -108,7 +132,7 @@ class BreedingAnalyticsRepository:
             .join(BreedingLog, BreedingLog.cow_id == Cow.id)
             .filter(
                 BreedingLog.tenant_id == tenant_id,
-                BreedingLog.semen_id == semen_id,
+                BreedingLog.inventory_semen_id == semen_id,
                 BreedingLog.status == "Pregnant",
             )
             .scalar()
@@ -122,7 +146,7 @@ class BreedingAnalyticsRepository:
             .join(BreedingLog, BreedingLog.cow_id == Cow.id)
             .filter(
                 BreedingLog.tenant_id == tenant_id,
-                BreedingLog.semen_id == semen_id,
+                BreedingLog.inventory_semen_id == semen_id,
                 BreedingLog.status == "Pregnant",
                 MilkLog.butterfat_pct.isnot(None),
             )

@@ -32,9 +32,14 @@ class Config:
     JWT_TOKEN_LOCATION = ['cookies', 'headers']
     JWT_COOKIE_SECURE = os.environ.get('JWT_COOKIE_SECURE', 'False') == 'True'  # Enforce True in Production (HTTPS)
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=2)
-    JWT_COOKIE_CSRF_PROTECT = True
+    JWT_COOKIE_CSRF_PROTECT = os.environ.get('JWT_COOKIE_CSRF_PROTECT', 'False') == 'True'
     JWT_CSRF_IN_COOKIES = True
     BOOTSTRAP_SUPER_ADMIN_KEY = os.environ.get('BOOTSTRAP_SUPER_ADMIN_KEY', '')
+    
+    # CORS: Whitelist of allowed origins for better security
+    CORS_ALLOWED_ORIGINS = os.environ.get(
+        'CORS_ALLOWED_ORIGINS', 'http://localhost:5173'
+    ).split(',')
     
     SQLALCHEMY_DATABASE_URI = _postgres_database_uri(
         'DATABASE_URL',

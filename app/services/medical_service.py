@@ -4,12 +4,12 @@ from flask import jsonify
 
 class MedicalService:
     @staticmethod
-    def log_clinical_visit(cow_id, vet_id, data):
+    def log_clinical_visit(tenant_id, cow_id, vet_id, data):
         """Processes Vet input and suggests a hardlock if withdrawal days > 0."""
         livestock_id = cow_id
 
         # 1. Validate Livestock Exists
-        livestock = CowRepository.get_by_id(livestock_id)
+        livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({"error": "Cow not found in registry."}), 404
 
@@ -23,7 +23,7 @@ class MedicalService:
             return jsonify({"error": "Diagnosis is required for clinical logs."}), 400
 
         # 3. Save Record
-        record = MedicalRepository.create_record(livestock_id, vet_id, diagnosis, medication, withdrawal_days, remarks)
+        record = MedicalRepository.create_record(tenant_id, livestock_id, vet_id, diagnosis, medication, withdrawal_days, remarks)
         
         # 4. Generate Alert Payload
         response = {
@@ -48,14 +48,14 @@ class MedicalService:
         return jsonify(response), 201
 
     @staticmethod
-    def enforce_hardlock(cow_id, is_locked, user_id, ip_address):
+    def enforce_hardlock(tenant_id, cow_id, is_locked, user_id, ip_address):
         """Processes the Farmer's decision to lock/unlock livestock."""
         livestock_id = cow_id
-        livestock = CowRepository.get_by_id(livestock_id)
+        livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({"error": "Cow not found in registry."}), 404
 
-        updated_livestock = MedicalRepository.toggle_hardlock(livestock_id, is_locked, user_id, ip_address)
+        updated_livestock = MedicalRepository.toggle_hardlock(tenant_id, livestock_id, is_locked, user_id, ip_address)
         
         status = "LOCKED (Internal Use Only)" if is_locked else "UNLOCKED (Saleable)"
         return jsonify({

@@ -208,6 +208,30 @@ class AuthTestCase(BaseTestCase):
             data = json.loads(response.data.decode())
             self.assertTrue(data['access_token'])
 
+    def test_super_admin_cannot_be_deleted_without_override(self):
+        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
+
+        with self.app.app_context():
+            admin = User.query.filter_by(username='platform_admin').first()
+            db.session.delete(admin)
+            with self.assertRaises(ValueError):
+                db.session.commit()
+            db.session.rollback()
+
+    def test_super_admin_can_be_deleted_with_explicit_override(self):
+        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
+        original = self.app.config.get('ALLOW_SUPER_ADMIN_REMOVAL', False)
+        self.app.config['ALLOW_SUPER_ADMIN_REMOVAL'] = True
+
+        try:
+            with self.app.app_context():
+                admin = User.query.filter_by(username='platform_admin').first()
+                db.session.delete(admin)
+                db.session.commit()
+                self.assertIsNone(User.query.filter_by(username='platform_admin').first())
+        finally:
+            self.app.config['ALLOW_SUPER_ADMIN_REMOVAL'] = original
+
     def test_superadmin_can_create_cooperative(self):
         self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
 

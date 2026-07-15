@@ -1,3 +1,4 @@
+from __future__ import annotations
 from datetime import date
 from datetime import datetime, timezone
 import calendar
@@ -74,6 +75,23 @@ class HRService:
             if employee.expected_return_date < date.today():
                 return 'OVERDUE'
         return status
+
+    @staticmethod
+    def _synchronize_employee_status(employee):
+        computed_status = HRService._current_status(employee)
+        if employee.status != computed_status:
+            employee.status = computed_status
+            return True
+        return False
+
+    @staticmethod
+    def _synchronize_employee_statuses(employees):
+        changed = False
+        for employee in employees:
+            changed = HRService._synchronize_employee_status(employee) or changed
+        if changed:
+            db.session.commit()
+        return changed
 
     @staticmethod
     def _compute_leave_days(employee, payroll_year: int, payroll_month: int):
@@ -340,6 +358,10 @@ class HRService:
             return_verification_note=data.get('return_verification_note', data.get('returnVerificationNote')),
         )
 
+        # Persist the authoritative status immediately for newly registered staff.
+        if HRService._synchronize_employee_status(employee):
+            db.session.commit()
+
         return jsonify({
             'message': 'Employee registered successfully.',
             **HRService._serialize_employee(employee),
@@ -348,6 +370,7 @@ class HRService:
     @staticmethod
     def list_employees(tenant_id: int):
         employees = EmployeeRepository.list_by_tenant(tenant_id)
+        HRService._synchronize_employee_statuses(employees)
         payload = [HRService._serialize_employee(employee) for employee in employees]
         return jsonify(payload), 200
 
@@ -356,6 +379,8 @@ class HRService:
         employee = EmployeeRepository.get_by_id_for_tenant(staff_id, tenant_id)
         if not employee:
             return jsonify({'error': 'Employee not found for this tenant.'}), 404
+        if HRService._synchronize_employee_status(employee):
+            db.session.commit()
         return jsonify(HRService._serialize_employee(employee)), 200
 
     @staticmethod
@@ -626,9 +651,14 @@ class HRService:
             return jsonify({'error': 'payroll_year and payroll_month must be integers.'}), 400
 
         employees = EmployeeRepository.list_by_tenant(tenant_id)
+        HRService._synchronize_employee_statuses(employees)
         line_items = [HRService._build_payroll_run_line_item(employee, payroll_year, payroll_month) for employee in employees]
         total_gross = sum(Decimal(str(item['grossPay'])) for item in line_items)
         total_net = sum(Decimal(str(item['netPay'])) for item in line_items)
+        total_leave_deductions = sum(Decimal(str(item['leaveDeduction'])) for item in line_items)
+        total_overdue_penalty_deductions = sum(Decimal(str(item['overduePenaltyDeduction'])) for item in line_items)
+        total_advance_deductions = sum(Decimal(str(item['advanceDeduction'])) for item in line_items)
+        total_deductions = total_leave_deductions + total_overdue_penalty_deductions + total_advance_deductions
 
         generated_at = datetime.now(timezone.utc)
         response = {
@@ -643,11 +673,25 @@ class HRService:
                 'staffCount': len(line_items),
                 'totalGrossPay': float(total_gross),
                 'totalNetPay': float(total_net),
+                'totalLeaveDeductions': float(total_leave_deductions),
+                'totalOverduePenaltyDeductions': float(total_overdue_penalty_deductions),
+                'totalAdvanceDeductions': float(total_advance_deductions),
+                'totalDeductions': float(total_deductions),
                 'metadata': {
                     'tenantId': tenant_id,
                     'payrollYear': payroll_year,
                     'payrollMonth': payroll_month,
+                    'calculationSource': 'server',
                 },
+            },
+            'summary': {
+                'staff_count': len(line_items),
+                'total_gross_pay': float(total_gross),
+                'total_net_pay': float(total_net),
+                'total_leave_deductions': float(total_leave_deductions),
+                'total_overdue_penalty_deductions': float(total_overdue_penalty_deductions),
+                'total_advance_deductions': float(total_advance_deductions),
+                'total_deductions': float(total_deductions),
             },
             'lineItems': line_items,
         }
@@ -692,9 +736,14 @@ class HRService:
             return jsonify({'error': 'run_id must be in YYYY-MM format.'}), 400
 
         employees = EmployeeRepository.list_by_tenant(tenant_id)
+        HRService._synchronize_employee_statuses(employees)
         line_items = [HRService._build_payroll_run_line_item(employee, payroll_year, payroll_month) for employee in employees]
         total_gross = sum(Decimal(str(item['grossPay'])) for item in line_items)
         total_net = sum(Decimal(str(item['netPay'])) for item in line_items)
+        total_leave_deductions = sum(Decimal(str(item['leaveDeduction'])) for item in line_items)
+        total_overdue_penalty_deductions = sum(Decimal(str(item['overduePenaltyDeduction'])) for item in line_items)
+        total_advance_deductions = sum(Decimal(str(item['advanceDeduction'])) for item in line_items)
+        total_deductions = total_leave_deductions + total_overdue_penalty_deductions + total_advance_deductions
 
         payload = {
             'run': {
@@ -704,6 +753,19 @@ class HRService:
                 'staffCount': len(line_items),
                 'totalGrossPay': float(total_gross),
                 'totalNetPay': float(total_net),
+                'totalLeaveDeductions': float(total_leave_deductions),
+                'totalOverduePenaltyDeductions': float(total_overdue_penalty_deductions),
+                'totalAdvanceDeductions': float(total_advance_deductions),
+                'totalDeductions': float(total_deductions),
+            },
+            'summary': {
+                'staff_count': len(line_items),
+                'total_gross_pay': float(total_gross),
+                'total_net_pay': float(total_net),
+                'total_leave_deductions': float(total_leave_deductions),
+                'total_overdue_penalty_deductions': float(total_overdue_penalty_deductions),
+                'total_advance_deductions': float(total_advance_deductions),
+                'total_deductions': float(total_deductions),
             },
             'lineItems': line_items,
         }

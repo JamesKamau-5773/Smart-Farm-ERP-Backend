@@ -1,16 +1,20 @@
+from __future__ import annotations
 from decimal import Decimal
 
 from app.models.supply import InventoryItem, MilkLog, InventoryTransaction
 from app import db
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import func
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 class MilkRepository:
     @staticmethod
     def create_log(cow_id: int, amount: float, session: str, recorded_by: int, tenant_id: int, is_saleable: bool, is_anomaly: bool, butterfat_pct=None) -> MilkLog:
         """Logs a milking session."""
         try:
+            status = MilkLog.STATUS_FLAGGED if is_anomaly else (
+                MilkLog.STATUS_ISOLATED if not is_saleable else MilkLog.STATUS_RECORDED
+            )
             log = MilkLog(
                 tenant_id=tenant_id,
                 cow_id=cow_id,
@@ -18,6 +22,7 @@ class MilkRepository:
                 session=session,
                 recorded_by=recorded_by,
                 butterfat_pct=butterfat_pct,
+                status=status,
                 is_saleable=is_saleable,
                 anomaly_flag=is_anomaly
             )
@@ -115,6 +120,9 @@ class InventoryRepository:
             db.session.add(item)
             db.session.commit()
             return item
+        except IntegrityError:
+            db.session.rollback()
+            raise ValueError("Inventory item name or sku already exists for this tenant.")
         except SQLAlchemyError:
             db.session.rollback()
             raise Exception("Failed, Database error while saving inventory item.")
@@ -179,6 +187,10 @@ class InventoryRepository:
         unit: str = None,
         current_qty=None,
         minimum_threshold=None,
+        energy_mj_per_kg=None,
+        protein_grams_per_kg=None,
+        fiber_grams_per_kg=None,
+        cost_per_kg=None,
     ) -> InventoryItem:
         try:
             item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
@@ -197,6 +209,14 @@ class InventoryRepository:
                 item.current_qty = Decimal(str(current_qty))
             if minimum_threshold is not None:
                 item.minimum_threshold = Decimal(str(minimum_threshold))
+            if energy_mj_per_kg is not None:
+                item.energy_mj_per_kg = Decimal(str(energy_mj_per_kg))
+            if protein_grams_per_kg is not None:
+                item.protein_grams_per_kg = Decimal(str(protein_grams_per_kg))
+            if fiber_grams_per_kg is not None:
+                item.fiber_grams_per_kg = Decimal(str(fiber_grams_per_kg))
+            if cost_per_kg is not None:
+                item.cost_per_kg = Decimal(str(cost_per_kg))
 
             db.session.commit()
             return item

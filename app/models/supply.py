@@ -473,6 +473,11 @@ class MilkSession:
 class MilkLog(db.Model):
     """Tracks daily yield and flags anomalies or hardlocked milk."""
     __tablename__ = 'milk_logs'
+
+    STATUS_RECORDED = 'RECORDED'
+    STATUS_ISOLATED = 'ISOLATED'
+    STATUS_FLAGGED = 'FLAGGED'
+    STATUS_VERIFIED = 'VERIFIED'
     
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
@@ -484,10 +489,18 @@ class MilkLog(db.Model):
     butterfat_pct = db.Column(db.Numeric(5, 2), nullable=True)
     
     # Critical Commercial Flags
+    status = db.Column(db.String(20), nullable=False, default=STATUS_RECORDED)
     is_saleable = db.Column(db.Boolean, default=True, nullable=False) 
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
     verified_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "status IN ('RECORDED', 'ISOLATED', 'FLAGGED', 'VERIFIED')",
+            name='ck_milk_logs_status_valid',
+        ),
+    )
 
 
 class MilkDropAlert(db.Model):

@@ -84,3 +84,50 @@ class VetVisitTestCase(BaseTestCase):
             complete_data = json.loads(complete_response.data.decode())
             self.assertEqual(complete_data['visit']['follow_up_status'], 'Completed')
             self.assertIsNotNone(complete_data['visit']['follow_up_completed_at'])
+
+    def test_update_medical_record_alias(self):
+        self._login('vet')
+
+        with self.client:
+            create_response = self.client.post(
+                '/api/medical/records',
+                data=json.dumps(
+                    {
+                        'date': '2026-07-09',
+                        'cow': self.cow.tag_number,
+                        'reason': 'Routine check',
+                        'diagnosis': 'initial',
+                        'meds': ['vitamin'],
+                    }
+                ),
+                content_type='application/json'
+            )
+            self.assertEqual(create_response.status_code, 201)
+            visit_id = json.loads(create_response.data.decode())['visit']['id']
+
+            update_response = self.client.put(
+                f'/api/medical/records/{visit_id}',
+                data=json.dumps(
+                    {
+                        'date': '2026-07-09',
+                        'cow': '',
+                        'reason': '',
+                        'diagnosis': 'mastitis',
+                        'meds': ['antibiotic'],
+                        'recommendations': 'seclude milk for 3 days',
+                        'status': 'Closed',
+                        'severity': 'Medium',
+                        'vet': '',
+                        'followUp': '2026-07-13',
+                        'updatedBy': '',
+                    }
+                ),
+                content_type='application/json'
+            )
+
+            self.assertEqual(update_response.status_code, 200)
+            payload = json.loads(update_response.data.decode())
+            self.assertEqual(payload['visit']['diagnosis'], 'mastitis')
+            self.assertEqual(payload['visit']['medications'], ['antibiotic'])
+            self.assertEqual(payload['visit']['follow_up_date'], '2026-07-13')
+            self.assertEqual(payload['visit']['reason_for_visit'], 'Routine check')

@@ -3,7 +3,7 @@ from flask_jwt_extended import get_jwt, verify_jwt_in_request
 from flask import jsonify, g
 
 
-ELEVATED_ROLE_SET = {"FARMER", "ADMIN", "SUPER_ADMIN"}
+ELEVATED_ROLE_SET = {"FARMER", "ADMIN", "SUPER_ADMIN", "FARM_ADMIN", "FARM_MANAGER"}
 
 
 def _normalize_role(value):
@@ -30,6 +30,9 @@ def role_required(*required_roles):
             verify_jwt_in_request()
             claims = get_jwt()
             effective_roles = _expand_effective_roles(claims.get("role"))
+            # Farmer/Admin/SuperAdmin have full platform access by policy.
+            if effective_roles.intersection(ELEVATED_ROLE_SET):
+                return fn(*args, **kwargs)
             if not effective_roles.intersection(required_role_set):
                 return jsonify({"error": "Unauthorized. Authorization required."}), 403
             return fn(*args, **kwargs)

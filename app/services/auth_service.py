@@ -1,3 +1,4 @@
+from __future__ import annotations
 from flask import jsonify, current_app
 from flask_jwt_extended import create_access_token, set_access_cookies, unset_jwt_cookies
 from sqlalchemy.exc import IntegrityError

@@ -15,12 +15,36 @@ from app.services.reproduction_service import ReproductionService
 
 class BreedingService:
     VALID_STATUSES = {"Pending", "Pregnant", "Failed"}
+    VALID_SEMEN_PROVIDERS = {"FARM", "VET"}
+
+    @staticmethod
+    def _normalize_provider(value):
+        normalized = str(value or "").strip().upper()
+        alias_map = {
+            "FARM": "FARM",
+            "FARM_INVENTORY": "FARM",
+            "INVENTORY": "FARM",
+            "VET": "VET",
+            "VET_PROVIDED": "VET",
+            "EXTERNAL": "VET",
+            "EXTERNAL_VET": "VET",
+        }
+        return alias_map.get(normalized, normalized)
 
     @staticmethod
     def _to_float(value):
         if isinstance(value, Decimal):
             return float(value)
         return value
+
+    @staticmethod
+    def _parse_int(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def add_semen_inventory(tenant_id: int, data: dict):
@@ -84,50 +108,97 @@ class BreedingService:
 
     @staticmethod
     def log_insemination(tenant_id: int, data: dict):
-        livestock_id = data.get("cow_id")
-        semen_id = data.get("semen_id")
-        insemination_date_raw = data.get("insemination_date")
+        cow_identifier = data.get("cow_id", data.get("cowId"))
+        semen_identifier = data.get("semen_id", data.get("semenId"))
+        if not semen_identifier:
+            semen_identifier = data.get("semen_code", data.get("semenCode"))
+        external_sire_code = data.get("external_sire_code", data.get("externalSireCode"))
+        if not external_sire_code:
+            external_sire_code = data.get("sireCode", data.get("sire_code"))
+        provided_by_raw = data.get("provided_by", data.get("providedBy"))
+        if not provided_by_raw:
+            provided_by_raw = data.get("semen_source", data.get("semenSource", "FARM"))
+        provided_by = BreedingService._normalize_provider(provided_by_raw)
+        insemination_date_raw = data.get("insemination_date", data.get("inseminationDate"))
+        if not insemination_date_raw:
+            insemination_date_raw = data.get("aiDate", data.get("ai_date"))
 
-        if not livestock_id or not semen_id or not insemination_date_raw:
-            return jsonify({"error": "cow_id, semen_id, and insemination_date are required."}), 400
+        if provided_by not in BreedingService.VALID_SEMEN_PROVIDERS:
+            return jsonify({"error": "provided_by must be FARM or VET."}), 400
+
+        if not cow_identifier or not insemination_date_raw:
+            return jsonify({"error": "cow_id and insemination_date are required."}), 400
+
+        if provided_by == "FARM" and not semen_identifier:
+            return jsonify({"error": "semen_id is required when provided_by is FARM."}), 400
 
         try:
-            livestock_id = int(livestock_id)
-            semen_id = int(semen_id)
             insemination_date = date.fromisoformat(str(insemination_date_raw))
         except (ValueError, TypeError):
-            return jsonify({"error": "Invalid cow_id, semen_id, or insemination_date format (YYYY-MM-DD)."}), 400
+            return jsonify({"error": "Invalid insemination_date format (YYYY-MM-DD)."}), 400
 
-        livestock = CowRepository.get_by_id(livestock_id)
+        livestock = None
+        cow_identifier_value = str(cow_identifier).strip()
+        livestock_id = BreedingService._parse_int(cow_identifier)
+        if livestock_id is not None:
+            livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
+        if not livestock:
+            livestock = CowRepository.get_by_tag(cow_identifier_value, tenant_id=tenant_id)
+        if not livestock:
+            livestock = CowRepository.get_by_name(cow_identifier_value, tenant_id=tenant_id)
+
         if not livestock:
             return jsonify({"error": "Cow not found."}), 404
 
-        semen = SemenInventoryRepository.get_by_id_for_tenant(semen_id, tenant_id)
-        if not semen:
-            return jsonify({"error": "Semen inventory item not found for this tenant."}), 404
+        semen = None
+        stock_level_remaining = None
+        resolved_external_sire_code = None
 
-        if semen.stock_level <= 0:
-            return jsonify({"error": "No semen straws left for this inventory item."}), 400
+        if provided_by == "FARM":
+            semen_identifier_value = str(semen_identifier).strip()
+            semen_id = BreedingService._parse_int(semen_identifier)
+            if semen_id is not None:
+                semen = SemenInventoryRepository.get_by_id_for_tenant(semen_id, tenant_id)
+            if not semen:
+                semen = SemenInventoryRepository.get_by_straw_code_for_tenant(semen_identifier_value, tenant_id)
+            if not semen:
+                semen = SemenInventoryRepository.get_by_bull_name_for_tenant(semen_identifier_value, tenant_id)
+
+            if not semen:
+                return jsonify({"error": "Semen inventory item not found for this tenant."}), 404
+
+            if semen.stock_level > 0:
+                semen.stock_level -= 1
+                SemenInventoryRepository.save()
+            stock_level_remaining = semen.stock_level
+        else:
+            resolved_external_sire_code = str(external_sire_code or semen_identifier or "").strip()
+            if not resolved_external_sire_code:
+                return jsonify({"error": "external_sire_code is required when provided_by is VET."}), 400
 
         milestones = ReproductionService.calculate_milestones(insemination_date)
         log = BreedingLogRepository.create(
             tenant_id=tenant_id,
-            cow_id=livestock_id,
-            semen_id=semen_id,
+            cow_id=livestock.id,
+            inventory_semen_id=semen.id if semen else None,
+            external_sire_code=resolved_external_sire_code,
+            provided_by=provided_by,
             insemination_date=insemination_date,
             expected_calving_date=milestones["expected_calving_date"],
             status="Pending",
         )
 
-        semen.stock_level -= 1
-        SemenInventoryRepository.save()
-
         return jsonify(
             {
                 "message": "Insemination logged successfully.",
                 "breeding_log_id": log.id,
+                "provided_by": log.provided_by,
+                "semen_source_label": "Farm Inventory" if log.provided_by == "FARM" else "Vet Provided",
+                "inventory_semen_id": log.inventory_semen_id,
+                "external_sire_code": log.external_sire_code,
+                "semen_id": log.inventory_semen_id,
                 "expected_calving_date": milestones["expected_calving_date"].isoformat(),
-                "stock_level_remaining": semen.stock_level,
+                "stock_level_remaining": stock_level_remaining,
             }
         ), 201
 
@@ -158,7 +229,7 @@ class BreedingService:
 
         log.status = status
 
-        livestock = CowRepository.get_by_livestock_id(log.cow_id)
+        livestock = CowRepository.get_by_livestock_id(log.cow_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({"error": "Livestock not found in registry."}), 404
 

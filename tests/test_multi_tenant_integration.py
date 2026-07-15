@@ -1,7 +1,10 @@
 import json
 
 from app import db
-from app.models.livestock import DailyTaskLog
+from datetime import datetime, timezone
+
+from app.models.livestock import DailyTaskLog, Cow
+from app.models.supply import MilkLog
 from app.models.user import Role
 
 
@@ -26,7 +29,7 @@ def test_dashboard_summary_returns_data_for_tenant(client, tenant_factory, user_
     token = _login(client, 'farmer_a')
 
     response = client.get(
-        f'/api/v1/dashboard/summary?tenant_id={tenant.id}',
+        '/api/v1/dashboard/summary',
         headers={'Authorization': f'Bearer {token}'},
     )
 
@@ -36,7 +39,49 @@ def test_dashboard_summary_returns_data_for_tenant(client, tenant_factory, user_
     assert payload['net_margin_kes'] <= payload['today_revenue_kes']
 
 
-def test_dashboard_rejects_cross_tenant_query(client, tenant_factory, user_factory):
+def test_production_summary_uses_jwt_scope_without_tenant_query(client, tenant_factory, user_factory):
+    tenant = tenant_factory(name='Farm A')
+    user = user_factory(tenant=tenant, username='farmer_a', role=Role.FARMER)
+    cow = Cow(tenant_id=tenant.id, tag_number='C-100', name='Mrembo', date_of_birth=datetime(2024, 1, 1, tzinfo=timezone.utc).date())
+    db.session.add(cow)
+    db.session.flush()
+    db.session.add(MilkLog(
+        tenant_id=tenant.id,
+        cow_id=cow.id,
+        amount_liters=9.0,
+        session='Morning',
+        recorded_by=user.id,
+        timestamp=datetime.now(timezone.utc),
+        is_saleable=True,
+    ))
+    db.session.commit()
+
+    token = _login(client, 'farmer_a')
+
+    response = client.get(
+        '/api/production/summary',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.data.decode())
+    assert 'production_total_liters' in payload
+    assert 'saleable_liters' in payload
+    assert 'feed_cost_total_kes' in payload
+    assert payload['production_total_liters'] == 9.0
+    assert payload['cows_milked'] == 1
+    assert payload['avg_per_cow'] == 9.0
+    assert payload['profit_per_liter'] > 0
+    assert payload['total_liters'] == 9.0
+    assert payload['cowsMilked'] == 1
+
+
+def test_dashboard_summary_requires_auth_not_tenant_query(client):
+    response = client.get('/api/v1/dashboard/summary')
+    assert response.status_code == 401
+
+
+def test_dashboard_rejects_cross_tenant_header(client, tenant_factory, user_factory):
     tenant_a = tenant_factory(name='Farm A')
     tenant_b = tenant_factory(name='Farm B')
     user_factory(tenant=tenant_a, username='farmer_a', role=Role.FARMER)
@@ -45,8 +90,11 @@ def test_dashboard_rejects_cross_tenant_query(client, tenant_factory, user_facto
     token = _login(client, 'farmer_a')
 
     response = client.get(
-        f'/api/v1/dashboard/summary?tenant_id={tenant_b.id}',
-        headers={'Authorization': f'Bearer {token}'},
+        '/api/v1/dashboard/summary',
+        headers={
+            'Authorization': f'Bearer {token}',
+            'X-Tenant-ID': str(tenant_b.id),
+        },
     )
 
     assert response.status_code == 403

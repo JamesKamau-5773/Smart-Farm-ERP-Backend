@@ -54,3 +54,48 @@ class ClinicalTestCase(BaseTestCase):
             self.assertEqual(response.status_code, 200)
             data = json.loads(response.data.decode())
             self.assertIn('is now LOCKED', data['message'])
+
+    def test_vet_visit_workflow_accepts_frontend_alias_payload(self):
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.post(
+                '/api/clinical/vet-visits',
+                data=json.dumps({
+                    'date': '2026-07-03',
+                    'cow': 'c-oo1',
+                    'reason': 'cow limping',
+                    'diagnosis': 'infected hoof',
+                    'meds': 'antibiotic',
+                    'recommendations': 'apply for 1 week',
+                    'followUp': '2026-07-24',
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 201)
+            payload = json.loads(response.data.decode())
+            self.assertIn('visit', payload)
+            self.assertEqual(payload['visit']['cow_id'], self.cow.id)
+            self.assertEqual(payload['visit']['reason_for_visit'], 'cow limping')
+            self.assertEqual(payload['visit']['follow_up_date'], '2026-07-24')
+
+    def test_vet_visit_workflow_accepts_cow_name_in_alias_payload(self):
+        self.cow.name = 'Mwadie'
+        db.session.commit()
+
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.post(
+                '/api/clinical/vet-visits',
+                data=json.dumps({
+                    'date': '2026-07-12',
+                    'cow': 'mwadie',
+                    'reason': 'poor feeding',
+                    'diagnosis': 'milk fever',
+                    'meds': ['calcium'],
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 201)
+            payload = json.loads(response.data.decode())
+            self.assertEqual(payload['visit']['cow_id'], self.cow.id)
+            self.assertEqual(payload['visit']['reason_for_visit'], 'poor feeding')

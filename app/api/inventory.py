@@ -3,10 +3,25 @@ from flask_jwt_extended import get_jwt_identity, jwt_required
 
 from app.models.user import Role
 from app.repositories.supply_repo import InventoryRepository
+from app.services.inventory_standards_service import InventoryStandardsService
 from app.utils.decorators import require_tenant_context, role_required
 from app.utils.jwt_payload import parse_public_int_id
 
 inventory_bp = Blueprint('inventory', __name__)
+
+
+def _normalize_transaction_type(value):
+    raw = (value or '').strip().upper()
+    if raw in {'IN', 'OUT'}:
+        return raw
+
+    # Frontend-friendly aliases.
+    if raw in {'RESTOCK', 'ADD', 'INBOUND', 'PURCHASE', 'RECEIPT'}:
+        return 'IN'
+    if raw in {'ISSUE', 'DEDUCT', 'CONSUMPTION', 'CONSUME', 'OUTBOUND', 'USAGE', 'WITHDRAWAL'}:
+        return 'OUT'
+
+    return raw
 
 
 def _pagination_params():
@@ -23,6 +38,15 @@ def _pagination_params():
 
 
 def _serialize_item(item):
+    metadata = InventoryStandardsService.infer_item_metadata(
+        tenant_id=item.tenant_id,
+        name=item.name,
+        category=item.category,
+        energy_mj_per_kg=item.energy_mj_per_kg,
+        protein_grams_per_kg=item.protein_grams_per_kg,
+        fiber_grams_per_kg=item.fiber_grams_per_kg,
+        cost_per_kg=item.cost_per_kg,
+    )
     return {
         'id': item.id,
         'name': item.name,
@@ -35,7 +59,38 @@ def _serialize_item(item):
         'current_stock': float(item.current_qty),
         'currentQty': float(item.current_qty),
         'current_qty': float(item.current_qty),
+        'energy_mj_per_kg': float(item.energy_mj_per_kg),
+        'energyMjPerKg': float(item.energy_mj_per_kg),
+        'protein_grams_per_kg': float(item.protein_grams_per_kg),
+        'proteinGramsPerKg': float(item.protein_grams_per_kg),
+        'fiber_grams_per_kg': float(item.fiber_grams_per_kg),
+        'fiberGramsPerKg': float(item.fiber_grams_per_kg),
+        'cost_per_kg': float(item.cost_per_kg),
+        'costPerKg': float(item.cost_per_kg),
+        'default_source': metadata.get('default_source'),
+        'standards_version': metadata.get('standards_version'),
+        'source_reference': metadata.get('source_reference'),
     }
+
+
+def _build_bulk_feed_validation_errors(*, category: str, energy_mj_per_kg, protein_grams_per_kg, fiber_grams_per_kg, cost_per_kg):
+    if (category or '').strip().lower() != 'bulk feed':
+        return []
+
+    values = {
+        'energy_mj_per_kg': float(energy_mj_per_kg),
+        'protein_grams_per_kg': float(protein_grams_per_kg),
+        'fiber_grams_per_kg': float(fiber_grams_per_kg),
+        'cost_per_kg': float(cost_per_kg),
+    }
+    if all(v == 0 for v in values.values()):
+        return [
+            {'field': 'energy_mj_per_kg', 'message': 'Bulk Feed requires a non-zero energy baseline.'},
+            {'field': 'protein_grams_per_kg', 'message': 'Bulk Feed requires a non-zero protein baseline.'},
+            {'field': 'fiber_grams_per_kg', 'message': 'Bulk Feed requires a non-zero fiber baseline.'},
+            {'field': 'cost_per_kg', 'message': 'Bulk Feed requires a non-zero cost baseline.'},
+        ]
+    return []
 
 
 def _serialize_movement(movement):
@@ -148,20 +203,44 @@ def create_inventory_item():
     unit = (data.get('unit') or '').strip()
     if not name or not category or not unit:
         return jsonify({'error': 'name, category, and unit are required.'}), 400
-    item = InventoryRepository.create_item(
-        tenant_id=tenant_id,
-        name=name,
-        sku=(data.get('sku') or '').strip() or None,
-        category=category,
-        unit=unit,
-        current_qty=data.get('current_qty', data.get('currentStock', 0)),
-        minimum_threshold=data.get('minimum_threshold', data.get('reorderLevel', 0)),
-        energy_mj_per_kg=data.get('energy_mj_per_kg', 0),
-        protein_grams_per_kg=data.get('protein_grams_per_kg', 0),
-        fiber_grams_per_kg=data.get('fiber_grams_per_kg', 0),
-        cost_per_kg=data.get('cost_per_kg', 0),
-    )
-    return jsonify(_serialize_item(item)), 201
+    try:
+        standards_payload = InventoryStandardsService.apply_defaults(
+            tenant_id=tenant_id,
+            name=name,
+            category=category,
+            energy_mj_per_kg=data.get('energy_mj_per_kg', data.get('energyMjPerKg')),
+            protein_grams_per_kg=data.get('protein_grams_per_kg', data.get('proteinGramsPerKg')),
+            fiber_grams_per_kg=data.get('fiber_grams_per_kg', data.get('fiberGramsPerKg')),
+            cost_per_kg=data.get('cost_per_kg', data.get('costPerKg')),
+        )
+        resolved_defaults = standards_payload['values']
+
+        field_errors = _build_bulk_feed_validation_errors(
+            category=category,
+            energy_mj_per_kg=resolved_defaults['energy_mj_per_kg'],
+            protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'],
+            fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'],
+            cost_per_kg=resolved_defaults['cost_per_kg'],
+        )
+        if field_errors:
+            return jsonify({'error': 'Bulk Feed nutrition/cost values cannot all be zero.', 'field_errors': field_errors}), 400
+
+        item = InventoryRepository.create_item(
+            tenant_id=tenant_id,
+            name=name,
+            sku=(data.get('sku') or '').strip() or None,
+            category=category,
+            unit=unit,
+            current_qty=data.get('current_qty', data.get('currentStock', 0)),
+            minimum_threshold=data.get('minimum_threshold', data.get('reorderLevel', 0)),
+            energy_mj_per_kg=resolved_defaults['energy_mj_per_kg'],
+            protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'],
+            fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'],
+            cost_per_kg=resolved_defaults['cost_per_kg'],
+        )
+        return jsonify(_serialize_item(item)), 201
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 409
 
 
 @inventory_bp.route('/api/inventory/items/<int:item_id>', methods=['PATCH'])
@@ -173,6 +252,51 @@ def update_inventory_item(item_id):
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}
+
+    name_for_defaults = (data.get('name') or '').strip() if 'name' in data else None
+    category_for_defaults = (data.get('category') or '').strip() if 'category' in data else None
+    if name_for_defaults is None or category_for_defaults is None:
+        current_item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+        if not current_item:
+            return jsonify({'error': 'Inventory item not found.'}), 404
+        if name_for_defaults is None:
+            name_for_defaults = current_item.name
+        if category_for_defaults is None:
+            category_for_defaults = current_item.category
+
+    standards_payload = InventoryStandardsService.apply_defaults(
+        tenant_id=tenant_id,
+        name=name_for_defaults,
+        category=category_for_defaults,
+        energy_mj_per_kg=data.get('energy_mj_per_kg', data.get('energyMjPerKg')),
+        protein_grams_per_kg=data.get('protein_grams_per_kg', data.get('proteinGramsPerKg')),
+        fiber_grams_per_kg=data.get('fiber_grams_per_kg', data.get('fiberGramsPerKg')),
+        cost_per_kg=data.get('cost_per_kg', data.get('costPerKg')),
+    )
+    resolved_defaults = standards_payload['values']
+
+    should_update_nutrition = any(
+        key in data
+        for key in (
+            'energy_mj_per_kg', 'energyMjPerKg',
+            'protein_grams_per_kg', 'proteinGramsPerKg',
+            'fiber_grams_per_kg', 'fiberGramsPerKg',
+            'cost_per_kg', 'costPerKg',
+            'name', 'category',
+        )
+    )
+
+    if should_update_nutrition:
+        field_errors = _build_bulk_feed_validation_errors(
+            category=category_for_defaults,
+            energy_mj_per_kg=resolved_defaults['energy_mj_per_kg'],
+            protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'],
+            fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'],
+            cost_per_kg=resolved_defaults['cost_per_kg'],
+        )
+        if field_errors:
+            return jsonify({'error': 'Bulk Feed nutrition/cost values cannot all be zero.', 'field_errors': field_errors}), 400
+
     item = InventoryRepository.update_item(
         item_id=item_id,
         tenant_id=tenant_id,
@@ -182,6 +306,10 @@ def update_inventory_item(item_id):
         unit=(data.get('unit') or '').strip() if 'unit' in data else None,
         current_qty=data.get('current_qty', data.get('currentStock')) if ('current_qty' in data or 'currentStock' in data) else None,
         minimum_threshold=data.get('minimum_threshold', data.get('reorderLevel')) if ('minimum_threshold' in data or 'reorderLevel' in data) else None,
+        energy_mj_per_kg=resolved_defaults['energy_mj_per_kg'] if should_update_nutrition else None,
+        protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'] if should_update_nutrition else None,
+        fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'] if should_update_nutrition else None,
+        cost_per_kg=resolved_defaults['cost_per_kg'] if should_update_nutrition else None,
     )
     if not item:
         return jsonify({'error': 'Inventory item not found.'}), 404
@@ -232,10 +360,14 @@ def create_inventory_movement():
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}
     item_id = data.get('item_id')
-    movement_type = data.get('movement_type') or data.get('transaction_type')
+    # Prefer canonical transaction_type if both are sent.
+    transaction_type_raw = data.get('transaction_type')
+    if transaction_type_raw is None:
+        transaction_type_raw = data.get('movement_type')
+    movement_type = _normalize_transaction_type(transaction_type_raw)
     quantity = data.get('quantity')
     if not item_id or not movement_type or quantity is None:
-        return jsonify({'error': 'item_id, movement_type, and quantity are required.'}), 400
+        return jsonify({'error': 'item_id, transaction_type (or movement_type), and quantity are required.'}), 400
     try:
         item, movement, is_low_stock = InventoryRepository.record_transaction(
             item_id=item_id,
@@ -250,6 +382,70 @@ def create_inventory_movement():
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify({'movement': _serialize_movement(movement), 'updatedItem': _serialize_item(item), 'lowStock': is_low_stock}), 201
+
+
+@inventory_bp.route('/api/v1/nutrition/ingredient-standards', methods=['GET'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def list_ingredient_standards():
+    tenant_id = _get_tenant_id_from_context()
+    payload = InventoryStandardsService.list_standards(tenant_id=tenant_id)
+    return jsonify(payload), 200
+
+
+@inventory_bp.route('/api/v1/nutrition/ingredient-standards', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER, Role.SUPER_ADMIN)
+def upsert_ingredient_standard():
+    tenant_id = _get_tenant_id_from_context()
+    data = request.get_json() or {}
+    canonical_name = (data.get('canonical_name') or data.get('name') or '').strip()
+    if not canonical_name:
+        return jsonify({'error': 'canonical_name is required.'}), 400
+
+    required_fields = ['protein_grams_per_kg', 'energy_mj_per_kg', 'fiber_grams_per_kg']
+    missing = [field for field in required_fields if data.get(field) is None]
+    if missing:
+        return jsonify({'error': 'Missing required fields.', 'field_errors': [{'field': field, 'message': 'This field is required.'} for field in missing]}), 400
+
+    canonical = InventoryStandardsService.upsert_standard(
+        canonical_name=canonical_name,
+        synonyms=data.get('synonyms') or [],
+        data=data,
+        tenant_id=tenant_id,
+        actor_id=int(get_jwt_identity()),
+    )
+    return jsonify({'message': 'Ingredient standard updated.', 'canonical_name': canonical, 'standards_version': data.get('standards_version') or InventoryStandardsService.STANDARDS_VERSION}), 200
+
+
+@inventory_bp.route('/api/v1/nutrition/ingredient-standards/backfill', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER, Role.SUPER_ADMIN)
+def backfill_ingredient_standards_to_inventory():
+    tenant_id = _get_tenant_id_from_context()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant context."}), 400
+
+    payload = request.get_json(silent=True) or {}
+    dry_run = bool(payload.get('dry_run', False))
+
+    items = InventoryRepository.list_by_tenant(tenant_id)
+    result = InventoryStandardsService.run_backfill_for_tenant(
+        tenant_id=tenant_id,
+        item_rows=items,
+    )
+
+    if dry_run:
+        from app import db
+        db.session.rollback()
+        return jsonify({'message': 'Dry run complete.', 'dry_run': True, **result}), 200
+
+    from app import db
+    db.session.commit()
+    return jsonify({'message': 'Backfill completed.', 'dry_run': False, **result}), 200
 
 
 @inventory_bp.route('/api/inventory/stock', methods=['GET'])
