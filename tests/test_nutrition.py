@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from app import db
 from app.models.livestock import Cow
-from app.models.supply import FeedBatch, FeedRecipe, FeedBatchConsumptionEvent, FeedFormula, Ingredient, InventoryItem, MilkLog
+from app.models.supply import FeedBatch, FeedRecipe, FeedBatchConsumptionEvent, FeedFormula, Ingredient, InventoryItem, MilkLog, RecipeIngredient
 from app.models.user import Role
 from tests.base import BaseTestCase
 
@@ -136,6 +136,110 @@ class NutritionRouteTestCase(BaseTestCase):
         body = json.loads(response.data.decode())
         self.assertIsNone(body['formulaId'])
 
+    def test_batch_creation_accepts_planner_recipe_id_in_formula_id(self):
+        ingredient = Ingredient(
+            tenant_id=self.tenant.id,
+            name='Wheat Pollard',
+            current_cost_per_kg=Decimal('50.00'),
+            stock_quantity=Decimal('90.000'),
+        )
+        db.session.add(ingredient)
+        db.session.flush()
+
+        inventory_item = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Wheat Pollard',
+            sku='wp-001',
+            category='Feed',
+            unit='KG',
+            current_qty=Decimal('90.00'),
+            minimum_threshold=Decimal('10.00'),
+        )
+        db.session.add(inventory_item)
+        db.session.flush()
+
+        recipe = FeedRecipe(
+            tenant_id=self.tenant.id,
+            recipe_name='Planner Main Mix',
+            target_protein_percentage=Decimal('14.50'),
+            recipe_type='main_meal',
+            is_active=True,
+        )
+        db.session.add(recipe)
+        db.session.flush()
+        db.session.add(RecipeIngredient(
+            tenant_id=self.tenant.id,
+            recipe_id=recipe.id,
+            inventory_item_id=inventory_item.id,
+            inclusion_percentage=Decimal('100.00'),
+        ))
+        db.session.commit()
+
+        payload = {
+            'batchName': 'Planner Formula ID Batch',
+            'formulaId': recipe.id,
+            'isSavedAsTemplate': False,
+            'totalWeight': 10,
+            'totalCost': 500,
+            'costPerKg': 50,
+            'ingredients': [
+                {'ingredientId': ingredient.id, 'weight': 10, 'percentage': 100},
+            ],
+        }
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/nutrition/batches',
+                data=json.dumps(payload),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        body = json.loads(response.data.decode())
+        self.assertIsNone(body['formulaId'])
+        self.assertEqual(body['plannerRecipeId'], recipe.id)
+        self.assertIn('compatibility', body['warning'])
+
+    def test_batch_creation_accepts_inventory_item_id_as_ingredient_id(self):
+        inventory_item = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Cotton Seed Cake',
+            sku='csc-001',
+            category='Feed',
+            unit='KG',
+            current_qty=Decimal('120.00'),
+            minimum_threshold=Decimal('10.00'),
+            cost_per_kg=Decimal('65.00'),
+        )
+        db.session.add(inventory_item)
+        db.session.commit()
+
+        payload = {
+            'batchName': 'Inventory ID Ingredient Batch',
+            'formulaId': None,
+            'isSavedAsTemplate': False,
+            'totalWeight': 20,
+            'totalCost': 1300,
+            'costPerKg': 65,
+            'ingredients': [
+                {'ingredientId': inventory_item.id, 'weight': 20, 'percentage': 100},
+            ],
+        }
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/nutrition/batches',
+                data=json.dumps(payload),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        body = json.loads(response.data.decode())
+        self.assertEqual(len(body['inventory']), 1)
+        self.assertEqual(body['inventory'][0]['ingredientName'], 'Cotton Seed Cake')
+
     def test_batch_creation_rejects_invalid_ingredient_id_with_400(self):
         payload = {
             'batchName': 'Invalid Ingredient ID Batch',
@@ -227,6 +331,80 @@ class NutritionRouteTestCase(BaseTestCase):
 
         self.assertEqual(invalid_recipe.status_code, 404)
         self.assertEqual(duplicate_unit.status_code, 409)
+
+    def test_mixer_ingredients_endpoint_returns_only_eligible_items(self):
+        dairy_item = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Dairy Meal',
+            sku='dm-100',
+            category='Feed',
+            unit='KG',
+            current_qty=Decimal('120.00'),
+            minimum_threshold=Decimal('15.00'),
+            allowed_mixers='dairy_meal,main_meal',
+            mixer_role='dairy_meal_product',
+            inclusion_percentage_dairy_meal=Decimal('30.0'),
+            inclusion_percentage_main_meal=Decimal('12.0'),
+        )
+        roughage_item = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Napier Grass',
+            sku='np-100',
+            category='Bulk Feed',
+            unit='KG',
+            current_qty=Decimal('90.00'),
+            minimum_threshold=Decimal('10.00'),
+            allowed_mixers='main_meal',
+            mixer_role='roughage',
+            inclusion_percentage_dairy_meal=Decimal('0.0'),
+            inclusion_percentage_main_meal=Decimal('40.0'),
+        )
+        db.session.add_all([dairy_item, roughage_item])
+        db.session.commit()
+
+        self._login()
+        with self.client:
+            response = self.client.get('/api/v1/nutrition/mixers/dairy_meal/ingredients')
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode())
+        names = [row['name'] for row in payload['ingredients']]
+        self.assertIn('Dairy Meal', names)
+        self.assertNotIn('Napier Grass', names)
+
+    def test_formulate_recipe_rejects_cross_mixer_ingredient(self):
+        roughage_item = InventoryItem(
+            tenant_id=self.tenant.id,
+            name='Hay',
+            sku='hay-101',
+            category='Bulk Feed',
+            unit='KG',
+            current_qty=Decimal('60.00'),
+            minimum_threshold=Decimal('8.00'),
+            allowed_mixers='main_meal',
+            mixer_role='roughage',
+        )
+        db.session.add(roughage_item)
+        db.session.commit()
+
+        self._login()
+        with self.client:
+            response = self.client.post(
+                '/api/v1/recipes/formulate',
+                data=json.dumps({
+                    'batch_size_kg': 500,
+                    'target_protein_percent': 16.5,
+                    'recipe_type': 'dairy_meal',
+                    'ingredients': [
+                        {'ingredient_id': roughage_item.id, 'percentage': 100},
+                    ],
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.data.decode())
+        self.assertIn('not eligible for recipe_type', payload['error'])
 
     def test_feed_cost_efficiency_applies_three_day_biological_lag(self):
         cow = Cow(tag_number='COW-NUTRITION-01', date_of_birth=date(2022, 1, 1))

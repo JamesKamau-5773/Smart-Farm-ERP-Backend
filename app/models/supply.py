@@ -26,6 +26,10 @@ class InventoryItem(db.Model):
     protein_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     fiber_grams_per_kg = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     cost_per_kg = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    allowed_mixers = db.Column(db.String(120), nullable=False, default='main_meal')
+    mixer_role = db.Column(db.String(50), nullable=False, default='roughage')
+    inclusion_percentage_dairy_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    inclusion_percentage_main_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     transactions = db.relationship(
@@ -94,7 +98,8 @@ class InventoryTransaction(db.Model):
         nullable=False,
     )
     inventory_batch_id = db.Column(db.Integer, db.ForeignKey('inventory_batches.id'), nullable=True, index=True)
-    reference_note = db.Column(db.Text, nullable=True)
+    reason_code = db.Column(db.String(50), nullable=False, default='STANDARD')
+    notes = db.Column(db.Text, nullable=True)
     logged_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     transaction_date = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
@@ -107,8 +112,6 @@ class InventoryTransaction(db.Model):
             kwargs['quantity'] = kwargs.pop('amount_used')
         if 'timestamp' in kwargs and 'transaction_date' not in kwargs:
             kwargs['transaction_date'] = kwargs.pop('timestamp')
-        if 'notes' in kwargs and 'reference_note' not in kwargs:
-            kwargs['reference_note'] = kwargs.pop('notes')
         kwargs.pop('target_cow_id', None)
         super().__init__(**kwargs)
 
@@ -127,14 +130,6 @@ class InventoryTransaction(db.Model):
     @timestamp.setter
     def timestamp(self, value):
         self.transaction_date = value
-
-    @property
-    def notes(self):
-        return self.reference_note
-
-    @notes.setter
-    def notes(self, value):
-        self.reference_note = value
 
 
 class InventoryBatch(db.Model):
@@ -180,6 +175,8 @@ class FeedRecipe(db.Model):
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     recipe_name = db.Column(db.String(100), nullable=False)
     target_protein_percentage = db.Column(db.Numeric(5, 2), nullable=False)
+    recipe_type = db.Column(db.String(40), nullable=False, default='main_meal')
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
 
     ingredients = db.relationship(
@@ -187,6 +184,10 @@ class FeedRecipe(db.Model):
         backref=db.backref('recipe', lazy=True),
         lazy=True,
         cascade='all, delete-orphan',
+    )
+
+    __table_args__ = (
+        db.CheckConstraint("recipe_type IN ('dairy_meal', 'main_meal')", name='ck_feed_recipes_recipe_type_valid'),
     )
 
 
@@ -353,6 +354,9 @@ class BatchIngredient(db.Model):
     weight = db.Column(db.Numeric(14, 3), nullable=False)
     percentage = db.Column(db.Numeric(5, 2), nullable=False)
     locked_cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
+    # Protein snapshotted at mix time so historical batches remain accurate
+    # even if the ingredient's nutritional data is updated later.
+    locked_protein_grams_per_kg = db.Column(db.Numeric(7, 2), nullable=False, default=0)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     ingredient = db.relationship(

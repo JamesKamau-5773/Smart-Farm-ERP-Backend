@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import date
+from typing import Optional
 
 from sqlalchemy import func, case
 from sqlalchemy.exc import SQLAlchemyError
@@ -68,8 +71,8 @@ class BreedingLogRepository:
         *,
         tenant_id: int,
         cow_id: int,
-        inventory_semen_id: int | None,
-        external_sire_code: str | None,
+        inventory_semen_id: Optional[int],
+        external_sire_code: Optional[str],
         provided_by: str,
         insemination_date: date,
         expected_calving_date=None,
@@ -96,6 +99,16 @@ class BreedingLogRepository:
     @staticmethod
     def get_by_id_for_tenant(log_id: int, tenant_id: int) -> BreedingLog:
         return BreedingLog.query.filter_by(id=log_id, tenant_id=tenant_id).first()
+
+    @staticmethod
+    def get_most_recent_pregnant_for_cow(cow_id: int, tenant_id: int) -> BreedingLog:
+        """Fetch the most recent breeding log with status='Pregnant' for a given dam cow."""
+        return (
+            BreedingLog.query
+            .filter_by(cow_id=cow_id, tenant_id=tenant_id, status="Pregnant")
+            .order_by(BreedingLog.insemination_date.desc())
+            .first()
+        )
 
     @staticmethod
     def save() -> None:

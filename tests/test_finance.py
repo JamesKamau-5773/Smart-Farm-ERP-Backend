@@ -206,3 +206,239 @@ class FinanceTestCase(BaseTestCase):
             self.assertAlmostEqual(payload['summary']['total_income'], 2500.0)
             self.assertAlmostEqual(payload['summary']['total_costs'], 1000.0)
             self.assertAlmostEqual(payload['summary']['total_profit'], 1500.0)
+
+    def test_ledger_includes_date_and_counterparty_name(self):
+        self._login('farmer', 'password')
+
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Daily Dairies',
+            agreed_rate_per_liter=60,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.post(
+                '/api/finance/ledger',
+                data=json.dumps({
+                    'transaction_type': 'Revenue',
+                    'category': 'Milk Sale',
+                    'amount': 9000,
+                    'buyer_id': buyer.id,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 201)
+
+            list_response = self.client.get('/api/finance/ledger')
+            self.assertEqual(list_response.status_code, 200)
+            payload = json.loads(list_response.data.decode())
+            self.assertTrue(payload['items'])
+
+            row = payload['items'][0]
+            self.assertEqual(row['buyer_id'], buyer.id)
+            self.assertEqual(row['buyer_name'], 'Daily Dairies')
+            self.assertEqual(row['counterparty_name'], 'Daily Dairies')
+            self.assertIsNotNone(row['timestamp'])
+            self.assertIsNotNone(row['date'])
+
+    def test_record_buyer_payment_reduces_outstanding_balance(self):
+        self._login('farmer', 'password')
+
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Ol Kalu',
+            agreed_rate_per_liter=55,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        outstanding_entry = SalesLedger(
+            tenant_id=self.tenant.id,
+            buyer_id=buyer.id,
+            date=date(2026, 6, 1),
+            liters_sold=100,
+            total_cost=1000,
+            payment_status=PaymentStatus.UNPAID,
+        )
+        db.session.add(outstanding_entry)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.post(
+                f'/api/finance/buyers/{buyer.id}/payments',
+                data=json.dumps({
+                    'amount': 400,
+                    'reference_code': 'PAY-001',
+                    'note': 'Partial payment',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['payment']['amount'], 400.0)
+        self.assertEqual(payload['payment']['previous_balance'], 1000.0)
+        self.assertEqual(payload['payment']['current_balance'], 600.0)
+        self.assertEqual(payload['buyer']['current_balance'], 600.0)
+        self.assertEqual(payload['transaction']['category'], 'Buyer Payment')
+        self.assertEqual(payload['transaction']['buyer_name'], 'Ol Kalu')
+
+        db.session.refresh(outstanding_entry)
+        self.assertEqual(float(outstanding_entry.total_cost), 600.0)
+        self.assertEqual(outstanding_entry.payment_status, PaymentStatus.UNPAID)
+
+    def test_record_buyer_payment_rejects_amount_above_outstanding(self):
+        self._login('farmer', 'password')
+
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Molo Milk',
+            agreed_rate_per_liter=58,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        outstanding_entry = SalesLedger(
+            tenant_id=self.tenant.id,
+            buyer_id=buyer.id,
+            date=date(2026, 6, 2),
+            liters_sold=80,
+            total_cost=300,
+            payment_status=PaymentStatus.UNPAID,
+        )
+        db.session.add(outstanding_entry)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.post(
+                f'/api/finance/buyers/{buyer.id}/payments',
+                data=json.dumps({
+                    'amount': 500,
+                    'note': 'Overpayment attempt',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.data.decode())
+        self.assertIn('exceeds buyer outstanding balance', payload['error'])
+
+    def test_record_buyer_payment_marks_ledger_paid_on_full_payment(self):
+        self._login('farmer', 'password')
+
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Brookside',
+            agreed_rate_per_liter=52,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        outstanding_entry = SalesLedger(
+            tenant_id=self.tenant.id,
+            buyer_id=buyer.id,
+            date=date(2026, 6, 3),
+            liters_sold=50,
+            total_cost=2600,
+            payment_status=PaymentStatus.UNPAID,
+        )
+        db.session.add(outstanding_entry)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.post(
+                f'/api/finance/buyers/{buyer.id}/payments',
+                data=json.dumps({
+                    'amount': 2600,
+                    'note': 'Full payment',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['payment']['current_balance'], 0.0)
+        self.assertEqual(payload['buyer']['current_balance'], 0.0)
+
+        db.session.refresh(outstanding_entry)
+        self.assertEqual(float(outstanding_entry.total_cost), 0.0)
+        self.assertEqual(outstanding_entry.payment_status, PaymentStatus.PAID)
+
+    def test_record_buyer_payment_rejects_payment_with_no_outstanding_balance(self):
+        self._login('farmer', 'password')
+
+        buyer = Buyer(
+            tenant_id=self.tenant.id,
+            name='Happy Cow',
+            agreed_rate_per_liter=50,
+        )
+        db.session.add(buyer)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.post(
+                f'/api/finance/buyers/{buyer.id}/payments',
+                data=json.dumps({
+                    'amount': 100,
+                    'note': 'Payment attempt with no balance',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 400)
+        payload = json.loads(response.data.decode())
+        self.assertIn('Buyer has no unpaid balance', payload['error'])
+
+    def test_delete_customer_with_dependencies_returns_409(self):
+        self._login('farmer', 'password')
+        
+        customer = Customer(
+            tenant_id=self.tenant.id,
+            name='Test Customer',
+            phone_number='254799887766'
+        )
+        db.session.add(customer)
+        db.session.commit()
+
+        transaction = Transaction(
+            tenant_id=self.tenant.id,
+            customer_id=customer.id,
+            transaction_type=TransactionType.REVENUE,
+            category=TransactionCategory.MILK_SALE,
+            amount=100,
+            recorded_by=self.farmer.id
+        )
+        db.session.add(transaction)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.delete(f'/api/finance/customers/{customer.id}')
+        
+        self.assertEqual(response.status_code, 409)
+        data = json.loads(response.data.decode())
+        self.assertIn('Cannot delete customer', data['error'])
+
+    def test_delete_customer_without_dependencies_succeeds(self):
+        self._login('farmer', 'password')
+        
+        customer = Customer(
+            tenant_id=self.tenant.id,
+            name='Deletable Customer',
+            phone_number='254711223344'
+        )
+        db.session.add(customer)
+        db.session.commit()
+        customer_id = customer.id
+
+        with self.client:
+            response = self.client.delete(f'/api/finance/customers/{customer_id}')
+        
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.data.decode())
+        self.assertIn('deleted successfully', data['message'])
+
+        # Verify it's gone
+        deleted_customer = Customer.query.get(customer_id)
+        self.assertIsNone(deleted_customer)

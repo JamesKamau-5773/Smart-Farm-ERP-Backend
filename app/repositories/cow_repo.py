@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Optional
 from flask import g, has_app_context
 
 from app.models.livestock import Cow
@@ -66,7 +67,7 @@ class CowRepository:
         return CowRepository.get_all_active_livestock()
 
     @staticmethod
-    def create_livestock(tag_number: str, date_of_birth, name: str = None, breed_status: str = "Foundation", tenant_id: int | None = None) -> Cow:
+    def create_livestock(tag_number: str, date_of_birth, name: str = None, breed_status: str = "Foundation", tenant_id: int | None = None, dam_id: int | None = None) -> Cow:
         try:
             resolved_tenant_id = _resolve_tenant_id(tenant_id)
             if resolved_tenant_id is None:
@@ -77,7 +78,8 @@ class CowRepository:
                 tag_number=tag_number,
                 name=name,
                 breed_status=breed_status,
-                date_of_birth=date_of_birth
+                date_of_birth=date_of_birth,
+                dam_id=dam_id
             )
             db.session.add(new_livestock)
             db.session.commit()
@@ -90,5 +92,5 @@ class CowRepository:
             raise Exception("Failed, Database error while registering cow.")
 
     @staticmethod
-    def create_cow(tag_number: str, date_of_birth, name: str = None, breed_status: str = "Foundation", tenant_id: int | None = None) -> Cow:
-        return CowRepository.create_livestock(tag_number, date_of_birth, name=name, breed_status=breed_status, tenant_id=tenant_id)
+    def create_cow(tag_number: str, date_of_birth, name: str = None, breed_status: str = "Foundation", tenant_id: int | None = None, dam_id: int | None = None) -> Cow:
+        return CowRepository.create_livestock(tag_number, date_of_birth, name=name, breed_status=breed_status, tenant_id=tenant_id, dam_id=dam_id)

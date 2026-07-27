@@ -7,7 +7,7 @@ import pytest
 from decimal import Decimal
 from tests.base import BaseTestCase
 from app.services.recipe_formulation_service import RecipeFormulationService
-from app.models.supply import InventoryItem, FeedRecipe, FormulaIngredient
+from app.models.supply import InventoryItem, FeedRecipe, RecipeIngredient
 from app import db
 
 
@@ -217,7 +217,7 @@ class TestRecipeFormulationService(BaseTestCase):
         assert saved_recipe.is_active is True
         
         # Verify ingredients were saved
-        ingredients = FormulaIngredient.query.filter_by(recipe_id=saved_recipe.id).all()
+        ingredients = RecipeIngredient.query.filter_by(recipe_id=saved_recipe.id).all()
         assert len(ingredients) == 3
         
         # Verify percentages

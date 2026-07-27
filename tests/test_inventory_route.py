@@ -194,6 +194,41 @@ class InventoryRouteTestCase(BaseTestCase):
         self.assertEqual(payload['costPerKg'], 44.0)
         self.assertEqual(payload['default_source'], 'user_override')
 
+    def test_inventory_payload_includes_mixer_eligibility_fields(self):
+        self._login('farmer', 'password')
+        with self.client:
+            create_response = self.client.post(
+                '/api/inventory/items',
+                data=json.dumps({
+                    'name': 'Dairy Meal',
+                    'sku': 'dm-001',
+                    'category': 'Feed',
+                    'unit': 'KG',
+                    'currentStock': 80,
+                    'reorderLevel': 15,
+                    'allowed_mixers': ['dairy_meal', 'main_meal'],
+                    'role': 'dairy_meal_product',
+                    'inclusionPercentageDairyMeal': 35,
+                    'inclusionPercentageMainMeal': 10,
+                }),
+                content_type='application/json',
+            )
+            self.assertEqual(create_response.status_code, 201)
+
+            list_response = self.client.get('/api/inventory/items?recipe_type=main_meal')
+
+        self.assertEqual(list_response.status_code, 200)
+        payload = json.loads(list_response.data.decode())
+        self.assertGreaterEqual(len(payload['items']), 1)
+
+        row = next(item for item in payload['items'] if item['name'] == 'Dairy Meal')
+        self.assertEqual(row['allowed_mixers'], ['dairy_meal', 'main_meal'])
+        self.assertEqual(row['role'], 'dairy_meal_product')
+        self.assertEqual(row['inclusion_percentage_dairy_meal'], 35.0)
+        self.assertEqual(row['inclusion_percentage_main_meal'], 10.0)
+        self.assertEqual(row['defaults']['dairy_meal'], 35.0)
+        self.assertEqual(row['defaults']['main_meal'], 10.0)
+
     def test_inventory_bulk_feed_all_zero_rejected_with_field_errors(self):
         self._login('farmer', 'password')
         with self.client:

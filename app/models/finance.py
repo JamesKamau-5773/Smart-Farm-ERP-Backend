@@ -13,11 +13,13 @@ class TransactionCategory:
     VET_FEES = "Veterinary Fees"
     LABOR = "Labor"
     MAINTENANCE = "Maintenance"
+    INVENTORY_WRITE_OFF = "Inventory Write-Off"
 
 
 class PaymentStatus:
     PAID = "PAID"
     UNPAID = "UNPAID"
+    PARTIALLY_PAID = "PARTIALLY_PAID"
 
 class Customer(db.Model):
     """Tracks milk subscribers and their M-Pesa balances."""
@@ -78,6 +80,7 @@ class Transaction(db.Model):
 
     # Optional Foreign Keys for granular auditing
     customer_id = db.Column(db.Integer, db.ForeignKey('customers.id'), nullable=True)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('buyers.id'), nullable=True)
     recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
 
 
@@ -120,12 +123,18 @@ class Buyer(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    farm_id = db.Column(db.Integer, nullable=True, index=True)
     name = db.Column(db.String(100), nullable=False, index=True)
+    phone_number = db.Column(db.String(20), nullable=True)
+    whatsapp = db.Column(db.String(20), nullable=True)
+    buyer_type = db.Column(db.String(50), nullable=False, default='Individual')
     agreed_rate_per_liter = db.Column(db.Numeric(10, 2), nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
 
     sales = db.relationship('SalesLedger', backref=db.backref('buyer', lazy=True), lazy=True, cascade='all, delete-orphan')
+    audit_logs = db.relationship('BuyerAuditLog', backref=db.backref('buyer', lazy=True), lazy=True, cascade='all, delete-orphan')
 
     __table_args__ = (
         db.UniqueConstraint('tenant_id', 'name', name='uq_buyers_tenant_name'),
@@ -140,12 +149,53 @@ class SalesLedger(db.Model):
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     buyer_id = db.Column(db.Integer, db.ForeignKey('buyers.id', ondelete='RESTRICT'), nullable=False, index=True)
     date = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date(), index=True)
+    shift = db.Column(db.String(20), nullable=True, default='Morning')
     liters_sold = db.Column(db.Numeric(10, 2), nullable=False)
-    total_cost = db.Column(db.Numeric(12, 2), nullable=False)
-    payment_status = db.Column(db.String(10), nullable=False, default=PaymentStatus.UNPAID)
+    
+    # This is the original, immutable invoice amount.
+    total_cost = db.Column(db.Numeric(12, 2), nullable=False) 
+    
+    # This tracks how much has been paid against this specific sale.
+    amount_paid = db.Column(db.Numeric(12, 2), default=0.00, nullable=False)
+    
+    payment_status = db.Column(db.String(20), nullable=False, default=PaymentStatus.UNPAID)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    allocations = db.relationship('PaymentAllocation', backref='sale', lazy='dynamic', cascade="all, delete-orphan")
+
+    __table_args__ = (
+        db.CheckConstraint("payment_status IN ('PAID', 'UNPAID', 'PARTIALLY_PAID')", name='ck_sales_ledger_payment_status_valid'),
+        db.UniqueConstraint('tenant_id', 'buyer_id', 'date', name='uq_sales_ledger_tenant_buyer_date'),
+    )
+
+
+class PaymentAllocation(db.Model):
+    """Bridges a payment (Transaction) to a specific sale (SalesLedger)."""
+    __tablename__ = 'payment_allocations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey('transactions.id', ondelete='CASCADE'), nullable=False, index=True)
+    sales_ledger_id = db.Column(db.Integer, db.ForeignKey('sales_ledger.id', ondelete='CASCADE'), nullable=False, index=True)
+    amount_applied = db.Column(db.Numeric(12, 2), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    transaction = db.relationship('Transaction', backref=db.backref('allocations', cascade="all, delete-orphan"))
+
+
+class BuyerAuditLog(db.Model):
+    """Audit trail for buyer creation, updates, and deletions."""
+    __tablename__ = 'buyer_audit_logs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    buyer_id = db.Column(db.Integer, db.ForeignKey('buyers.id', ondelete='SET NULL'), nullable=True, index=True)
+    action = db.Column(db.String(50), nullable=False)  # create, update, delete, opening_balance
+    previous_values = db.Column(db.JSON, nullable=True)  # for updates/deletes
+    new_values = db.Column(db.JSON, nullable=True)  # for creates/updates
+    performed_by = db.Column(db.Integer, nullable=True)  # user_id if available
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     __table_args__ = (
-        db.CheckConstraint("payment_status IN ('PAID', 'UNPAID')", name='ck_sales_ledger_payment_status_valid'),
-        db.UniqueConstraint('tenant_id', 'buyer_id', 'date', name='uq_sales_ledger_tenant_buyer_date'),
+        db.Index('idx_buyer_audit_tenant_buyer', 'tenant_id', 'buyer_id'),
     )

@@ -13,8 +13,10 @@ from app.models.supply import (
     FeedBatch,
     FeedBatchConsumptionEvent,
     FeedFormula,
+    FeedRecipe,
     FormulaIngredient,
     Ingredient,
+    InventoryItem,
     MilkLog,
 )
 
@@ -73,6 +75,30 @@ class NutritionService:
         return start_date, end_date, start_dt, end_dt
 
     @staticmethod
+    def _serialize_batch_ingredient_breakdown(batch: FeedBatch) -> list[dict]:
+        rows = []
+        for entry in batch.ingredients or []:
+            ingredient_name = None
+            if entry.ingredient is not None:
+                ingredient_name = entry.ingredient.name
+
+            protein_grams_per_kg = float(entry.locked_protein_grams_per_kg or 0)
+            rows.append({
+                'ingredient_id': entry.ingredient_id,
+                'ingredientId': entry.ingredient_id,
+                'name': ingredient_name,
+                'ingredient_name': ingredient_name,
+                'ingredientName': ingredient_name,
+                'percentage': float(entry.percentage),
+                'weight': float(entry.weight),
+                'locked_cost_per_kg': float(entry.locked_cost_per_kg),
+                'lockedCostPerKg': float(entry.locked_cost_per_kg),
+                'protein_grams_per_kg': protein_grams_per_kg,
+                'proteinGramsPerKg': protein_grams_per_kg,
+            })
+        return rows
+
+    @staticmethod
     def process_and_save_batch(*, tenant_id: int, user_id: int | None, data: dict):
         batch_name = (data.get('batchName') or 'Custom Quick Mix').strip()
         is_saved_as_template = NutritionService._to_bool(data.get('isSavedAsTemplate'), default=False)
@@ -98,13 +124,20 @@ class NutritionService:
 
         try:
             formula = None
+            planner_recipe = None
             if formula_id is not None:
                 formula = (
                     FeedFormula.query.filter_by(id=formula_id, tenant_id=tenant_id)
                     .first()
                 )
                 if not formula:
-                    return jsonify({'error': 'Formula not found for this tenant.'}), 404
+                    # Frontend may pass FeedRecipe IDs in formulaId from planner flows.
+                    planner_recipe = (
+                        FeedRecipe.query.filter_by(id=formula_id, tenant_id=tenant_id)
+                        .first()
+                    )
+                    if not planner_recipe:
+                        return jsonify({'error': 'Formula not found for this tenant.'}), 404
 
             formula_for_save = formula
             if is_saved_as_template and formula_for_save is None:
@@ -146,6 +179,32 @@ class NutritionService:
                     ingredient_query = ingredient_query.with_for_update()
                 ingredient = ingredient_query.first()
 
+                inventory_item = None
+                if not ingredient:
+                    inventory_query = InventoryItem.query.filter_by(id=ingredient_id, tenant_id=tenant_id)
+                    if db.engine.dialect.name == 'postgresql':
+                        inventory_query = inventory_query.with_for_update()
+                    inventory_item = inventory_query.first()
+
+                    if inventory_item:
+                        ingredient = Ingredient.query.filter_by(
+                            tenant_id=tenant_id,
+                            name=inventory_item.name,
+                        ).first()
+                        if ingredient is None:
+                            ingredient = Ingredient(
+                                tenant_id=tenant_id,
+                                name=inventory_item.name,
+                                current_cost_per_kg=inventory_item.cost_per_kg,
+                                stock_quantity=inventory_item.current_qty,
+                            )
+                            db.session.add(ingredient)
+                            db.session.flush()
+                        else:
+                            # Keep both ledgers aligned when planner uses inventory IDs.
+                            ingredient.current_cost_per_kg = inventory_item.cost_per_kg
+                            ingredient.stock_quantity = inventory_item.current_qty
+
                 if not ingredient:
                     raise ValueError(f'Ingredient {ingredient_id} not found for this tenant.')
 
@@ -155,6 +214,13 @@ class NutritionService:
                     )
 
                 ingredient.stock_quantity = Decimal(str(ingredient.stock_quantity)) - weight
+
+                if inventory_item is not None:
+                    if inventory_item.current_qty < weight:
+                        raise ValueError(
+                            f'Insufficient stock for {inventory_item.name}. Available: {inventory_item.current_qty}, required: {weight}.'
+                        )
+                    inventory_item.current_qty = Decimal(str(inventory_item.current_qty)) - weight
 
                 locked_cost = entry.get('lockedCostPerKg', ingredient.current_cost_per_kg)
                 try:
@@ -171,6 +237,8 @@ class NutritionService:
                     except (TypeError, InvalidOperation):
                         raise ValueError('percentage must be a valid number when provided.')
 
+                locked_protein = Decimal(str(ingredient.protein_grams_per_kg or 0))
+
                 batch_ingredient = BatchIngredient(
                     tenant_id=tenant_id,
                     batch_id=batch.id,
@@ -178,6 +246,7 @@ class NutritionService:
                     weight=weight,
                     percentage=percentage_value,
                     locked_cost_per_kg=locked_cost_per_kg,
+                    locked_protein_grams_per_kg=locked_protein,
                 )
                 db.session.add(batch_ingredient)
 
@@ -199,13 +268,22 @@ class NutritionService:
 
             db.session.commit()
 
-            return jsonify({
+            response_payload = {
                 'message': 'Batch processed and saved successfully.',
                 'batchId': batch.id,
                 'formulaId': batch.formula_id,
                 'status': batch.status,
                 'inventory': created_rows,
-            }), 201
+            }
+
+            if planner_recipe is not None:
+                response_payload['warning'] = (
+                    'formulaId referenced a planner recipe and was accepted for compatibility; '
+                    'batch is not linked to FeedFormula.'
+                )
+                response_payload['plannerRecipeId'] = planner_recipe.id
+
+            return jsonify(response_payload), 201
         except ValueError as exc:
             db.session.rollback()
             return jsonify({'error': str(exc)}), 400
@@ -317,6 +395,19 @@ class NutritionService:
             else:
                 cost_per_liter_value = 0.0
 
+            ingredient_breakdown = NutritionService._serialize_batch_ingredient_breakdown(batch)
+
+            # Compute overall batch protein % from snapshotted ingredient values.
+            total_weight_kg = Decimal(str(batch.total_weight))
+            total_protein_grams = sum(
+                Decimal(str(entry.get('protein_grams_per_kg', 0))) * Decimal(str(entry['weight']))
+                for entry in ingredient_breakdown
+            )
+            protein_percentage = (
+                float((total_protein_grams / (total_weight_kg * 1000)) * 100)
+                if total_weight_kg > 0 else 0.0
+            )
+
             results.append({
                 'batchId': batch.id,
                 'batchName': batch.batch_name,
@@ -327,6 +418,9 @@ class NutritionService:
                 'totalBatchCost': float(batch.total_cost),
                 'totalMilkLiters': float(total_milk_liters),
                 'costPerLiter': cost_per_liter_value,
+                'proteinPercentage': round(protein_percentage, 2),
+                'ingredient_breakdown': ingredient_breakdown,
+                'ingredients': ingredient_breakdown,
             })
 
         return jsonify({'saleableOnly': saleable_only, 'rows': results}), 200

@@ -7,12 +7,37 @@ from decimal import Decimal
 from typing import Optional
 
 from app import db
-from app.models.supply import InventoryItem, FeedRecipe, FormulaIngredient
+from app.models.supply import InventoryItem, FeedRecipe, RecipeIngredient
+from app.services.feed_mixer_policy_service import FeedMixerPolicyService
 from app.repositories.cow_repo import CowRepository
 
 
 class RecipeFormulationService:
     """Handles recipe creation with automatic protein targeting and ingredient adjustment."""
+
+    @staticmethod
+    def _seed_percentages_when_all_zero(base_ingredients: list[dict], ingredient_lookup: dict[int, dict]) -> list[dict]:
+        """Seed percentages when UI submits all-zero shares so auto-adjust can converge.
+
+        Uses equal split so the first auto-adjust action produces visible movement.
+        """
+        if not base_ingredients:
+            return []
+
+        equal_pct = 100.0 / len(base_ingredients)
+        seeded = [{"ingredient_id": ing["ingredient_id"], "percentage": equal_pct} for ing in base_ingredients]
+
+        # Ensure sum is exactly 100 after rounding.
+        rounded = []
+        running = 0.0
+        for idx, ing in enumerate(seeded):
+            if idx == len(seeded) - 1:
+                pct = round(100.0 - running, 2)
+            else:
+                pct = round(float(ing["percentage"]), 2)
+                running += pct
+            rounded.append({"ingredient_id": ing["ingredient_id"], "percentage": max(0.0, pct)})
+        return rounded
 
     @staticmethod
     def get_ingredient_nutrition_profile(ingredient_id: int, tenant_id: int) -> dict:
@@ -110,6 +135,7 @@ class RecipeFormulationService:
         batch_size_kg: float,
         base_ingredients: list[dict],  # [{"ingredient_id": int, "percentage": float}, ...]
         target_protein_percent: float,
+        recipe_type: str | None = None,
     ) -> dict:
         """
         Suggest adjustments to ingredient percentages to achieve target protein.
@@ -137,6 +163,42 @@ class RecipeFormulationService:
             "adjustment_strategy": str,
         }
         """
+        requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
+            recipe_type,
+            default=None,
+        )
+        normalized_recipe_type = requested_recipe_type or FeedMixerPolicyService.MAIN_MEAL
+        if requested_recipe_type is not None:
+            ingredient_ids = [int(ing["ingredient_id"]) for ing in base_ingredients]
+            _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
+                tenant_id=tenant_id,
+                ingredient_ids=ingredient_ids,
+                recipe_type=requested_recipe_type,
+            )
+            if missing_ids:
+                raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
+            if ineligible_ids:
+                raise ValueError(
+                    f"Ingredient(s) not eligible for recipe_type {requested_recipe_type}: {ineligible_ids}."
+                )
+
+        # Pre-load ingredient metadata used by both seeding and adjustments.
+        ingredient_lookup = {}
+        for ing in base_ingredients:
+            ing_obj = InventoryItem.query.filter_by(id=ing["ingredient_id"], tenant_id=tenant_id).first()
+            protein = float(ing_obj.protein_grams_per_kg) if ing_obj else 0
+            ingredient_lookup[ing["ingredient_id"]] = {
+                "protein_per_kg": protein,
+                "name": ing_obj.name if ing_obj else f"Ingredient {ing['ingredient_id']}",
+                "current_pct": ing["percentage"],
+            }
+
+        # If all shares are zero, seed a valid baseline so auto-adjust can produce non-zero output.
+        if base_ingredients and all(float(ing.get("percentage") or 0) <= 0 for ing in base_ingredients):
+            base_ingredients = RecipeFormulationService._seed_percentages_when_all_zero(base_ingredients, ingredient_lookup)
+            for ing in base_ingredients:
+                ingredient_lookup[ing["ingredient_id"]]["current_pct"] = ing["percentage"]
+
         # Get current nutrition profile
         current = RecipeFormulationService.calculate_batch_protein_content(
             batch_size_kg,
@@ -165,58 +227,32 @@ class RecipeFormulationService:
                 "adjustment_strategy": "No adjustment needed - target already achieved.",
             }
 
-        # Strategy 1: Adjust high-protein ingredients up/down proportionally
-        # Identify high-protein and low-protein ingredients
-        high_protein_ings = []
-        low_protein_ings = []
-        neutral_ings = []
+        # Relative protein-weighted adjustment (works for local datasets where all proteins may be <200 g/kg).
+        proteins = [ingredient_lookup[ing["ingredient_id"]]["protein_per_kg"] for ing in base_ingredients]
+        min_protein = min(proteins) if proteins else 0.0
+        max_protein = max(proteins) if proteins else 0.0
+        protein_span = max_protein - min_protein
 
-        ingredient_lookup = {}
-        for ing in base_ingredients:
-            ing_obj = InventoryItem.query.filter_by(id=ing["ingredient_id"]).first()
-            protein = float(ing_obj.protein_grams_per_kg) if ing_obj else 0
-            ingredient_lookup[ing["ingredient_id"]] = {
-                "protein_per_kg": protein,
-                "name": ing_obj.name if ing_obj else f"Ingredient {ing['ingredient_id']}",
-                "current_pct": ing["percentage"],
-            }
+        # Cap adjustment aggressiveness to avoid extreme swings in one click.
+        k = min(0.45, abs(float(adjustment_needed)) / 100.0)
+        direction = 1.0 if adjustment_needed > 0 else -1.0
 
-            if protein > 200:  # Rough threshold for high-protein
-                high_protein_ings.append(ing["ingredient_id"])
-            elif protein < 100:
-                low_protein_ings.append(ing["ingredient_id"])
-            else:
-                neutral_ings.append(ing["ingredient_id"])
-
-        # Proportional adjustment
         adjusted_ingredients = []
-        adjustment_multiplier = 1.0
-
-        if adjustment_needed > 0 and high_protein_ings:
-            # Need more protein: increase high-protein ingredients
-            adjustment_multiplier = (current_protein + adjustment_needed) / current_protein if current_protein > 0 else 1.1
-        elif adjustment_needed < 0 and low_protein_ings:
-            # Need less protein: increase low-protein ingredients
-            adjustment_multiplier = (current_protein + adjustment_needed) / current_protein if current_protein > 0 else 0.9
 
         for ing in base_ingredients:
             ing_id = ing["ingredient_id"]
             current_pct = ing["percentage"]
             protein_per_kg = ingredient_lookup[ing_id]["protein_per_kg"]
 
-            # Apply adjustment multiplier
-            if adjustment_needed > 0:
-                # Increase high-protein ingredients
-                if ing_id in high_protein_ings:
-                    adjusted_pct = current_pct * (1 + (adjustment_needed / 100))
-                else:
-                    adjusted_pct = current_pct * (1 - (adjustment_needed / 200))
+            if protein_span <= 0:
+                protein_rank = 0.5
             else:
-                # Increase low-protein ingredients
-                if ing_id in low_protein_ings:
-                    adjusted_pct = current_pct * (1 + abs(adjustment_needed / 100))
-                else:
-                    adjusted_pct = current_pct * (1 - abs(adjustment_needed / 200))
+                protein_rank = (protein_per_kg - min_protein) / protein_span
+
+            # protein_rank in [0,1]; centered bias in [-1,1].
+            centered_bias = (2.0 * protein_rank) - 1.0
+            multiplier = 1.0 + (k * direction * centered_bias)
+            adjusted_pct = current_pct * multiplier
 
             adjusted_pct = max(0, min(100, adjusted_pct))  # Clamp to 0-100
 
@@ -253,6 +289,7 @@ class RecipeFormulationService:
         return {
             "current_protein_percent": round(current_protein, 2),
             "target_protein_percent": target_protein_percent,
+            "recipe_type": normalized_recipe_type,
             "adjustment_needed": round(adjustment_needed, 2),
             "adjusted_ingredients": adjusted_ingredients,
             "projected_nutrition": projected,
@@ -266,6 +303,7 @@ class RecipeFormulationService:
         batch_size_kg: float,
         adjusted_ingredients: list[dict],  # [{"ingredient_id": int, "percentage": float}, ...]
         target_protein_percent: float,
+        recipe_type: str | None = None,
         user_id: Optional[int] = None,
         yield_target_id: Optional[int] = None,
     ) -> dict:
@@ -276,11 +314,31 @@ class RecipeFormulationService:
         Returns saved recipe with ID and status.
         """
         try:
+            requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
+                recipe_type,
+                default=None,
+            )
+            normalized_recipe_type = requested_recipe_type or FeedMixerPolicyService.MAIN_MEAL
+            if requested_recipe_type is not None:
+                ingredient_ids = [int(ing_data["ingredient_id"]) for ing_data in adjusted_ingredients]
+                _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
+                    tenant_id=tenant_id,
+                    ingredient_ids=ingredient_ids,
+                    recipe_type=requested_recipe_type,
+                )
+                if missing_ids:
+                    raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
+                if ineligible_ids:
+                    raise ValueError(
+                        f"Ingredient(s) not eligible for recipe_type {requested_recipe_type}: {ineligible_ids}."
+                    )
+
             # Create recipe
             recipe = FeedRecipe(
                 tenant_id=tenant_id,
                 recipe_name=recipe_name,
                 target_protein_percentage=target_protein_percent,
+                recipe_type=normalized_recipe_type,
                 is_active=True,  # Auto-adopt the recipe
                 created_by=user_id,
             )
@@ -297,13 +355,13 @@ class RecipeFormulationService:
                 if not ingredient:
                     raise ValueError(f"Ingredient {ingredient_id} not found for this tenant.")
 
-                formula_ing = FormulaIngredient(
+                recipe_ing = RecipeIngredient(
                     tenant_id=tenant_id,
                     recipe_id=recipe.id,
                     inventory_item_id=ingredient_id,
                     inclusion_percentage=Decimal(str(percentage)),
                 )
-                db.session.add(formula_ing)
+                db.session.add(recipe_ing)
 
             db.session.commit()
 
@@ -317,6 +375,7 @@ class RecipeFormulationService:
                 "recipe_id": recipe.id,
                 "recipe_name": recipe_name,
                 "target_protein_percent": target_protein_percent,
+                "recipe_type": normalized_recipe_type,
                 "achieved_protein_percent": nutrition["average_protein_percent"],
                 "batch_size_kg": batch_size_kg,
                 "status": "ADOPTED",

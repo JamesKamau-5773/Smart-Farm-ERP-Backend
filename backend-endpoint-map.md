@@ -5,7 +5,7 @@ This is the current backend contract for the frontend integration.
 ## Access Model
 
 - Protected routes require `Authorization: Bearer <token>`.
-- Elevated access policy: `FARMER`, `ADMIN`, and `SUPER_ADMIN` have full endpoint access across protected routes.
+- Role parity is enabled for elevated users: `FARMER`, `ADMIN`, and `SUPER_ADMIN` are treated as equivalent for endpoint authorization.
 - Tenant and farm are read from JWT claims. The backend does not rely on `X-Tenant-ID` or `X-Farm-ID` headers for request scoping.
 
 ## Mutation Semantics
@@ -72,7 +72,6 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/animals/<cow_id>`
 - `PATCH /api/animals/<cow_id>`
 - `GET /api/animals/<cow_id>/milk-history`
-- `GET /api/production/history/<cow_id>`
 - `GET /api/animals/<cow_id>/events`
 - `POST /api/animals/<cow_id>/events`
 - `GET /api/production/milk-drop-alerts`
@@ -119,49 +118,6 @@ Conflict behavior:
 
 The browser payload `{ id, name, breed, dob, hasCalved }` is accepted because `id` maps to `tag_number` and `dob` maps to `date_of_birth`. `breed` is treated as an alias for `breed_status`; if omitted, the backend defaults to `Foundation`.
 
-### Animal milk history schema
-
-`GET /api/animals/<cow_id>/milk-history` and `GET /api/production/history/<cow_id>` return the same animal-scoped payload.
-
-Response body:
-
-```json
-{
-	"animal": {
-		"id": 7,
-		"tag_number": "C-002",
-		"name": "Ruby",
-		"breed": "Foundation",
-		"breed_status": "Foundation",
-		"date_of_birth": "2026-07-01",
-		"current_status": "Lactating",
-		"is_active": true
-	},
-	"sessions": [
-		{
-			"id": 44,
-			"cow_id": 7,
-			"amount": 16.5,
-			"session": "Morning",
-			"milkingDate": "2026-07-03",
-			"status": "RECORDED",
-			"milker": 3,
-			"timestamp": "2026-07-03T05:32:10+00:00"
-		}
-	],
-	"meta": {
-		"page": 1,
-		"per_page": 20,
-		"total": 1,
-		"pages": 1
-	}
-}
-```
-
-Volume field convention:
-
-- API responses use `amount` as the canonical milk-volume field.
-
 ## Frontend-Critical Clinical/Safety Routes
 
 - `POST /api/clinical/cows/<cow_id>/medical`
@@ -185,7 +141,6 @@ Volume field convention:
 - `GET /api/production/yield`
 - `POST /api/production/yield`
 - `GET /api/production/yield/<log_id>`
-- `PATCH /api/production/yield/<log_id>`
 - `DELETE /api/production/yield/<log_id>`
 - `GET /api/production/summary`
 - `GET /api/breeding`
@@ -268,6 +223,8 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `POST /api/finance/buyers`
 - `GET /api/finance/buyers/<buyer_id>`
 - `PATCH /api/finance/buyers/<buyer_id>`
+- `POST /api/finance/buyers/<buyer_id>/invoice/generate`
+- `POST /api/finance/invoices/<invoice_id>/send`
 - `GET /api/finance/statements/<token>`
 - `POST /api/finance/billing/stk-push`
 - `POST /api/finance/mpesa/callback`

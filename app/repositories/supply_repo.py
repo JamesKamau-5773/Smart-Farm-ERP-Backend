@@ -102,6 +102,10 @@ class InventoryRepository:
         protein_grams_per_kg=0,
         fiber_grams_per_kg=0,
         cost_per_kg=0,
+        allowed_mixers='main_meal',
+        mixer_role='roughage',
+        inclusion_percentage_dairy_meal=0,
+        inclusion_percentage_main_meal=0,
     ) -> InventoryItem:
         try:
             item = InventoryItem(
@@ -116,6 +120,10 @@ class InventoryRepository:
                 protein_grams_per_kg=protein_grams_per_kg,
                 fiber_grams_per_kg=fiber_grams_per_kg,
                 cost_per_kg=cost_per_kg,
+                allowed_mixers=allowed_mixers,
+                mixer_role=mixer_role,
+                inclusion_percentage_dairy_meal=inclusion_percentage_dairy_meal,
+                inclusion_percentage_main_meal=inclusion_percentage_main_meal,
             )
             db.session.add(item)
             db.session.commit()
@@ -191,6 +199,10 @@ class InventoryRepository:
         protein_grams_per_kg=None,
         fiber_grams_per_kg=None,
         cost_per_kg=None,
+        allowed_mixers=None,
+        mixer_role=None,
+        inclusion_percentage_dairy_meal=None,
+        inclusion_percentage_main_meal=None,
     ) -> InventoryItem:
         try:
             item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
@@ -217,6 +229,14 @@ class InventoryRepository:
                 item.fiber_grams_per_kg = Decimal(str(fiber_grams_per_kg))
             if cost_per_kg is not None:
                 item.cost_per_kg = Decimal(str(cost_per_kg))
+            if allowed_mixers is not None:
+                item.allowed_mixers = allowed_mixers
+            if mixer_role is not None:
+                item.mixer_role = mixer_role
+            if inclusion_percentage_dairy_meal is not None:
+                item.inclusion_percentage_dairy_meal = Decimal(str(inclusion_percentage_dairy_meal))
+            if inclusion_percentage_main_meal is not None:
+                item.inclusion_percentage_main_meal = Decimal(str(inclusion_percentage_main_meal))
 
             db.session.commit()
             return item

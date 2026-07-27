@@ -1,36 +1,31 @@
-from flask import jsonify
+import traceback
+from flask import jsonify, json
 from werkzeug.exceptions import HTTPException
-from sqlalchemy.exc import SQLAlchemyError
+
 
 def register_error_handlers(app):
+    """Register global error handlers for the Flask app."""
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(e):
+        """Return JSON instead of HTML for HTTP errors."""
+        response = e.get_response()
+        response.data = json.dumps({
+            "code": e.code,
+            "name": e.name,
+            "description": e.description,
+        })
+        response.content_type = "application/json"
+        return response
+
     @app.errorhandler(404)
     def not_found_error(error):
         return jsonify({"error": "Resource not found.", "code": 404}), 404
 
-    @app.errorhandler(400)
-    def bad_request_error(error):
-        return jsonify({"error": "Bad request. Please check your payload.", "code": 400}), 400
-
-    @app.errorhandler(405)
-    def method_not_allowed_error(error):
-        return jsonify({"error": "Method not allowed for this endpoint.", "code": 405}), 405
-
-    @app.errorhandler(SQLAlchemyError)
-    def database_error(error):
-        # Rollback the session to prevent a locked database state
-        from app import db
-        db.session.rollback()
-        # In production, log the actual `error` securely to a file/monitoring service here
-        return jsonify({"error": "A database error occurred.", "code": 500}), 500
-
     @app.errorhandler(Exception)
-    def unhandled_exception(error):
-        # Catch-all for standard Python exceptions
-        if isinstance(error, HTTPException):
-            # Keep a consistent payload for 500s even when raised via abort(500).
-            if getattr(error, 'code', None) == 500:
-                return jsonify({"error": "An unexpected internal server error occurred.", "code": 500}), 500
-            return jsonify({"error": error.description, "code": error.code}), error.code
+    def handle_unhandled_exception(e):
+        """Log the full traceback for any unhandled exception."""
+        # Log the exception to the console for debugging
+        traceback.print_exc()
         
-        # Log the error trace securely here
         return jsonify({"error": "An unexpected internal server error occurred.", "code": 500}), 500

@@ -5,19 +5,9 @@ from app import db
 from app.models.livestock import DailyTaskLog, HerdsmanRoutineTemplate
 from app.models.user import Role, User
 from app.utils.decorators import require_tenant_context
-from app.utils.jwt_payload import parse_public_int_id
+from app.utils import get_tenant_id_from_context
 
 herdsman_bp = Blueprint('herdsman', __name__)
-
-def _get_current_tenant_id():
-    tenant_public_id = getattr(g, 'tenant_id', None)
-    if not tenant_public_id:
-        return None
-
-    try:
-        return parse_public_int_id(tenant_public_id, 'tenant_')
-    except (TypeError, ValueError):
-        return None
 
 
 @herdsman_bp.route('/api/v1/tasks/<int:routine_id>/complete', methods=['POST'])
@@ -38,7 +28,7 @@ def mark_task_complete(routine_id):
     except (TypeError, ValueError):
         return jsonify({"error": "tenant_id and user_id must be integers"}), 400
 
-    current_tenant_id = _get_current_tenant_id()
+    current_tenant_id = get_tenant_id_from_context()
     if current_tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
 
@@ -87,7 +77,7 @@ def mark_task_complete(routine_id):
 @jwt_required()
 @require_tenant_context
 def list_routine_plans():
-    tenant_id = _get_current_tenant_id()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     routines = HerdsmanRoutineTemplate.query.filter_by(tenant_id=tenant_id).order_by(HerdsmanRoutineTemplate.display_order.asc()).all()
@@ -112,7 +102,7 @@ def list_routine_plans():
 @jwt_required()
 @require_tenant_context
 def save_routine_plan():
-    tenant_id = _get_current_tenant_id()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}

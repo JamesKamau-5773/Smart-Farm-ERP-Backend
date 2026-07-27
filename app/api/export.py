@@ -9,20 +9,9 @@ from weasyprint import HTML
 from app.models.user import Role
 from app.services.export_service import AnimalPassportService
 from app.utils.decorators import require_tenant_context, role_required
-from app.utils.jwt_payload import parse_public_int_id
+from app.utils import get_tenant_id_from_context
 
 export_bp = Blueprint('export', __name__)
-
-
-def _get_tenant_id_from_context():
-    tenant_public_id = getattr(g, 'tenant_id', None)
-    if not tenant_public_id:
-        return None
-
-    try:
-        return parse_public_int_id(tenant_public_id, 'tenant_')
-    except (TypeError, ValueError):
-        return None
 
 
 @export_bp.route('/api/v1/export/animal/<int:animal_id>/pdf', methods=['GET'])
@@ -30,7 +19,7 @@ def _get_tenant_id_from_context():
 @require_tenant_context
 @role_required(Role.FARMER, Role.VET)
 def export_animal_passport(animal_id):
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
 

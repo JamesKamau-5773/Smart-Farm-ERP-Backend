@@ -8,17 +8,21 @@ from flask_migrate import Migrate
 from config import Config
 
 from app.celery_utils import make_celery
-from app.utils.rate_limiting import tenant_based_key_func
-# Globally accessible libraries
 db = SQLAlchemy()
 bcrypt = Bcrypt()
 jwt = JWTManager()
-limiter = Limiter(key_func=tenant_based_key_func, strategy="fixed-window")
+limiter = Limiter(key_func=get_remote_address, strategy="fixed-window")
 migrate = Migrate()
+celery = None  # Initialised by create_app(); imported by app.tasks.*
 
 def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
+
+    # Override the default rate-limiter key_func to use our tenant-based one.
+    # This is done inside create_app to avoid circular imports at the top level.
+    from app.utils.rate_limiting import tenant_based_key_func
+    limiter.key_func = tenant_based_key_func
 
     # Initialize Plugins
     db.init_app(app)
@@ -27,6 +31,7 @@ def create_app(config_class=Config):
     limiter.init_app(app)
     migrate.init_app(app, db)
 
+    global celery
     celery = make_celery(app)
 
     @app.before_request
@@ -71,6 +76,7 @@ def create_app(config_class=Config):
     from app.models import tenant
     from app.models import farm
     from app.models import hr
+    from app.models import genetics
 
 
     from app.api.clinical import clinical_bp
@@ -80,6 +86,7 @@ def create_app(config_class=Config):
     from app.api.export import export_bp
     from app.api.inventory import inventory_bp
     from app.api.finance import finance_bp
+    from app.api.webhooks import webhooks_bp
     from app.api.hr import hr_bp
     from app.api.tenant import tenant_bp
     from app.api.feed import feed_bp
@@ -88,6 +95,8 @@ def create_app(config_class=Config):
     from app.api.dashboard import dashboard_bp
     from app.api.herdsman import herdsman_bp
     from app.api.clinical import medical_alias_bp, safety_bp, veterinary_bp
+    from app.api.herd import herd_bp
+    from app.api.genetics import genetics_bp
     from app.api import api_bp
     
     # Register Global Error Handlers
@@ -111,7 +120,8 @@ def create_app(config_class=Config):
     app.register_blueprint(breeding_bp, url_prefix='/api/v1/breeding')
     app.register_blueprint(export_bp)
     app.register_blueprint(inventory_bp)
-    app.register_blueprint(finance_bp, url_prefix='/api/finance')
+    app.register_blueprint(finance_bp, url_prefix='/api')
+    app.register_blueprint(webhooks_bp)
     app.register_blueprint(hr_bp, url_prefix='/api/hr')
     app.register_blueprint(tenant_bp, url_prefix='/api/tenant')
     app.register_blueprint(feed_bp)
@@ -120,8 +130,10 @@ def create_app(config_class=Config):
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(herdsman_bp)
     app.register_blueprint(medical_alias_bp)
+    app.register_blueprint(herd_bp, url_prefix='/api/herd')
     app.register_blueprint(safety_bp)
     app.register_blueprint(veterinary_bp)
+    app.register_blueprint(genetics_bp, url_prefix='/api/v1/genetics')
     app.register_blueprint(api_bp, url_prefix='/api')
 
     @app.route('/health', methods=['GET'])

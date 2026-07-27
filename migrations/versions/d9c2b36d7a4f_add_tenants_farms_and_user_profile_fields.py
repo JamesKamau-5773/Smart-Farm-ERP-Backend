@@ -12,6 +12,7 @@ This migration aligns the database schema with the current multi-tenant model:
 
 from alembic import op
 import sqlalchemy as sa
+from typing import Set
 
 
 # revision identifiers, used by Alembic.
@@ -26,7 +27,7 @@ def _table_exists(conn, table_name: str) -> bool:
     return result is not None
 
 
-def _column_names(conn, table_name: str) -> set[str]:
+def _column_names(conn, table_name: str) -> Set[str]:
     rows = conn.execute(
         sa.text(
             """

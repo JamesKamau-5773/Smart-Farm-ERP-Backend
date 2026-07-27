@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from decimal import Decimal
 from tests.base import BaseTestCase
-from app.models.supply import InventoryItem, FeedRecipe, FormulaIngredient
+from app.models.supply import InventoryItem, FeedRecipe
 from app import db
 
 

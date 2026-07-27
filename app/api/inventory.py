@@ -1,27 +1,45 @@
 from flask import Blueprint, jsonify, g, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
+from sqlalchemy import desc
 
 from app.models.user import Role
+from app.models.supply import FeedRecipe, RecipeIngredient
 from app.repositories.supply_repo import InventoryRepository
+from app.services.feed_mixer_policy_service import FeedMixerPolicyService
 from app.services.inventory_standards_service import InventoryStandardsService
 from app.utils.decorators import require_tenant_context, role_required
-from app.utils.jwt_payload import parse_public_int_id
+from app.utils import get_tenant_id_from_context
 
 inventory_bp = Blueprint('inventory', __name__)
 
 
-def _normalize_transaction_type(value):
-    raw = (value or '').strip().upper()
-    if raw in {'IN', 'OUT'}:
-        return raw
+def _parse_movement_payload(raw_type: str | None) -> tuple[str, str]:
+    """
+    Normalizes movement type from frontend-friendly terms and determines the
+    correct reason code for the transaction.
+    
+    Returns:
+        A tuple of (transaction_type, reason_code).
+    """
+    raw = (raw_type or '').strip().upper()
 
-    # Frontend-friendly aliases.
-    if raw in {'RESTOCK', 'ADD', 'INBOUND', 'PURCHASE', 'RECEIPT'}:
-        return 'IN'
+    # Shrinkage & Loss
+    if raw in {'SPOILAGE', 'SPILL', 'EXPIRED', 'DAMAGE', 'SHRINKAGE'}:
+        return 'OUT', 'SHRINKAGE'
+
+    # Standard Consumption
     if raw in {'ISSUE', 'DEDUCT', 'CONSUMPTION', 'CONSUME', 'OUTBOUND', 'USAGE', 'WITHDRAWAL'}:
-        return 'OUT'
+        return 'OUT', 'CONSUMPTION'
 
-    return raw
+    # Standard Restock
+    if raw in {'RESTOCK', 'ADD', 'INBOUND', 'PURCHASE', 'RECEIPT'}:
+        return 'IN', 'PURCHASE'
+
+    # Direct type with default reason
+    if raw in {'IN', 'OUT'}:
+        return raw, 'STANDARD'
+
+    raise ValueError(f"Unknown movement type: {raw_type}")
 
 
 def _pagination_params():
@@ -37,7 +55,53 @@ def _pagination_params():
     return page, per_page
 
 
-def _serialize_item(item):
+def _get_mix_share_defaults_by_mixer(tenant_id: int):
+    """Resolve backend-owned default shares from the latest active recipe per mixer type."""
+    defaults_by_mixer = {
+        FeedMixerPolicyService.DAIRY_MEAL: {},
+        FeedMixerPolicyService.MAIN_MEAL: {},
+    }
+
+    active_recipes = (
+        FeedRecipe.query
+        .filter_by(tenant_id=tenant_id, is_active=True)
+        .order_by(desc(FeedRecipe.id))
+        .all()
+    )
+    recipe_by_type = {}
+    for recipe in active_recipes:
+        recipe_type = FeedMixerPolicyService.normalize_recipe_type(
+            getattr(recipe, 'recipe_type', None),
+            default=FeedMixerPolicyService.MAIN_MEAL,
+        )
+        if recipe_type not in recipe_by_type:
+            recipe_by_type[recipe_type] = recipe
+
+    for recipe_type, recipe in recipe_by_type.items():
+        rows = RecipeIngredient.query.filter_by(tenant_id=tenant_id, recipe_id=recipe.id).all()
+        defaults_by_mixer[recipe_type] = {
+            row.inventory_item_id: float(row.inclusion_percentage or 0)
+            for row in rows
+        }
+
+    return defaults_by_mixer
+
+
+def _serialize_item(item, *, mix_share_defaults_by_mixer=None, active_recipe_type=None):
+    if mix_share_defaults_by_mixer is None:
+        mix_share_defaults_by_mixer = {}
+
+    policy = FeedMixerPolicyService.resolve_item_policy(item)
+    defaults = FeedMixerPolicyService.apply_recipe_overrides(
+        policy=policy,
+        item_id=item.id,
+        mix_share_defaults_by_mixer=mix_share_defaults_by_mixer,
+    )
+    active_mixer = FeedMixerPolicyService.normalize_recipe_type(
+        active_recipe_type,
+        default=FeedMixerPolicyService.MAIN_MEAL,
+    )
+    inclusion_percentage = float(defaults.get(active_mixer, 0))
     metadata = InventoryStandardsService.infer_item_metadata(
         tenant_id=item.tenant_id,
         name=item.name,
@@ -59,6 +123,17 @@ def _serialize_item(item):
         'current_stock': float(item.current_qty),
         'currentQty': float(item.current_qty),
         'current_qty': float(item.current_qty),
+        'stock': {
+            'value': float(item.current_qty),
+            'unit': item.unit,
+        },
+        # Backend-owned default share values for feed planner.
+        'inclusion_percentage': inclusion_percentage,
+        'inclusionPercent': inclusion_percentage,
+        'inclusionPercentage': inclusion_percentage,
+        'default_share_percent': inclusion_percentage,
+        'default_percentage': inclusion_percentage,
+        'percentage': inclusion_percentage,
         'energy_mj_per_kg': float(item.energy_mj_per_kg),
         'energyMjPerKg': float(item.energy_mj_per_kg),
         'protein_grams_per_kg': float(item.protein_grams_per_kg),
@@ -70,6 +145,41 @@ def _serialize_item(item):
         'default_source': metadata.get('default_source'),
         'standards_version': metadata.get('standards_version'),
         'source_reference': metadata.get('source_reference'),
+        'allowed_mixers': policy['allowed_mixers'],
+        'role': policy['role'],
+        'defaults': {
+            FeedMixerPolicyService.DAIRY_MEAL: float(defaults.get(FeedMixerPolicyService.DAIRY_MEAL, 0)),
+            FeedMixerPolicyService.MAIN_MEAL: float(defaults.get(FeedMixerPolicyService.MAIN_MEAL, 0)),
+        },
+        'inclusion_percentage_dairy_meal': float(defaults.get(FeedMixerPolicyService.DAIRY_MEAL, 0)),
+        'inclusion_percentage_main_meal': float(defaults.get(FeedMixerPolicyService.MAIN_MEAL, 0)),
+    }
+
+
+def _parse_inventory_item_policy_payload(data, *, fallback_name=None, fallback_category=None):
+    inferred = FeedMixerPolicyService.infer_policy_from_item(
+        name=data.get('name', fallback_name),
+        category=data.get('category', fallback_category),
+    )
+    allowed_mixers = FeedMixerPolicyService.normalize_allowed_mixers(
+        data.get('allowed_mixers'),
+        fallback=inferred['allowed_mixers'],
+    )
+    role = FeedMixerPolicyService.normalize_role(
+        data.get('role'),
+        allowed_mixers=allowed_mixers,
+        fallback_name=data.get('name', fallback_name),
+        fallback_category=data.get('category', fallback_category),
+    )
+
+    inclusion_percentage_dairy_meal = data.get('inclusion_percentage_dairy_meal', data.get('inclusionPercentageDairyMeal'))
+    inclusion_percentage_main_meal = data.get('inclusion_percentage_main_meal', data.get('inclusionPercentageMainMeal'))
+
+    return {
+        'allowed_mixers': ','.join(allowed_mixers),
+        'mixer_role': role,
+        'inclusion_percentage_dairy_meal': float(inclusion_percentage_dairy_meal or 0),
+        'inclusion_percentage_main_meal': float(inclusion_percentage_main_meal or 0),
     }
 
 
@@ -100,23 +210,27 @@ def _serialize_movement(movement):
         'item_name': movement.item.name if movement.item else None,
         'quantity': float(movement.quantity),
         'movement_type': movement.transaction_type,
+        'reason_code': movement.reason_code,
         'timestamp': movement.transaction_date.isoformat() if movement.transaction_date else None,
         'logged_by': movement.logged_by,
-        'reference_note': movement.reference_note,
+        'notes': movement.notes,
         'unit_cost': float(movement.unit_cost),
         'total_transaction_value': float(movement.total_transaction_value),
     }
 
 
-def _get_tenant_id_from_context():
-    tenant_public_id = getattr(g, 'tenant_id', None)
-    if not tenant_public_id:
-        return None
+def _link_inventory_loss_to_finance(movement, item):
+    """Creates an Expense transaction in the main ledger for inventory write-offs."""
+    from app.services.finance_service import FinanceService
+    from app.models.finance import TransactionType, TransactionCategory
 
-    try:
-        return parse_public_int_id(tenant_public_id, 'tenant_')
-    except (TypeError, ValueError):
-        return None
+    loss_value = float(movement.quantity) * float(item.cost_per_kg)
+    if loss_value > 0:
+        desc = f"Inventory write-off for {item.name}: {movement.notes or movement.reason_code}"
+        FinanceService.record_transaction(
+            t_type=TransactionType.EXPENSE, category=TransactionCategory.INVENTORY_WRITE_OFF,
+            amount=loss_value, user_id=int(get_jwt_identity()), ip_address=request.remote_addr, desc=desc
+        )
 
 
 @inventory_bp.route('/api/v1/inventory/deduct', methods=['POST'])
@@ -124,7 +238,7 @@ def _get_tenant_id_from_context():
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND)
 def deduct_inventory():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
 
@@ -141,7 +255,7 @@ def deduct_inventory():
     if qty_to_deduct <= 0:
         return jsonify({"error": "Deduction quantity must be greater than zero."}), 400
 
-    note = data.get('reference_note') or 'Automated system deduction'
+    note = data.get('notes') or 'Automated system deduction'
     user_id = data.get('logged_by') or get_jwt_identity()
 
     try:
@@ -171,22 +285,35 @@ def deduct_inventory():
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND)
 def list_inventory_items():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     items = InventoryRepository.list_by_tenant(tenant_id)
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
+        request.args.get('recipe_type'),
+        default=None,
+    )
     q = (request.args.get('q') or '').strip().lower()
     category = (request.args.get('category') or '').strip().lower()
     if q:
         items = [item for item in items if q in (item.name or '').lower() or q in (getattr(item, 'sku', '') or '').lower()]
     if category:
         items = [item for item in items if category == (item.category or '').lower()]
+    if requested_recipe_type:
+        items = [
+            item for item in items
+            if FeedMixerPolicyService.is_allowed_for_mixer(
+                FeedMixerPolicyService.resolve_item_policy(item),
+                requested_recipe_type,
+            )
+        ]
     page, per_page = _pagination_params()
     total = len(items)
     start = (page - 1) * per_page
     end = start + per_page
     page_items = items[start:end]
-    return jsonify({'items': [_serialize_item(item) for item in page_items], 'meta': {'page': page, 'per_page': per_page, 'total': total, 'pages': (total + per_page - 1) // per_page if total else 0}}), 200
+    return jsonify({'items': [_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer, active_recipe_type=requested_recipe_type) for item in page_items], 'meta': {'page': page, 'per_page': per_page, 'total': total, 'pages': (total + per_page - 1) // per_page if total else 0}}), 200
 
 
 @inventory_bp.route('/api/inventory/items', methods=['POST'])
@@ -194,7 +321,7 @@ def list_inventory_items():
 @require_tenant_context
 @role_required(Role.FARMER)
 def create_inventory_item():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}
@@ -204,6 +331,7 @@ def create_inventory_item():
     if not name or not category or not unit:
         return jsonify({'error': 'name, category, and unit are required.'}), 400
     try:
+        policy_payload = _parse_inventory_item_policy_payload(data)
         standards_payload = InventoryStandardsService.apply_defaults(
             tenant_id=tenant_id,
             name=name,
@@ -237,8 +365,13 @@ def create_inventory_item():
             protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'],
             fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'],
             cost_per_kg=resolved_defaults['cost_per_kg'],
+            allowed_mixers=policy_payload['allowed_mixers'],
+            mixer_role=policy_payload['mixer_role'],
+            inclusion_percentage_dairy_meal=policy_payload['inclusion_percentage_dairy_meal'],
+            inclusion_percentage_main_meal=policy_payload['inclusion_percentage_main_meal'],
         )
-        return jsonify(_serialize_item(item)), 201
+        mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+        return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 201
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 409
 
@@ -248,7 +381,7 @@ def create_inventory_item():
 @require_tenant_context
 @role_required(Role.FARMER)
 def update_inventory_item(item_id):
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}
@@ -297,6 +430,12 @@ def update_inventory_item(item_id):
         if field_errors:
             return jsonify({'error': 'Bulk Feed nutrition/cost values cannot all be zero.', 'field_errors': field_errors}), 400
 
+    policy_payload = _parse_inventory_item_policy_payload(
+        data,
+        fallback_name=name_for_defaults,
+        fallback_category=category_for_defaults,
+    )
+
     item = InventoryRepository.update_item(
         item_id=item_id,
         tenant_id=tenant_id,
@@ -310,10 +449,15 @@ def update_inventory_item(item_id):
         protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'] if should_update_nutrition else None,
         fiber_grams_per_kg=resolved_defaults['fiber_grams_per_kg'] if should_update_nutrition else None,
         cost_per_kg=resolved_defaults['cost_per_kg'] if should_update_nutrition else None,
+        allowed_mixers=policy_payload['allowed_mixers'] if ('allowed_mixers' in data or 'name' in data or 'category' in data) else None,
+        mixer_role=policy_payload['mixer_role'] if ('role' in data or 'allowed_mixers' in data or 'name' in data or 'category' in data) else None,
+        inclusion_percentage_dairy_meal=policy_payload['inclusion_percentage_dairy_meal'] if ('inclusion_percentage_dairy_meal' in data or 'inclusionPercentageDairyMeal' in data) else None,
+        inclusion_percentage_main_meal=policy_payload['inclusion_percentage_main_meal'] if ('inclusion_percentage_main_meal' in data or 'inclusionPercentageMainMeal' in data) else None,
     )
     if not item:
         return jsonify({'error': 'Inventory item not found.'}), 404
-    return jsonify(_serialize_item(item)), 200
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 200
 
 
 @inventory_bp.route('/api/inventory/items/<int:item_id>', methods=['DELETE'])
@@ -321,13 +465,13 @@ def update_inventory_item(item_id):
 @require_tenant_context
 @role_required(Role.FARMER)
 def delete_inventory_item(item_id):
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     item = InventoryRepository.delete_item(item_id=item_id, tenant_id=tenant_id)
     if not item:
         return jsonify({'error': 'Inventory item not found.'}), 404
-    return jsonify({'message': 'Inventory item deleted successfully.', 'deleted': _serialize_item(item)}), 200
+    return jsonify({'message': 'Inventory item deleted successfully.', 'deleted': _serialize_item(item, mix_share_defaults_by_mixer={})}), 200
 
 
 @inventory_bp.route('/api/inventory/movements', methods=['GET'])
@@ -335,7 +479,7 @@ def delete_inventory_item(item_id):
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND)
 def list_inventory_movements():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     movements = InventoryRepository.list_transactions_by_tenant(tenant_id)
@@ -355,33 +499,86 @@ def list_inventory_movements():
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND)
 def create_inventory_movement():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     data = request.get_json() or {}
     item_id = data.get('item_id')
-    # Prefer canonical transaction_type if both are sent.
-    transaction_type_raw = data.get('transaction_type')
-    if transaction_type_raw is None:
-        transaction_type_raw = data.get('movement_type')
-    movement_type = _normalize_transaction_type(transaction_type_raw)
+    transaction_type_raw = data.get('transaction_type') or data.get('movement_type')
     quantity = data.get('quantity')
-    if not item_id or not movement_type or quantity is None:
+
+    try:
+        movement_type, reason_code = _parse_movement_payload(transaction_type_raw)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if not item_id or quantity is None:
         return jsonify({'error': 'item_id, transaction_type (or movement_type), and quantity are required.'}), 400
+
     try:
         item, movement, is_low_stock = InventoryRepository.record_transaction(
             item_id=item_id,
             transaction_type=movement_type,
             quantity=quantity,
+            reason_code=reason_code,
             unit_cost=data.get('unit_cost'),
             inventory_batch_id=data.get('inventory_batch_id'),
             logged_by=int(get_jwt_identity()),
-            reference_note=data.get('reference_note'),
+            notes=data.get('notes'),
             tenant_id=tenant_id,
         )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
-    return jsonify({'movement': _serialize_movement(movement), 'updatedItem': _serialize_item(item), 'lowStock': is_low_stock}), 201
+
+    # IDEAL LOCATION: This financial link should be inside the repository transaction
+    # to ensure atomicity. It is here to demonstrate the complete concept.
+    if reason_code == 'SHRINKAGE':
+        _link_inventory_loss_to_finance(movement, item)
+
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    return jsonify({'movement': _serialize_movement(movement), 'updatedItem': _serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer), 'lowStock': is_low_stock}), 201
+
+
+@inventory_bp.route('/api/inventory/items/<int:item_id>/audit', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER)
+def process_stock_audit(item_id):
+    tenant_id = get_tenant_id_from_context()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant context."}), 400
+
+    data = request.get_json() or {}
+    physical_count_raw = data.get('physical_count')
+    if physical_count_raw is None:
+        return jsonify({'error': 'physical_count is required.'}), 400
+
+    try:
+        physical_count = float(physical_count_raw)
+        if physical_count < 0:
+            raise ValueError()
+    except (TypeError, ValueError):
+        return jsonify({'error': 'physical_count must be a non-negative number.'}), 400
+
+    item = InventoryRepository.get_item(item_id, tenant_id)
+    if not item:
+        return jsonify({'error': 'Inventory item not found.'}), 404
+
+    system_count = float(item.current_qty)
+    discrepancy = physical_count - system_count
+
+    if abs(discrepancy) < 0.01:
+        return jsonify({"status": "matched", "adjustment": 0, "message": "Physical count matches system count."}), 200
+
+    tx_type, reason, qty_to_record, notes = ('IN', 'AUDIT_GAIN', discrepancy, "Physical stock reconciliation - gain detected.") if discrepancy > 0 else ('OUT', 'AUDIT_LOSS', abs(discrepancy), "Physical stock reconciliation - loss detected.")
+
+    try:
+        item, movement, _ = InventoryRepository.record_transaction(item_id=item.id, transaction_type=tx_type, quantity=qty_to_record, reason_code=reason, notes=notes, logged_by=int(get_jwt_identity()), tenant_id=tenant_id)
+        if reason == 'AUDIT_LOSS':
+            _link_inventory_loss_to_finance(movement, item)
+        return jsonify({"status": "reconciled", "adjustment": discrepancy, "new_balance": float(item.current_qty), "movement": _serialize_movement(movement)}), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
 
 
 @inventory_bp.route('/api/v1/nutrition/ingredient-standards', methods=['GET'])
@@ -389,7 +586,7 @@ def create_inventory_movement():
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def list_ingredient_standards():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     payload = InventoryStandardsService.list_standards(tenant_id=tenant_id)
     return jsonify(payload), 200
 
@@ -399,7 +596,7 @@ def list_ingredient_standards():
 @require_tenant_context
 @role_required(Role.FARMER, Role.SUPER_ADMIN)
 def upsert_ingredient_standard():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     data = request.get_json() or {}
     canonical_name = (data.get('canonical_name') or data.get('name') or '').strip()
     if not canonical_name:
@@ -425,7 +622,7 @@ def upsert_ingredient_standard():
 @require_tenant_context
 @role_required(Role.FARMER, Role.SUPER_ADMIN)
 def backfill_ingredient_standards_to_inventory():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
 
@@ -453,14 +650,15 @@ def backfill_ingredient_standards_to_inventory():
 @require_tenant_context
 @role_required(Role.FARMER, Role.FARM_HAND)
 def inventory_stock_snapshot():
-    tenant_id = _get_tenant_id_from_context()
+    tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
     items = InventoryRepository.list_stock_snapshot(tenant_id)
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
     flag = (request.args.get('flag') or '').strip().lower()
     rows = [
         {
-            **_serialize_item(item),
+            **_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer),
             'lowStock': float(item.current_qty) <= float(item.minimum_threshold),
             'critical': float(item.current_qty) <= float(item.minimum_threshold) * 0.5,
         }

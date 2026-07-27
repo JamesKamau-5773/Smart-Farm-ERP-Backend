@@ -44,19 +44,33 @@ class Cow(db.Model):
     )
 
     # Relationships
-    lactation_cycles = db.relationship('LactationCycle', backref=db.backref('livestock', lazy=True), lazy=True)
-    medical_records = db.relationship('MedicalRecord', backref=db.backref('livestock', lazy=True), lazy=True)
-    breeding_logs = db.relationship('BreedingLog', backref=db.backref('livestock', lazy=True), lazy=True)
-    vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True)
+    lactation_cycles = db.relationship('LactationCycle', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
+    medical_records = db.relationship('MedicalRecord', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
+    breeding_logs = db.relationship('BreedingLog', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
+    vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
     timeline_events = db.relationship(
         'AnimalTimelineEvent',
         backref=db.backref('animal', lazy=True),
         lazy=True,
         cascade='all, delete-orphan',
     )
+    yield_targets = db.relationship('AnimalYieldTarget', back_populates='cow', cascade='all, delete-orphan', lazy=True)
+
+    genetic_profile = db.relationship(
+        'GeneticProfile',
+        back_populates='cow',
+        uselist=False,
+        cascade='all, delete-orphan'
+    )
 
     __table_args__ = (
-        db.UniqueConstraint('tenant_id', 'tag_number', name='uq_cows_tenant_tag_number'),
+        # This partial unique index ensures that for any given tenant,
+        # the tag_number is unique ONLY for active cows. This allows
+        # tag numbers to be reused once a cow is soft-deleted (is_active=False).
+        db.Index(
+            'uq_cows_tenant_active_tag_number',
+            'tenant_id', 'tag_number', unique=True, postgresql_where=db.text('is_active IS TRUE')
+        ),
     )
 
 
@@ -97,7 +111,7 @@ class AnimalYieldTarget(db.Model):
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    cow = db.relationship('Cow', backref=db.backref('yield_targets', lazy=True))
+    cow = db.relationship('Cow', back_populates='yield_targets')
 
     __table_args__ = (
         db.CheckConstraint('times_to_feed_daily IN (2, 3, 4)', name='ck_animal_yield_targets_times_to_feed_daily_valid'),
