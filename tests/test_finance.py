@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 
 from tests.base import BaseTestCase
 from app.models.user import Role
-from app.models.finance import Buyer, SalesLedger, Transaction, TransactionType, TransactionCategory, PaymentStatus
+from app.models.finance import Buyer, Customer, SalesLedger, Transaction, TransactionType, TransactionCategory, PaymentStatus
 from app.models.supply import MilkLog
 from app.models.livestock import Cow
 from app.models.supply import MilkSession
@@ -442,3 +442,66 @@ class FinanceTestCase(BaseTestCase):
         # Verify it's gone
         deleted_customer = Customer.query.get(customer_id)
         self.assertIsNone(deleted_customer)
+
+    def test_update_customer_patch_succeeds(self):
+        self._login('farmer', 'password')
+
+        customer = Customer(
+            tenant_id=self.tenant.id,
+            name='Original Name',
+            phone_number='254700000001',
+            account_balance=100,
+            daily_contract_liters=5,
+            is_active=True,
+        )
+        db.session.add(customer)
+        db.session.commit()
+
+        with self.client:
+            response = self.client.patch(
+                f'/api/finance/customers/{customer.id}',
+                data=json.dumps({
+                    'name': 'Updated Name',
+                    'phone_number': '254700000009',
+                    'daily_contract_liters': 12.5,
+                    'is_active': False,
+                    'contact_person': '',
+                    'email': '',
+                    'address': '',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['name'], 'Updated Name')
+        self.assertEqual(payload['phone_number'], '254700000009')
+        self.assertEqual(payload['daily_contract_liters'], 12.5)
+        self.assertEqual(payload['is_active'], False)
+
+    def test_update_customer_patch_duplicate_phone_returns_409(self):
+        self._login('farmer', 'password')
+
+        c1 = Customer(
+            tenant_id=self.tenant.id,
+            name='Customer One',
+            phone_number='254700000011',
+        )
+        c2 = Customer(
+            tenant_id=self.tenant.id,
+            name='Customer Two',
+            phone_number='254700000022',
+        )
+        db.session.add_all([c1, c2])
+        db.session.commit()
+
+        with self.client:
+            response = self.client.patch(
+                f'/api/finance/customers/{c2.id}',
+                data=json.dumps({
+                    'phone_number': '254700000011',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 409)

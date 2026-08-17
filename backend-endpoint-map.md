@@ -69,6 +69,7 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/herd/<cow_id>`
 - `PATCH /api/herd/<cow_id>`
 - `DELETE /api/herd/<cow_id>`
+- `GET /api/herd/genetic-progress`
 - `GET /api/animals/<cow_id>`
 - `PATCH /api/animals/<cow_id>`
 - `GET /api/animals/<cow_id>/milk-history`

@@ -473,6 +473,7 @@ FeedRequisition = InventoryTransaction
 class MilkSession:
     MORNING = "Morning"
     EVENING = "Evening"
+    MIDDAY = "Midday"
 
 class MilkLog(db.Model):
     """Tracks daily yield and flags anomalies or hardlocked milk."""

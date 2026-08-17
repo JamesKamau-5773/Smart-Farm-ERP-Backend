@@ -111,6 +111,16 @@ class BreedingLogRepository:
         )
 
     @staticmethod
+    def get_most_recent_for_cow(cow_id: int, tenant_id: int) -> BreedingLog:
+        """Fetch the most recent breeding log of any status for a given cow."""
+        return (
+            BreedingLog.query
+            .filter_by(cow_id=cow_id, tenant_id=tenant_id)
+            .order_by(BreedingLog.insemination_date.desc(), BreedingLog.id.desc())
+            .first()
+        )
+
+    @staticmethod
     def save() -> None:
         try:
             db.session.commit()

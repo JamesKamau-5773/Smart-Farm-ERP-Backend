@@ -5,6 +5,7 @@ from flask import jsonify
 
 from app.repositories.cow_repo import CowRepository
 from app.repositories.vet_visit_repo import VetVisitRepository
+from app.services.animal_timeline_service import AnimalTimelineService
 
 
 class VetVisitService:
@@ -94,6 +95,23 @@ class VetVisitService:
             follow_up_required=follow_up_required,
             follow_up_date=follow_up_date,
             follow_up_status=follow_up_status,
+        )
+
+        # Mirror onto the animal passport timeline so it shows up there too.
+        AnimalTimelineService.record_event(
+            tenant_id=tenant_id,
+            cow_id=animal_id,
+            event_type='medical',
+            title=reason_for_visit,
+            description=visit.diagnosis or visit.remarks,
+            event_date=visit.visit_date,
+            event_data={
+                'vet_visit_id': visit.id,
+                'medications': visit.medications,
+                'follow_up_required': visit.follow_up_required,
+                'follow_up_date': visit.follow_up_date.isoformat() if visit.follow_up_date else None,
+            },
+            created_by=vet_id,
         )
 
         return jsonify({'message': 'Vet visit recorded successfully.', 'visit': VetVisitService._serialize_visit(visit)}), 201

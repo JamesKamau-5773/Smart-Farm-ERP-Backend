@@ -1,4 +1,5 @@
 from __future__ import annotations
+import math
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
@@ -6,7 +7,7 @@ from app.models.user import Role
 from app.services.nutrition_service import NutritionService
 from app.services.animal_yield_target_service import AnimalYieldTargetService
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
-from app.services.recipe_formulation_service import RecipeFormulationService
+from app.services.recipe_formulation_service import RecipeFormulationService, FormulationInfeasibleError
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
 from app.models.supply import FeedRecipe, RecipeIngredient, Ingredient, FarmMeasurementUnit, InventoryItem
@@ -742,16 +743,19 @@ def formulate_recipe_with_protein_target():
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
     data = request.get_json() or {}
-    batch_size_kg = data.get('batch_size_kg')
-    target_protein_percent = data.get('target_protein_percent')
+    try:
+        batch_size_kg = float(data.get('batch_size_kg'))
+        target_protein_percent = float(data.get('target_protein_percent'))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'batch_size_kg and target_protein_percent must be valid numbers.'}), 400
     ingredients = _normalize_recipe_ingredients(data.get('ingredients', []))
     recipe_type_raw = data.get('recipe_type')
     yield_target_id = data.get('yield_target_id')
 
     # Validation
-    if batch_size_kg is None or batch_size_kg <= 0:
+    if not math.isfinite(batch_size_kg) or batch_size_kg <= 0:
         return jsonify({'error': 'batch_size_kg is required and must be > 0.'}), 400
-    if target_protein_percent is None or target_protein_percent < 0 or target_protein_percent > 100:
+    if not math.isfinite(target_protein_percent) or target_protein_percent < 0 or target_protein_percent > 100:
         return jsonify({'error': 'target_protein_percent is required (0-100).'}), 400
     if not ingredients or len(ingredients) == 0:
         return jsonify({'error': 'At least one ingredient is required.'}), 400
@@ -759,6 +763,14 @@ def formulate_recipe_with_protein_target():
         return jsonify({'error': 'Each ingredient requires ingredient_id (or ingredientId) as a number.'}), 400
     if any(ing.get('percentage') in (None, '') for ing in ingredients):
         return jsonify({'error': 'Each ingredient requires percentage as a number.'}), 400
+    percentages = [ing['percentage'] for ing in ingredients]
+    if any(not math.isfinite(percentage) or percentage < 0 or percentage > 100 for percentage in percentages):
+        return jsonify({'error': 'Each ingredient percentage must be a finite number between 0 and 100.'}), 400
+    total_percentage = sum(percentages)
+    if total_percentage > 0 and not math.isclose(total_percentage, 100.0, abs_tol=0.01):
+        return jsonify({'error': 'Ingredient percentages must total 100 (or all be zero for automatic seeding).'}), 400
+    if len({ing['ingredient_id'] for ing in ingredients}) != len(ingredients):
+        return jsonify({'error': 'Each ingredient may only appear once in a formulation.'}), 400
 
     try:
         recipe_type = _parse_recipe_type(recipe_type_raw, default=None)
@@ -775,12 +787,34 @@ def formulate_recipe_with_protein_target():
     try:
         adjustments = RecipeFormulationService.suggest_ingredient_adjustments(
             tenant_id=tenant_id,
-            batch_size_kg=float(batch_size_kg),
+            batch_size_kg=batch_size_kg,
             base_ingredients=ingredients,
-            target_protein_percent=float(target_protein_percent),
+            target_protein_percent=target_protein_percent,
             recipe_type=recipe_type,
         )
         return jsonify(adjustments), 200
+    except FormulationInfeasibleError as e:
+        payload = {'error': str(e)}
+        if e.target_protein_percent is not None:
+            payload['target_protein_percent'] = round(float(e.target_protein_percent), 4)
+        if e.minimum_achievable_protein_percent is not None:
+            payload['minimum_achievable_protein_percent'] = round(float(e.minimum_achievable_protein_percent), 4)
+        if e.maximum_achievable_protein_percent is not None:
+            payload['maximum_achievable_protein_percent'] = round(float(e.maximum_achievable_protein_percent), 4)
+        if (
+            e.minimum_achievable_protein_percent is not None
+            and e.maximum_achievable_protein_percent is not None
+        ):
+            minimum = round(float(e.minimum_achievable_protein_percent), 4)
+            maximum = round(float(e.maximum_achievable_protein_percent), 4)
+            payload['achievable_protein_range'] = {
+                'minimum_percent': minimum,
+                'maximum_percent': maximum,
+            }
+            payload['hint'] = (
+                f"With selected feeds, achievable protein target range is {minimum:g}% to {maximum:g}%."
+            )
+        return jsonify(payload), 422
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     except Exception as e:

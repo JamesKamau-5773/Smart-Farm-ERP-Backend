@@ -67,18 +67,25 @@ def create_app(config_class=Config):
     app.before_request(set_tenant_context)
 
 
-    # Register Blueprints here (Auth, Livestock, etc.)
-    from app.models import user
-    from app.models import livestock
-    from app.models import supply
-    from app.models import finance
-    from app.models import audit
-    from app.models import tenant
-    from app.models import farm
-    from app.models import hr
-    from app.models import genetics
+    # --- Model Imports for Alembic Autodiscovery ---
+    # These imports are necessary for Flask-Migrate to detect all model
+    # classes and generate correct migration scripts. By importing the modules
+    # here, we ensure all model classes are registered with SQLAlchemy's metadata.
+    # We import model classes directly from their modules to avoid circular dependencies.
+    from app.models.user import User
+    from app.models.finance import Buyer, Customer, Delivery, SalesLedger, Transaction
+    from app.models.supply import MilkLog # Inferred from finance API
+    # The following modules are also imported for model discovery by Alembic.
+    # The Cow model is imported from livestock.py as per the diagnosis.
+    from app.models.livestock import Cow
+    from app.models.audit import AuditLog
+    from app.models.tenant import Tenant
+    from app.models.farm import Farm
+    from app.models.hr import Employee, Payroll
+    # Correcting Genetics to GeneticProfile based on the relationship in the Cow model
+    from app.models.genetics import GeneticProfile
 
-
+    # --- Blueprint Registration ---
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
     from app.api.operations import operations_bp, operations_alias_bp
@@ -97,6 +104,7 @@ def create_app(config_class=Config):
     from app.api.clinical import medical_alias_bp, safety_bp, veterinary_bp
     from app.api.herd import herd_bp
     from app.api.genetics import genetics_bp
+    from app.api.reports import reports_bp
     from app.api import api_bp
     
     # Register Global Error Handlers
@@ -134,6 +142,7 @@ def create_app(config_class=Config):
     app.register_blueprint(safety_bp)
     app.register_blueprint(veterinary_bp)
     app.register_blueprint(genetics_bp, url_prefix='/api/v1/genetics')
+    app.register_blueprint(reports_bp)
     app.register_blueprint(api_bp, url_prefix='/api')
 
     @app.route('/health', methods=['GET'])

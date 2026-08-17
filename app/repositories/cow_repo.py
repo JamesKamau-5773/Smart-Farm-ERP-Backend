@@ -40,6 +40,12 @@ class CowRepository:
         query = Cow.query.filter_by(tag_number=tag_number)
         if resolved_tenant_id is not None:
             query = query.filter_by(tenant_id=resolved_tenant_id)
+        # Tag numbers should be unique per tenant, but archived duplicates can
+        # linger (e.g. after a retag). Prefer the active animal when a tag
+        # resolves to more than one row instead of an arbitrary DB order.
+        active_match = query.filter_by(is_active=True).first()
+        if active_match:
+            return active_match
         return query.first()
 
     @staticmethod

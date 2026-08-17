@@ -10,6 +10,8 @@ from app.repositories.breeding_repo import (
 )
 from app.repositories.cow_repo import CowRepository
 from app import db
+from app.models.livestock import CowStatus
+from app.services.animal_timeline_service import AnimalTimelineService
 from app.services.reproduction_service import ReproductionService
 
 
@@ -188,6 +190,22 @@ class BreedingService:
             status="Pending",
         )
 
+        sire_label = semen.bull_name if semen else (resolved_external_sire_code or "Unknown sire")
+        AnimalTimelineService.record_event(
+            tenant_id=tenant_id,
+            cow_id=livestock.id,
+            event_type='breeding',
+            title=f'Inseminated with {sire_label}',
+            description=f'Status: {log.status} | Expected calving: {milestones["expected_calving_date"].isoformat()}',
+            event_date=insemination_date,
+            event_data={
+                'breeding_log_id': log.id,
+                'provided_by': log.provided_by,
+                'expected_calving_date': milestones['expected_calving_date'].isoformat(),
+                'status': log.status,
+            },
+        )
+
         return jsonify(
             {
                 "message": "Insemination logged successfully.",
@@ -215,7 +233,27 @@ class BreedingService:
         log.status = status
         BreedingLogRepository.save()
 
+        livestock = CowRepository.get_by_livestock_id(log.cow_id, tenant_id=tenant_id)
+        if livestock:
+            BreedingService._sync_cow_status_with_outcome(livestock, status)
+
+        AnimalTimelineService.record_event(
+            tenant_id=tenant_id,
+            cow_id=log.cow_id,
+            event_type='breeding_status_update',
+            title=f'Breeding status changed to {status}',
+            event_data={'breeding_log_id': log.id, 'status': status},
+        )
+
         return jsonify({"message": "Breeding status updated.", "id": log.id, "status": log.status}), 200
+
+    @staticmethod
+    def _sync_cow_status_with_outcome(livestock, status: str) -> None:
+        """Keeps the herd register's current_status in step with breeding outcomes."""
+        if status == "Pregnant":
+            livestock.current_status = "Pregnant"
+        elif status == "Failed" and livestock.current_status == "Pregnant":
+            livestock.current_status = CowStatus.LACTATING
 
     @staticmethod
     def update_insemination_outcome(tenant_id: int, log_id: int, data: dict):
@@ -233,10 +271,17 @@ class BreedingService:
         if not livestock:
             return jsonify({"error": "Livestock not found in registry."}), 404
 
-        if status == "Pregnant":
-            livestock.current_status = "Pregnant"
+        BreedingService._sync_cow_status_with_outcome(livestock, status)
 
         db.session.commit()
+
+        AnimalTimelineService.record_event(
+            tenant_id=tenant_id,
+            cow_id=log.cow_id,
+            event_type='breeding_status_update',
+            title=f'Breeding status changed to {status}',
+            event_data={'breeding_log_id': log.id, 'status': status},
+        )
 
         return jsonify({"message": f"Insemination marked as {status}"}), 200
 

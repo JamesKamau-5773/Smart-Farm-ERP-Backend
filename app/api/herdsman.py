@@ -105,23 +105,56 @@ def save_routine_plan():
     tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
-    data = request.get_json() or {}
-    task_title = (data.get('task_title') or '').strip()
-    task_description = (data.get('task_description') or '').strip()
-    if not task_title or not task_description:
-        return jsonify({'error': 'task_title and task_description are required.'}), 400
+
+    tasks_data = request.get_json()
+    if not isinstance(tasks_data, list):
+        return jsonify({'error': 'Request body must be a JSON array of routine tasks.'}), 400
+
     from datetime import time
-    routine = HerdsmanRoutineTemplate(
-        tenant_id=tenant_id,
-        start_time=time.fromisoformat(data.get('start_time') or '06:00:00'),
-        end_time=time.fromisoformat(data.get('end_time') or '07:00:00'),
-        task_title=task_title,
-        task_description=task_description,
-        notes=data.get('notes'),
-        checklist_items=data.get('checklist_items'),
-        display_order=int(data.get('display_order', 0)),
-        is_active=bool(data.get('is_active', True)),
-    )
-    db.session.add(routine)
-    db.session.commit()
-    return jsonify({'id': routine.id, 'task_title': routine.task_title}), 201
+    new_routines = []
+
+    try:
+        # Atomically replace the old routine plan for this tenant
+        HerdsmanRoutineTemplate.query.filter_by(tenant_id=tenant_id).delete()
+
+        for index, task_data in enumerate(tasks_data):
+            if not isinstance(task_data, dict):
+                raise ValueError(f"Invalid item at index {index}: must be an object.")
+
+            # As you noted, the payload uses 'title', so we'll check for both.
+            task_title = (task_data.get('task_title') or task_data.get('title') or '').strip()
+            task_description = (task_data.get('task_description') or task_data.get('description') or task_title).strip()
+
+            if not task_title:
+                raise ValueError(f"Missing 'title' for task at index {index}.")
+
+            # The frontend should send 'start_time' and 'end_time' in 'HH:MM:SS' format.
+            start_time_str = task_data.get('start_time')
+            end_time_str = task_data.get('end_time')
+
+            if not start_time_str or not end_time_str:
+                 raise ValueError(f"Missing 'start_time' or 'end_time' for task '{task_title}'. Expected 'HH:MM:SS' format.")
+
+            routine = HerdsmanRoutineTemplate(
+                tenant_id=tenant_id,
+                start_time=time.fromisoformat(start_time_str),
+                end_time=time.fromisoformat(end_time_str),
+                task_title=task_title,
+                task_description=task_description,
+                notes=task_data.get('notes'),
+                checklist_items=task_data.get('checklist_items') or [],
+                display_order=task_data.get('display_order', index),
+                is_active=bool(task_data.get('is_active', True)),
+            )
+            db.session.add(routine)
+
+        db.session.commit()
+        return jsonify({'message': f'Successfully saved {len(tasks_data)} routine tasks.'}), 201
+
+    except (ValueError, TypeError) as e:
+        db.session.rollback()
+        return jsonify({'error': f'Invalid data format: {str(e)}'}), 400
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Failed to save routine plan: {str(e)}")
+        return jsonify({'error': 'An internal error occurred while saving the routine plan.'}), 500

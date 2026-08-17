@@ -1,5 +1,6 @@
 from app.repositories.medical_repo import MedicalRepository
 from app.repositories.cow_repo import CowRepository
+from app.services.animal_timeline_service import AnimalTimelineService
 from flask import jsonify
 
 class MedicalService:
@@ -24,7 +25,23 @@ class MedicalService:
 
         # 3. Save Record
         record = MedicalRepository.create_record(tenant_id, livestock_id, vet_id, diagnosis, medication, withdrawal_days, remarks)
-        
+
+        # 3b. Mirror onto the animal passport timeline so it shows up there too.
+        AnimalTimelineService.record_event(
+            tenant_id=tenant_id,
+            cow_id=livestock_id,
+            event_type='medical',
+            title=diagnosis,
+            description=remarks,
+            event_date=record.visit_date,
+            event_data={
+                'medical_record_id': record.id,
+                'medication': medication,
+                'withdrawal_days_recommended': withdrawal_days,
+            },
+            created_by=vet_id,
+        )
+
         # 4. Generate Alert Payload
         response = {
             "message": "Clinical record saved successfully.",

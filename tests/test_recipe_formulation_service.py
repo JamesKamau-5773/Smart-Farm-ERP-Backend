@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from decimal import Decimal
 from tests.base import BaseTestCase
-from app.services.recipe_formulation_service import RecipeFormulationService
+from app.services.recipe_formulation_service import RecipeFormulationService, FormulationInfeasibleError
 from app.models.supply import InventoryItem, FeedRecipe, RecipeIngredient
 from app import db
 
@@ -170,24 +170,19 @@ class TestRecipeFormulationService(BaseTestCase):
         # Verify projected nutrition is close to target
         assert abs(result["projected_nutrition"]["average_protein_percent"] - 16.5) < 1.0
 
-    def test_suggest_ingredient_adjustments_decrease_protein(self):
-        """Test suggestions when need to decrease protein."""
+    def test_suggest_ingredient_adjustments_rejects_unreachable_target(self):
+        """A target outside the selected ingredients' range must not yield a mix."""
         base_ingredients = [
             {"ingredient_id": self.sunflower_cake.id, "percentage": 100},  # 20% protein
         ]
         
-        result = RecipeFormulationService.suggest_ingredient_adjustments(
-            tenant_id=self.tenant_id,
-            batch_size_kg=500,
-            base_ingredients=base_ingredients,
-            target_protein_percent=12.0,
-        )
-        
-        assert result["current_protein_percent"] == 20.0
-        assert result["adjustment_needed"] < 0
-        
-        # Projected should be lower than current
-        assert result["projected_nutrition"]["average_protein_percent"] < result["current_protein_percent"]
+        with pytest.raises(FormulationInfeasibleError, match="Cannot reach 12% protein"):
+            RecipeFormulationService.suggest_ingredient_adjustments(
+                tenant_id=self.tenant_id,
+                batch_size_kg=500,
+                base_ingredients=base_ingredients,
+                target_protein_percent=12.0,
+            )
 
     def test_save_recipe_from_formulation_success(self):
         """Test saving formulated recipe to database."""

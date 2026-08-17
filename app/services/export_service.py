@@ -8,6 +8,7 @@ from app import db
 from app.models.livestock import BreedingLog, Cow, MedicalRecord, SemenInventory
 from app.models.supply import MilkLog
 from app.repositories.cow_repo import CowRepository
+from app.services.cow_status_service import CowStatusService
 
 
 class AnimalPassportService:
@@ -121,6 +122,7 @@ class AnimalPassportService:
             'current_status': animal.current_status,
             'is_active': animal.is_active,
             'is_hardlocked': animal.is_hardlocked,
+            **CowStatusService.compute_status_fields(animal, tenant_id),
         }
 
         return {

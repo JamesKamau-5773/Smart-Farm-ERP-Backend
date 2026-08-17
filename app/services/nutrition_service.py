@@ -237,7 +237,19 @@ class NutritionService:
                     except (TypeError, InvalidOperation):
                         raise ValueError('percentage must be a valid number when provided.')
 
-                locked_protein = Decimal(str(ingredient.protein_grams_per_kg or 0))
+                # Legacy Ingredient rows do not carry nutrition fields. When a
+                # batch was submitted using one of those IDs, retain the
+                # matching inventory baseline if it exists; otherwise record a
+                # truthful zero rather than failing the entire batch.
+                protein_source = inventory_item
+                if protein_source is None:
+                    protein_source = InventoryItem.query.filter_by(
+                        tenant_id=tenant_id,
+                        name=ingredient.name,
+                    ).first()
+                locked_protein = Decimal(str(
+                    protein_source.protein_grams_per_kg if protein_source is not None else 0
+                ))
 
                 batch_ingredient = BatchIngredient(
                     tenant_id=tenant_id,

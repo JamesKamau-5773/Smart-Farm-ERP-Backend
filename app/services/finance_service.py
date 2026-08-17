@@ -1,97 +1,54 @@
-from app import db
-from app.models.finance import Transaction, TransactionType, TransactionCategory
-from app.models.supply import MilkLog
-from datetime import datetime, timedelta, timezone
+from __future__ import annotations
+from datetime import datetime, timezone
+from decimal import Decimal
 from sqlalchemy import func
-from flask import jsonify, g
-from app.utils.jwt_payload import parse_public_int_id
-from .audit_service import record_audit
+
+from app import db
+from app.models.finance import Transaction, TransactionType
+
 
 class FinanceService:
+    """
+    A service layer for handling core financial calculations and operations.
+    This acts as a single source of truth for financial logic.
+    """
+
     @staticmethod
-    def calculate_daily_unit_cost(target_date: datetime.date = None, tenant_id: int = None):
+    def get_daily_financial_summary(tenant_id: int, for_date=None) -> dict:
         """
-        Calculates the real cost of production per liter for a specific day.
+        Calculates the financial summary for a given day.
+
+        This is the authoritative source for dashboard financial metrics.
         """
-        if target_date is None:
-            target_date = datetime.now(timezone.utc).date()
+        if for_date is None:
+            for_date = datetime.now(timezone.utc).date()
 
-        if tenant_id is None:
-            tenant_public_id = getattr(g, 'tenant_id', None)
-            if tenant_public_id:
-                try:
-                    tenant_id = parse_public_int_id(tenant_public_id, 'tenant_')
-                except (TypeError, ValueError):
-                    tenant_id = None
-            
-        start_of_day = datetime.combine(target_date, datetime.min.time())
-        end_of_day = start_of_day + timedelta(days=1)
+        start_of_day = datetime.combine(for_date, datetime.min.time(), tzinfo=timezone.utc)
+        end_of_day = datetime.combine(for_date, datetime.max.time(), tzinfo=timezone.utc)
 
-        # 1. Calculate Total Saleable Volume (The Denominator)
-        saleable_query = db.session.query(func.sum(MilkLog.amount_liters)).filter(
-            MilkLog.timestamp >= start_of_day,
-            MilkLog.timestamp < end_of_day,
-            MilkLog.is_saleable == True
-        )
-        if tenant_id is not None:
-            saleable_query = saleable_query.filter(MilkLog.tenant_id == tenant_id)
-
-        saleable_volume = saleable_query.scalar() or 0.0
-
-        if float(saleable_volume) == 0.0:
-            return jsonify({
-                "date": str(target_date),
-                "error": "No saleable milk recorded for this date. Cannot calculate unit cost."
-            }), 400
-
-        # 2. Calculate Total Daily Expenses (The Numerator)
-        daily_expenses = db.session.query(func.sum(Transaction.amount)).filter(
-            Transaction.timestamp >= start_of_day,
-            Transaction.timestamp < end_of_day,
-            Transaction.transaction_type == TransactionType.EXPENSE,
+        # Base query for the specified day's transactions
+        base_query = db.session.query(
+            func.sum(Transaction.amount)
+        ).filter(
             Transaction.tenant_id == tenant_id,
-        ).scalar() or 0.0
+            Transaction.timestamp >= start_of_day,
+            Transaction.timestamp <= end_of_day
+        )
 
-        # 3. Calculate Unit Cost
-        unit_cost = float(daily_expenses) / float(saleable_volume)
+        # FIX: Use the TransactionType.REVENUE enum member instead of a hardcoded string.
+        revenue_total = base_query.filter(
+            Transaction.transaction_type == TransactionType.REVENUE
+        ).scalar() or Decimal('0.0')
 
-        return jsonify({
-            "date": str(target_date),
-            "total_expenses_kes": float(daily_expenses),
-            "total_saleable_liters": float(saleable_volume),
-            "unit_cost_per_liter_kes": round(unit_cost, 2)
-        }), 200
+        # FIX: Use the TransactionType.EXPENSE enum member for costs.
+        feed_cost_total = base_query.filter(
+            Transaction.transaction_type == TransactionType.EXPENSE
+        ).scalar() or Decimal('0.0')
 
-    @staticmethod
-    def record_transaction(t_type: TransactionType, category: TransactionCategory, amount: float, user_id: int, ip_address: str, customer_id: int = None, ref_code: str = None, desc: str = None):
-        """Standardized method for recording ledger entries with audit logging."""
-        try:
-            tx = Transaction(
-                tenant_id=getattr(g, 'tenant_id', None),
-                transaction_type=t_type,
-                category=category,
-                amount=amount,
-                recorded_by=user_id,
-                customer_id=customer_id,
-                reference_code=ref_code,
-                description=desc
-            )
-            db.session.add(tx)
-            db.session.flush()  # Flush to get the transaction ID
+        net_margin = revenue_total - feed_cost_total
 
-            record_audit(
-                user_id=user_id,
-                action='RECORD_TRANSACTION',
-                entity_type='Transaction',
-                entity_id=tx.id,
-                old_value=None,
-                new_value=f"Type: {t_type.value}, Category: {category.value}, Amount: {amount}",
-                ip_address=ip_address
-            )
-
-            db.session.commit()
-            return tx
-        except Exception as e:
-            db.session.rollback()
-            print(f"Error in record_transaction: {e}")
-            return None
+        return {
+            'revenue_total_kes': revenue_total,
+            'feed_cost_total_kes': feed_cost_total,
+            'net_margin_kes': net_margin,
+        }

@@ -149,6 +149,16 @@
           <div class="value">{{ 'Yes' if animal.is_hardlocked else 'No' }}</div>
         </div>
       </div>
+      <div class="meta-row">
+        <div class="meta-cell">
+          <div class="label">Pregnancy Status</div>
+          <div class="value">{{ animal.pregnancy_status }}</div>
+        </div>
+        <div class="meta-cell">
+          <div class="label">Days in Milk</div>
+          <div class="value">{{ animal.days_in_milk if animal.days_in_milk is not none else 'N/A' }}</div>
+        </div>
+      </div>
     </div>
   </div>
 

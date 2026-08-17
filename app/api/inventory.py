@@ -1,9 +1,10 @@
 from flask import Blueprint, jsonify, g, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
-from sqlalchemy import desc
+from typing import Optional, Tuple
+from sqlalchemy import desc, or_
 
 from app.models.user import Role
-from app.models.supply import FeedRecipe, RecipeIngredient
+from app.models.supply import FeedRecipe, RecipeIngredient, InventoryItem
 from app.repositories.supply_repo import InventoryRepository
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
 from app.services.inventory_standards_service import InventoryStandardsService
@@ -13,13 +14,13 @@ from app.utils import get_tenant_id_from_context
 inventory_bp = Blueprint('inventory', __name__)
 
 
-def _parse_movement_payload(raw_type: str | None) -> tuple[str, str]:
+def _parse_movement_payload(raw_type: Optional[str]) -> Tuple[str, str]:
     """
     Normalizes movement type from frontend-friendly terms and determines the
     correct reason code for the transaction.
     
     Returns:
-        A tuple of (transaction_type, reason_code).
+        A Tuple of (transaction_type, reason_code).
     """
     raw = (raw_type or '').strip().upper()
 
@@ -288,32 +289,80 @@ def list_inventory_items():
     tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
-    items = InventoryRepository.list_by_tenant(tenant_id)
+
+    query = InventoryItem.query.filter_by(tenant_id=tenant_id)
+
     mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
     requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
         request.args.get('recipe_type'),
         default=None,
     )
+
     q = (request.args.get('q') or '').strip().lower()
-    category = (request.args.get('category') or '').strip().lower()
     if q:
-        items = [item for item in items if q in (item.name or '').lower() or q in (getattr(item, 'sku', '') or '').lower()]
+        search_term = f"%{q}%"
+        query = query.filter(or_(
+            InventoryItem.name.ilike(search_term),
+            InventoryItem.sku.ilike(search_term)
+        ))
+
+    category = (request.args.get('category') or '').strip().lower()
     if category:
-        items = [item for item in items if category == (item.category or '').lower()]
+        query = query.filter(InventoryItem.category.ilike(category))
+
     if requested_recipe_type:
-        items = [
-            item for item in items
-            if FeedMixerPolicyService.is_allowed_for_mixer(
-                FeedMixerPolicyService.resolve_item_policy(item),
-                requested_recipe_type,
-            )
-        ]
+        query = query.filter(InventoryItem.allowed_mixers.contains(requested_recipe_type))
+
+    # New flag filter for "quick select"
+    flag = request.args.get('flag')
+    limit = request.args.get('limit', default=None, type=int)
+
+    if flag == 'low_stock':
+        query = query.filter(InventoryItem.current_qty <= InventoryItem.minimum_threshold)
+        query = query.order_by((InventoryItem.minimum_threshold - InventoryItem.current_qty).desc())
+    else:
+        query = query.order_by(InventoryItem.name.asc())
+
+    # Handle limit for widget-like requests that don't need pagination.
+    if limit:
+        items = query.limit(limit).all()
+        serialized_items = [_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer, active_recipe_type=requested_recipe_type) for item in items]
+        return jsonify({'items': serialized_items}), 200
+
+    # Standard pagination for list views.
     page, per_page = _pagination_params()
-    total = len(items)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_items = items[start:end]
-    return jsonify({'items': [_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer, active_recipe_type=requested_recipe_type) for item in page_items], 'meta': {'page': page, 'per_page': per_page, 'total': total, 'pages': (total + per_page - 1) // per_page if total else 0}}), 200
+    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    page_items = paginated.items
+    serialized_items = [_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer, active_recipe_type=requested_recipe_type) for item in page_items]
+    return jsonify({'items': serialized_items, 'meta': {'page': page, 'per_page': per_page, 'total': paginated.total, 'pages': paginated.pages if paginated.total else 0}}), 200
+
+
+@inventory_bp.route('/api/v1/inventory/insights/quick-restock', methods=['GET'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER, Role.FARM_HAND)
+def get_quick_restock_items():
+    """
+    Returns a prioritized list of inventory items that are running low,
+    suitable for a "quick select" or "restock alert" widget on the frontend.
+    """
+    tenant_id = get_tenant_id_from_context()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant context."}), 400
+
+    # 1. Fetch items where current_qty is at or below minimum_threshold (reorder_level)
+    # 2. Order by how critically low they are (difference between threshold and current quantity)
+    # 3. Limit to 5 results as per the request.
+    query = InventoryItem.query.filter_by(tenant_id=tenant_id)\
+        .filter(InventoryItem.current_qty <= InventoryItem.minimum_threshold)\
+        .order_by((InventoryItem.minimum_threshold - InventoryItem.current_qty).desc())\
+        .limit(5)
+
+    items = query.all()
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    serialized_items = [_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer, active_recipe_type=None) for item in items]
+
+    return jsonify({'items': serialized_items}), 200
 
 
 @inventory_bp.route('/api/inventory/items', methods=['POST'])

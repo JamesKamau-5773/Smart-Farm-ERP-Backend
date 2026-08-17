@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from app.repositories.supply_repo import MilkRepository
 from app.repositories.cow_repo import CowRepository
 from flask import jsonify
@@ -7,7 +8,7 @@ class ProductionService:
     ANOMALY_THRESHOLD_PERCENT = 0.15 
 
     @staticmethod
-    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int):
+    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int, milking_date=None):
         """Processes the milking entry, applies intelligence, and securely logs it."""
         livestock_id = cow_id
         
@@ -23,8 +24,11 @@ class ProductionService:
         # If the livestock is locked for medical reasons, this specific milk log is flagged as NOT saleable.
         is_saleable = not livestock.is_hardlocked
 
-        # 3. Anomaly Detection (The 7-Day Rolling Average)
-        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7, tenant_id=tenant_id)
+        # 3. Anomaly Detection (The 7-Day Rolling Average), anchored to the submitted milking date
+        # so backdated entries are compared against the average leading up to that date, not today.
+        now = datetime.now(timezone.utc)
+        reference_dt = datetime.combine(milking_date, now.timetz()) if milking_date else now
+        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7, tenant_id=tenant_id, as_of=reference_dt)
         is_anomaly = False
         warning_msg = None
 
@@ -43,8 +47,19 @@ class ProductionService:
             recorded_by=user_id,
             tenant_id=tenant_id,
             is_saleable=is_saleable,
-            is_anomaly=is_anomaly
+            is_anomaly=is_anomaly,
+            milking_date=milking_date
         )
+
+        # 4b. Raise a manager-review alert so the drop actually surfaces in the review queue.
+        if is_anomaly:
+            MilkRepository.create_drop_alert(
+                cow_id=livestock_id,
+                tenant_id=tenant_id,
+                alert_date=log.timestamp.date(),
+                missing_milk_liters=historical_average - amount,
+                reason=warning_msg
+            )
 
         # 5. Prepare the Smart Response
         response = {

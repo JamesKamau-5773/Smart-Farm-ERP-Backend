@@ -10,3 +10,9 @@ class CowStatus(str, enum.Enum):
     COW = "Cow"
     SOLD = "Sold"
     DIED = "Died"
+
+class TransactionType(enum.Enum):
+    DEBIT = "DEBIT"
+    CREDIT = "CREDIT"
+    EXPENSE = "EXPENSE"
+    REVENUE = "REVENUE"

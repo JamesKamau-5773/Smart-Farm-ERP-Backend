@@ -126,8 +126,42 @@ class OperationsTestCase(BaseTestCase):
             self.assertIn('summary', payload)
             self.assertEqual(payload['summary']['session_count'], 2)
             self.assertAlmostEqual(payload['summary']['total_logged'], 20.0)
-            self.assertAlmostEqual(payload['summary']['average_yield'], 10.0)
-            self.assertAlmostEqual(payload['summary']['peak_yield'], 14.0)
+            self.assertAlmostEqual(payload['summary']['average_yield'], 20.0)
+            self.assertAlmostEqual(payload['summary']['peak_yield'], 20.0)
+
+    def test_animal_milk_history_end_date_includes_whole_day(self):
+        self._login('farmer', 'password')
+
+        db.session.add_all([
+            MilkLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                amount_liters=8.0,
+                session='Morning',
+                recorded_by=self.farmer.id,
+                timestamp=datetime(2026, 7, 2, 6, 0, tzinfo=timezone.utc),
+            ),
+            MilkLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                amount_liters=7.0,
+                session='Evening',
+                recorded_by=self.farmer.id,
+                timestamp=datetime(2026, 7, 2, 18, 0, tzinfo=timezone.utc),
+            ),
+        ])
+        db.session.commit()
+
+        with self.client:
+            response = self.client.get(
+                f'/api/animals/{self.cow.id}/milk-history?end_date=2026-07-02'
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data.decode())
+            self.assertEqual(payload['summary']['session_count'], 2)
+            self.assertAlmostEqual(payload['summary']['total_logged'], 15.0)
+            self.assertAlmostEqual(payload['summary']['average_yield'], 15.0)
+            self.assertAlmostEqual(payload['summary']['peak_yield'], 15.0)
 
     def test_patch_production_yield_updates_amount_and_session(self):
         self._login('farmer', 'password')
@@ -311,7 +345,7 @@ class OperationsTestCase(BaseTestCase):
             verified_at,
         )
 
-    def test_farmer_cannot_verify_production_yield(self):
+    def test_farmer_can_verify_production_yield(self):
         self._login('farmer', 'password')
         log = MilkLog(
             tenant_id=self.tenant.id,
@@ -328,7 +362,14 @@ class OperationsTestCase(BaseTestCase):
 
         with self.client:
             response = self.client.patch(f'/api/production/yield/{log.id}/verify')
-            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data.decode())
+            self.assertEqual(payload['status'], MilkLog.STATUS_VERIFIED)
+            self.assertEqual(payload['verified_by'], self.farmer.id)
+
+            db.session.refresh(log)
+            self.assertEqual(log.status, MilkLog.STATUS_VERIFIED)
+            self.assertEqual(log.verified_by, self.farmer.id)
 
     def test_verify_production_yield_respects_tenant_scope(self):
         other_tenant = self.create_tenant(name='Other Tenant')
@@ -418,6 +459,45 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(payload['summary']['milking_count'], 1)
             self.assertEqual(payload['summary']['dry_count'], 1)
             self.assertEqual(payload['summary']['latest_calved'], '2026-01-15')
+
+    def test_herd_list_exposes_backend_days_open(self):
+        self._login('farmer', 'password')
+
+        cycle = LactationCycle(
+            cow_id=self.cow.id,
+            cycle_number=1,
+            actual_calving_date=date(2026, 1, 15),
+            is_active=True,
+        )
+        db.session.add(cycle)
+        db.session.add(BreedingLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            insemination_date=date(2026, 2, 15),
+            status='Pregnant',
+        ))
+        db.session.commit()
+
+        with self.client:
+            response = self.client.get('/api/herd')
+            self.assertEqual(response.status_code, 200)
+            payload = json.loads(response.data.decode())
+            animal = payload['items'][0]
+            self.assertIn('days_open', animal)
+            self.assertEqual(animal['days_open'], 31)
+
+    def test_midday_session_is_accepted_for_milk_logging(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            response = self.client.post(
+                f'/api/operations/cows/{self.cow.id}/milk',
+                data=json.dumps(dict(amount=12.5, session='Midday')),
+                content_type='application/json',
+            )
+            self.assertEqual(response.status_code, 201)
+            payload = json.loads(response.data.decode())
+            self.assertEqual(payload['session'], 'Midday')
 
     def test_animal_timeline_events_can_be_saved_and_listed(self):
         self._login('farmer', 'password')

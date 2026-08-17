@@ -1,292 +1,189 @@
 from __future__ import annotations
 from decimal import Decimal
+from typing import Optional
+from datetime import datetime, timezone, timedelta
 
-from app.models.supply import InventoryItem, MilkLog, InventoryTransaction
 from app import db
-from datetime import datetime, timedelta, timezone
+from app.models.supply import InventoryItem, InventoryTransaction, MilkLog, MilkDropAlert
 from sqlalchemy import func
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+
+class InventoryRepository:
+    MODEL = InventoryItem
+
+    @classmethod
+    def get_item(cls, item_id: int, tenant_id: int) -> Optional[InventoryItem]:
+        return InventoryItem.query.filter_by(id=item_id, tenant_id=tenant_id).first()
+
+    @classmethod
+    def list_by_tenant(cls, tenant_id: int) -> list[InventoryItem]:
+        return InventoryItem.query.filter_by(tenant_id=tenant_id).order_by(InventoryItem.name.asc()).all()
+
+    @classmethod
+    def list_stock_snapshot(cls, tenant_id: int) -> list[InventoryItem]:
+        return InventoryItem.query.filter_by(tenant_id=tenant_id).order_by(InventoryItem.name.asc()).all()
+
+    @classmethod
+    def list_transactions_by_tenant(cls, tenant_id: int) -> list[InventoryTransaction]:
+        return InventoryTransaction.query.filter_by(tenant_id=tenant_id).order_by(InventoryTransaction.transaction_date.desc()).all()
+
+    @classmethod
+    def create_item(cls, **kwargs) -> InventoryItem:
+        # Check for uniqueness on (tenant_id, name)
+        existing = InventoryItem.query.filter_by(
+            tenant_id=kwargs.get('tenant_id'),
+            name=kwargs.get('name')
+        ).first()
+        if existing:
+            raise ValueError(f"An inventory item with the name '{kwargs.get('name')}' already exists.")
+
+        item = InventoryItem(**kwargs)
+        db.session.add(item)
+        db.session.commit()
+        return item
+
+    @classmethod
+    def update_item(cls, item_id: int, tenant_id: int, **kwargs) -> Optional[InventoryItem]:
+        item = cls.get_item(item_id, tenant_id)
+        if not item:
+            return None
+
+        for key, value in kwargs.items():
+            if value is not None:
+                setattr(item, key, value)
+
+        db.session.commit()
+        return item
+
+    @classmethod
+    def delete_item(cls, item_id: int, tenant_id: int) -> Optional[InventoryItem]:
+        item = cls.get_item(item_id, tenant_id)
+        if item:
+            db.session.delete(item)
+            db.session.commit()
+        return item
+
+    @classmethod
+    def deduct_stock(cls, item_id: int, amount: float, user_id: int, notes: str, tenant_id: int):
+        item, transaction, is_low_stock = cls.record_transaction(
+            item_id=item_id,
+            transaction_type='OUT',
+            quantity=amount,
+            logged_by=user_id,
+            notes=notes,
+            tenant_id=tenant_id,
+            reason_code='CONSUMPTION'
+        )
+        return item, is_low_stock
+
+    @classmethod
+    def record_transaction(
+        cls,
+        item_id: int,
+        transaction_type: str,
+        quantity: float,
+        tenant_id: int,
+        *,
+        reason_code: str = 'STANDARD',
+        unit_cost: Optional[float] = None,
+        inventory_batch_id: Optional[int] = None,
+        logged_by: Optional[int] = None,
+        notes: Optional[str] = None
+    ):
+        item = cls.get_item(item_id, tenant_id)
+        if not item:
+            raise ValueError(f"Inventory item {item_id} not found for tenant {tenant_id}.")
+
+        qty_decimal = Decimal(str(quantity))
+        if qty_decimal <= 0:
+            raise ValueError("Transaction quantity must be greater than zero.")
+
+        if transaction_type == 'OUT':
+            if item.current_qty < qty_decimal:
+                raise ValueError(f"Insufficient stock for {item.name}. Required: {qty_decimal}, Available: {item.current_qty}.")
+            item.current_qty -= qty_decimal
+        elif transaction_type == 'IN':
+            item.current_qty += qty_decimal
+        else:
+            raise ValueError("Invalid transaction_type. Must be 'IN' or 'OUT'.")
+
+        resolved_unit_cost = Decimal(str(unit_cost)) if unit_cost is not None else item.cost_per_kg
+
+        # `tenant_id` isn't a column on InventoryTransaction (tenant scoping
+        # comes through the linked item); `total_transaction_value` is a
+        # Postgres GENERATED ALWAYS column and can't be set explicitly.
+        transaction = InventoryTransaction(
+            item_id=item_id,
+            transaction_type=transaction_type,
+            quantity=qty_decimal,
+            unit_cost=resolved_unit_cost,
+            inventory_batch_id=inventory_batch_id,
+            logged_by=logged_by,
+            notes=notes,
+            reason_code=reason_code,
+            transaction_date=datetime.now(timezone.utc)
+        )
+        db.session.add(transaction)
+        db.session.commit()
+
+        is_low_stock = item.current_qty <= item.minimum_threshold
+        return item, transaction, is_low_stock
+
 
 class MilkRepository:
     @staticmethod
-    def create_log(cow_id: int, amount: float, session: str, recorded_by: int, tenant_id: int, is_saleable: bool, is_anomaly: bool, butterfat_pct=None) -> MilkLog:
-        """Logs a milking session."""
-        try:
-            status = MilkLog.STATUS_FLAGGED if is_anomaly else (
-                MilkLog.STATUS_ISOLATED if not is_saleable else MilkLog.STATUS_RECORDED
-            )
-            log = MilkLog(
-                tenant_id=tenant_id,
-                cow_id=cow_id,
-                amount_liters=amount,
-                session=session,
-                recorded_by=recorded_by,
-                butterfat_pct=butterfat_pct,
-                status=status,
-                is_saleable=is_saleable,
-                anomaly_flag=is_anomaly
-            )
-            db.session.add(log)
-            db.session.commit()
-            return log
-        except SQLAlchemyError as e:
-            db.session.rollback()
-            raise Exception("Failed, Database error while saving milk log.")
+    def get_cow_average_yield(cow_id: int, days: int, tenant_id: int, as_of=None) -> float:
+        """Calculates the average yield per session for a cow over the N days prior to as_of (default: now)."""
+        if days <= 0:
+            return 0.0
 
-    @staticmethod
-    def get_cow_average_yield(cow_id: int, days: int = 7, tenant_id: int = None) -> float:
-        """Calculates the average yield for a specific cow over a rolling window."""
-        start_date = datetime.now(timezone.utc) - timedelta(days=days)
-        query = db.session.query(func.avg(MilkLog.amount_liters)).filter(
-            MilkLog.cow_id == cow_id,
-            MilkLog.timestamp >= start_date
-        )
-        if tenant_id is not None:
-            query = query.filter(MilkLog.tenant_id == tenant_id)
-        result = query.scalar()
-        
-        # If no previous records exist, return the average as 0
-        return float(result) if result else 0.0
+        reference = as_of or datetime.now(timezone.utc)
+        start_date = reference - timedelta(days=days)
 
-    @staticmethod
-    def get_cow_average_butterfat(cow_id: int, days: int = 30, tenant_id: int = None) -> float:
-        """Calculates the average butterfat percentage for a specific cow over a rolling window."""
-        start_date = datetime.now(timezone.utc) - timedelta(days=days)
-        query = db.session.query(func.avg(MilkLog.butterfat_pct)).filter(
+        avg_yield = db.session.query(func.avg(MilkLog.amount_liters)).filter(
             MilkLog.cow_id == cow_id,
+            MilkLog.tenant_id == tenant_id,
             MilkLog.timestamp >= start_date,
-            MilkLog.butterfat_pct.isnot(None),
-        )
-        if tenant_id is not None:
-            query = query.filter(MilkLog.tenant_id == tenant_id)
-        result = query.scalar()
+            MilkLog.timestamp < reference
+        ).scalar()
 
-        return float(result) if result is not None else 0.0
-
-class InventoryRepository:
-    @staticmethod
-    def get_item(item_id: str, tenant_id: int = None) -> InventoryItem:
-        item = db.session.get(InventoryItem, item_id)
-        if item and tenant_id is not None and item.tenant_id != tenant_id:
-            return None
-        return item
+        return float(avg_yield or 0.0)
 
     @staticmethod
-    def list_by_tenant(tenant_id: int) -> list[InventoryItem]:
-        return InventoryItem.query.filter_by(tenant_id=tenant_id).order_by(InventoryItem.name.asc()).all()
-
-    @staticmethod
-    def list_transactions_by_tenant(tenant_id: int) -> list[InventoryTransaction]:
-        return (
-            InventoryTransaction.query.join(InventoryItem, InventoryTransaction.item_id == InventoryItem.id)
-            .filter(InventoryItem.tenant_id == tenant_id)
-            .order_by(InventoryTransaction.transaction_date.desc(), InventoryTransaction.id.desc())
-            .all()
-        )
-
-    @staticmethod
-    def list_stock_snapshot(tenant_id: int) -> list[InventoryItem]:
-        return InventoryRepository.list_by_tenant(tenant_id)
-
-    @staticmethod
-    def create_item(
-        *,
+    def create_log(
+        cow_id: int,
+        amount: float,
+        session: str,
+        recorded_by: int,
         tenant_id: int,
-        name: str,
-        sku: str = None,
-        category: str,
-        unit: str,
-        current_qty=0,
-        minimum_threshold=0,
-        energy_mj_per_kg=0,
-        protein_grams_per_kg=0,
-        fiber_grams_per_kg=0,
-        cost_per_kg=0,
-        allowed_mixers='main_meal',
-        mixer_role='roughage',
-        inclusion_percentage_dairy_meal=0,
-        inclusion_percentage_main_meal=0,
-    ) -> InventoryItem:
-        try:
-            item = InventoryItem(
-                tenant_id=tenant_id,
-                name=name,
-                sku=sku,
-                category=category,
-                unit=unit,
-                current_qty=current_qty,
-                minimum_threshold=minimum_threshold,
-                energy_mj_per_kg=energy_mj_per_kg,
-                protein_grams_per_kg=protein_grams_per_kg,
-                fiber_grams_per_kg=fiber_grams_per_kg,
-                cost_per_kg=cost_per_kg,
-                allowed_mixers=allowed_mixers,
-                mixer_role=mixer_role,
-                inclusion_percentage_dairy_meal=inclusion_percentage_dairy_meal,
-                inclusion_percentage_main_meal=inclusion_percentage_main_meal,
-            )
-            db.session.add(item)
-            db.session.commit()
-            return item
-        except IntegrityError:
-            db.session.rollback()
-            raise ValueError("Inventory item name or sku already exists for this tenant.")
-        except SQLAlchemyError:
-            db.session.rollback()
-            raise Exception("Failed, Database error while saving inventory item.")
-
-    @staticmethod
-    def record_transaction(
-        *,
-        item_id: str,
-        transaction_type: str,
-        quantity,
-        unit_cost=None,
-        inventory_batch_id: int = None,
-        logged_by: int = None,
-        reference_note: str = None,
-        tenant_id: int = None,
-    ) -> tuple[InventoryItem, InventoryTransaction, bool]:
-        try:
-            item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
-            if not item:
-                raise ValueError("Inventory item not found.")
-
-            quantity_value = Decimal(str(quantity))
-            transaction_type = (transaction_type or "").strip().upper()
-            if transaction_type not in {"IN", "OUT"}:
-                raise ValueError("transaction_type must be IN or OUT.")
-
-            unit_cost_value = Decimal(str(unit_cost if unit_cost is not None else (item.cost_per_kg or 0)))
-
-            if transaction_type == "OUT":
-                if item.current_qty < quantity_value:
-                    raise ValueError(f"Insufficient stock for {item.name}. Available: {item.current_qty} {item.unit}")
-                item.current_qty -= quantity_value
-            else:
-                item.current_qty = (item.current_qty or Decimal("0")) + quantity_value
-
-            transaction = InventoryTransaction(
-                item_id=item.id,
-                transaction_type=transaction_type,
-                quantity=quantity_value,
-                unit_cost=unit_cost_value,
-                inventory_batch_id=inventory_batch_id,
-                reference_note=reference_note,
-                logged_by=logged_by,
-            )
-            db.session.add(transaction)
-            db.session.commit()
-
-            is_low_stock = item.current_qty <= item.minimum_threshold
-            return item, transaction, is_low_stock
-        except SQLAlchemyError:
-            db.session.rollback()
-            raise Exception("Database error while recording inventory transaction.")
-
-    @staticmethod
-    def update_item(
-        *,
-        item_id: int,
-        tenant_id: int,
-        name: str = None,
-        sku: str = None,
-        category: str = None,
-        unit: str = None,
-        current_qty=None,
-        minimum_threshold=None,
-        energy_mj_per_kg=None,
-        protein_grams_per_kg=None,
-        fiber_grams_per_kg=None,
-        cost_per_kg=None,
-        allowed_mixers=None,
-        mixer_role=None,
-        inclusion_percentage_dairy_meal=None,
-        inclusion_percentage_main_meal=None,
-    ) -> InventoryItem:
-        try:
-            item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
-            if not item:
-                return None
-
-            if name is not None:
-                item.name = name
-            if sku is not None:
-                item.sku = sku
-            if category is not None:
-                item.category = category
-            if unit is not None:
-                item.unit = unit
-            if current_qty is not None:
-                item.current_qty = Decimal(str(current_qty))
-            if minimum_threshold is not None:
-                item.minimum_threshold = Decimal(str(minimum_threshold))
-            if energy_mj_per_kg is not None:
-                item.energy_mj_per_kg = Decimal(str(energy_mj_per_kg))
-            if protein_grams_per_kg is not None:
-                item.protein_grams_per_kg = Decimal(str(protein_grams_per_kg))
-            if fiber_grams_per_kg is not None:
-                item.fiber_grams_per_kg = Decimal(str(fiber_grams_per_kg))
-            if cost_per_kg is not None:
-                item.cost_per_kg = Decimal(str(cost_per_kg))
-            if allowed_mixers is not None:
-                item.allowed_mixers = allowed_mixers
-            if mixer_role is not None:
-                item.mixer_role = mixer_role
-            if inclusion_percentage_dairy_meal is not None:
-                item.inclusion_percentage_dairy_meal = Decimal(str(inclusion_percentage_dairy_meal))
-            if inclusion_percentage_main_meal is not None:
-                item.inclusion_percentage_main_meal = Decimal(str(inclusion_percentage_main_meal))
-
-            db.session.commit()
-            return item
-        except SQLAlchemyError:
-            db.session.rollback()
-            raise Exception("Failed, Database error while updating inventory item.")
-
-    @staticmethod
-    def delete_item(*, item_id: int, tenant_id: int) -> InventoryItem:
-        try:
-            item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
-            if not item:
-                return None
-            db.session.delete(item)
-            db.session.commit()
-            return item
-        except SQLAlchemyError:
-            db.session.rollback()
-            raise Exception("Failed, Database error while deleting inventory item.")
-
-    @staticmethod
-    def get_by_id(item_id: str, tenant_id: int = None) -> InventoryItem:
-        return InventoryRepository.get_item(item_id, tenant_id=tenant_id)
-
-    @staticmethod
-    def deduct_stock(item_id: str, amount: float, user_id: int, target_cow: int = None, notes: str = None, tenant_id: int = None):
-        """Compatibility wrapper for stock deductions recorded in the new ledger."""
-        reference_note = notes
-        if target_cow is not None:
-            target_suffix = f"Target cow ID: {target_cow}."
-            reference_note = f"{notes}. {target_suffix}" if notes else target_suffix
-
-        item, _, is_low_stock = InventoryRepository.record_transaction(
-            item_id=item_id,
-            transaction_type="OUT",
-            quantity=amount,
-            logged_by=user_id,
-            reference_note=reference_note,
-            tenant_id=tenant_id,
+        is_saleable: bool,
+        is_anomaly: bool,
+        milking_date=None
+    ) -> MilkLog:
+        """Creates a new milk log entry and sets its initial status."""
+        now = datetime.now(timezone.utc)
+        # Preserve the current time-of-day but honor an explicitly submitted milking date.
+        timestamp = datetime.combine(milking_date, now.timetz()) if milking_date else now
+        log = MilkLog(
+            cow_id=cow_id, amount_liters=Decimal(str(amount)), session=session,
+            recorded_by=recorded_by, tenant_id=tenant_id, is_saleable=is_saleable,
+            anomaly_flag=is_anomaly, timestamp=timestamp
         )
-        return item, is_low_stock
+
+        log.status = MilkLog.STATUS_FLAGGED if is_anomaly else \
+                     MilkLog.STATUS_ISOLATED if not is_saleable else \
+                     MilkLog.STATUS_RECORDED
+        db.session.add(log)
+        db.session.commit()
+        return log
 
     @staticmethod
-    def add_stock(item_id: str, amount: float, user_id: int = None, notes: str = None, tenant_id: int = None):
-        item, _, is_low_stock = InventoryRepository.record_transaction(
-            item_id=item_id,
-            transaction_type="IN",
-            quantity=amount,
-            logged_by=user_id,
-            reference_note=notes,
-            tenant_id=tenant_id,
+    def create_drop_alert(cow_id: int, tenant_id: int, alert_date, missing_milk_liters: float, reason: str) -> MilkDropAlert:
+        """Raises a manager-review alert for a detected milk-yield drop."""
+        alert = MilkDropAlert(
+            cow_id=cow_id, tenant_id=tenant_id, alert_date=alert_date,
+            missing_milk_liters=Decimal(str(missing_milk_liters)), reason=reason
         )
-        return item, is_low_stock
+        db.session.add(alert)
+        db.session.commit()
+        return alert

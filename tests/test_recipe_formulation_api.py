@@ -171,6 +171,33 @@ class TestRecipeFormulationAPI(BaseTestCase):
         
         assert response.status_code == 400
 
+    def test_formulate_recipe_returns_422_when_target_is_unreachable(self):
+        """Never return a low-protein fallback mix for an infeasible target."""
+        response = self.client.post(
+            "/api/v1/recipes/formulate",
+            json={
+                "batch_size_kg": 500,
+                "target_protein_percent": 25,
+                "ingredients": [
+                    {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 70},
+                    {"ingredient_id": self.ingredients["wheat_bran"].id, "percentage": 30},
+                ],
+            },
+            headers=self.auth_headers,
+        )
+
+        assert response.status_code == 422
+        body = response.get_json()
+        assert "Cannot reach 25% protein" in body["error"]
+        assert "Maximum achievable target protein" in body["error"]
+        assert "minimum is" in body["error"]
+        assert body["target_protein_percent"] == 25
+        assert body["minimum_achievable_protein_percent"] == 8
+        assert body["maximum_achievable_protein_percent"] == 12
+        assert body["achievable_protein_range"]["minimum_percent"] == 8
+        assert body["achievable_protein_range"]["maximum_percent"] == 12
+        assert "8% to 12%" in body["hint"]
+
     def test_formulate_recipe_no_adjustment_needed(self):
         """Test POST /api/v1/recipes/formulate when target already achieved."""
         payload = {

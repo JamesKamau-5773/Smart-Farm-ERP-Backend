@@ -1,8 +1,15 @@
 from flask import current_app, g, has_app_context
 from sqlalchemy import event
+from sqlalchemy.ext.hybrid import hybrid_property
 
 from app import db
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from dateutil.relativedelta import relativedelta
+
+# --- Configuration Constants for Cow Status Derivation ---
+CALF_AGE_THRESHOLD_MONTHS = 12
+DRY_OFF_PERIOD_DAYS = 60
+LACTATION_PERIOD_DAYS = 305
 
 class BreedStatus:
     FOUNDATION = "Foundation"
@@ -31,9 +38,16 @@ class Cow(db.Model):
     sire_name = db.Column(db.String(100), nullable=True)
     genetic_score = db.Column(db.Integer, nullable=True)
 
+    # --- Fields for Status Derivation ---
+    # This should be updated after each successful calving event.
+    last_calving_date = db.Column(db.Date)
+    # These fields are updated during pregnancy management.
+    pregnancy_status = db.Column(db.String(50))  # e.g., 'Open', 'In-calf', 'Confirmed Pregnant'
+    due_date = db.Column(db.Date)
+
     # Operational State
     is_hardlocked = db.Column(db.Boolean, default=False)
-    current_status = db.Column(db.String(50), default=CowStatus.LACTATING, nullable=False)
+    status = db.Column(db.String(50), default=CowStatus.LACTATING, nullable=False) # Renamed to 'status' to avoid conflict with derived property
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
@@ -73,6 +87,44 @@ class Cow(db.Model):
         ),
     )
 
+    @hybrid_property
+    def age_in_months(self):
+        if not self.date_of_birth:
+            return None
+        today = date.today()
+        delta = relativedelta(today, self.date_of_birth)
+        return delta.years * 12 + delta.months
+
+    @property
+    def current_status(self):
+        """
+        Derives the real-world status of the cow based on its life-cycle data.
+        This is the single source of truth for the cow's current state.
+        """
+        today = date.today()
+
+        # Rule 1: Calves (age-based)
+        if self.age_in_months is not None and self.age_in_months < CALF_AGE_THRESHOLD_MONTHS:
+            return "Calf"
+
+        # Rule 2: Heifers and Bulls (post-calf, pre-reproduction)
+        # Assuming 'gender' is a column in Cow model, if not, it needs to be added.
+        # For now, I'll assume it exists or default to female logic.
+        if hasattr(self, 'gender') and self.gender == 'Male':
+            return "Bull"
+        if not self.last_calving_date:
+            return "Heifer"
+
+        # Rule 3: Dry period before calving (highest priority for a mature cow)
+        if self.due_date and (self.due_date - today).days <= DRY_OFF_PERIOD_DAYS:
+            return "Dry"
+
+        # Rule 4: Lactating (if recently calved and not in pre-calving dry period)
+        if self.last_calving_date and (today - self.last_calving_date).days <= LACTATION_PERIOD_DAYS:
+            return "Lactating"
+
+        # Rule 5: Default to Dry if post-lactation and not pregnant again.
+        return "Dry"
 
 def _resolve_default_tenant_id():
     if has_app_context():

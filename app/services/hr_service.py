@@ -2,11 +2,13 @@ from __future__ import annotations
 from datetime import date
 from datetime import datetime, timezone
 import calendar
+from typing import Optional, Dict, Tuple
 from decimal import Decimal
 
 from flask import jsonify
 
 from app import db
+from sqlalchemy import func
 from app.services.audit_service import record_audit
 from app.repositories.hr_repo import EmployeeRepository, PayrollRepository
 
@@ -48,7 +50,7 @@ class HRService:
             raise ValueError(f'{field_name} must be in YYYY-MM-DD format.')
 
     @staticmethod
-    def _parse_int(value, field_name: str, *, minimum: int | None = None):
+    def _parse_int(value, field_name: str, *, minimum: Optional[int] = None):
         if value in (None, ''):
             return None
         try:
@@ -60,7 +62,7 @@ class HRService:
         return parsed
 
     @staticmethod
-    def _normalize_status(value: str | None):
+    def _normalize_status(value: Optional[str]):
         if not value:
             return 'ACTIVE'
         normalized = str(value).strip().upper()
@@ -384,7 +386,7 @@ class HRService:
         return jsonify(HRService._serialize_employee(employee)), 200
 
     @staticmethod
-    def update_employee(tenant_id: int, staff_id: int, data: dict, *, actor_id: int | None = None):
+    def update_employee(tenant_id: int, staff_id: int, data: dict, *, actor_id: Optional[int] = None):
         employee = EmployeeRepository.get_by_id_for_tenant(staff_id, tenant_id)
         if not employee:
             return jsonify({'error': 'Employee not found for this tenant.'}), 404
@@ -499,7 +501,7 @@ class HRService:
         return jsonify(HRService._serialize_employee(employee)), 200
 
     @staticmethod
-    def verify_return(tenant_id: int, staff_id: int, data: dict, *, actor_id: int | None = None):
+    def verify_return(tenant_id: int, staff_id: int, data: dict, *, actor_id: Optional[int] = None):
         employee = EmployeeRepository.get_by_id_for_tenant(staff_id, tenant_id)
         if not employee:
             return jsonify({'error': 'Employee not found for this tenant.'}), 404
@@ -699,31 +701,37 @@ class HRService:
 
     @staticmethod
     def list_payroll_runs(tenant_id: int):
-        rows = PayrollRepository.list_by_tenant(tenant_id)
-        grouped: dict[tuple[int, int], dict] = {}
-        for row in rows:
-            key = (row.payroll_year, row.payroll_month)
-            if key not in grouped:
-                grouped[key] = {
-                    'id': f'{row.payroll_year:04d}-{row.payroll_month:02d}',
-                    'payrollYear': row.payroll_year,
-                    'payrollMonth': row.payroll_month,
-                    'staffCount': 0,
-                    'totalGrossPay': Decimal('0'),
-                    'totalNetPay': Decimal('0'),
-                    'generatedAt': HRService._iso_datetime(row.created_at),
-                }
-            grouped[key]['staffCount'] += 1
-            grouped[key]['totalGrossPay'] += HRService._to_decimal(row.base_salary) + HRService._to_decimal(row.bonuses)
-            grouped[key]['totalNetPay'] += HRService._to_decimal(row.net_pay)
+        """
+        Lists aggregated payroll runs, grouped by year and month.
+        This query is more efficient as it performs aggregation in the database.
+        """
+        runs = (
+            db.session.query(
+                PayrollRepository.MODEL.payroll_year,
+                PayrollRepository.MODEL.payroll_month,
+                func.count(PayrollRepository.MODEL.id).label('staff_count'),
+                func.sum(PayrollRepository.MODEL.base_salary + PayrollRepository.MODEL.bonuses).label('total_gross_pay'),
+                func.sum(PayrollRepository.MODEL.net_pay).label('total_net_pay'),
+                func.max(PayrollRepository.MODEL.created_at).label('generated_at')
+            )
+            .filter(PayrollRepository.MODEL.tenant_id == tenant_id)
+            .group_by(PayrollRepository.MODEL.payroll_year, PayrollRepository.MODEL.payroll_month)
+            .order_by(PayrollRepository.MODEL.payroll_year.desc(), PayrollRepository.MODEL.payroll_month.desc())
+            .all()
+        )
 
-        payload = []
-        for _, run in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1]), reverse=True):
-            payload.append({
-                **run,
-                'totalGrossPay': float(run['totalGrossPay']),
-                'totalNetPay': float(run['totalNetPay']),
-            })
+        payload = [
+            {
+                'id': f'{run.payroll_year:04d}-{run.payroll_month:02d}',
+                'payrollYear': run.payroll_year,
+                'payrollMonth': run.payroll_month,
+                'staffCount': run.staff_count,
+                'totalGrossPay': HRService._to_float(run.total_gross_pay),
+                'totalNetPay': HRService._to_float(run.total_net_pay),
+                'generatedAt': HRService._iso_datetime(run.generated_at),
+            }
+            for run in runs
+        ]
         return jsonify(payload), 200
 
     @staticmethod
