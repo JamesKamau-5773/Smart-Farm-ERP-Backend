@@ -18,6 +18,13 @@ def _required_secret(env_name: str, fallback: str, min_length: int = 32) -> str:
 
 
 def _postgres_database_uri(env_name: str, fallback: str) -> str:
+    """Return a synchronous PostgreSQL URL using the installed psycopg v3 driver.
+
+    Managed PostgreSQL providers, including Render, commonly provide URLs that
+    begin with ``postgresql://``. SQLAlchemy maps that bare scheme to psycopg2,
+    while this application installs psycopg (v3). Make the driver explicit so
+    provider-supplied URLs work without requiring a second PostgreSQL driver.
+    """
     value = os.environ.get(env_name)
     if os.environ.get('APP_ENV', 'development').lower() == 'production' and not value:
         raise RuntimeError(f'{env_name} must be set in production.')
@@ -25,7 +32,7 @@ def _postgres_database_uri(env_name: str, fallback: str) -> str:
     parsed = make_url(value)
     if not parsed.drivername.startswith('postgresql'):
         raise RuntimeError(f"{env_name} must use a PostgreSQL URI.")
-    return value
+    return parsed.set(drivername='postgresql+psycopg').render_as_string(hide_password=False)
 
 class Config:
     APP_ENV = os.environ.get('APP_ENV', 'development').lower()
