@@ -1,7 +1,7 @@
 """Replace store requisition tables with inventory master/ledger
 
 Revision ID: 8c2b4f9d1e40
-Revises: 390d029aa1ce
+Revises: d9c2b36d7a4f
 Create Date: 2026-05-26 00:00:00.000000
 """
 from __future__ import annotations
@@ -13,7 +13,10 @@ import sqlalchemy as sa
 
 
 revision = '8c2b4f9d1e40'
-down_revision = '390d029aa1ce'
+# Inventory items are tenant-scoped.  This must follow the migration which
+# creates ``tenants``; making the two revisions siblings lets Alembic choose
+# the inventory branch first on a brand-new database.
+down_revision = 'd9c2b36d7a4f'
 branch_labels = None
 depends_on = None
 
