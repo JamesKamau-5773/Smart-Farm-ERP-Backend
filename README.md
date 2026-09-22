@@ -104,6 +104,21 @@ flask run
 
 The application will be available at `http://127.0.0.1:5000`.
 
+### Deploying to Render
+
+The included `render.yaml` uses `scripts/start_web.sh` as the web-service start
+command. The script runs `flask --app run:app db upgrade` before Gunicorn starts,
+so the database schema is present before Render performs its first health check.
+
+For an existing Render service, set its **Start Command** to:
+
+```bash
+./scripts/start_web.sh
+```
+
+Set `DATABASE_URL` to the Render PostgreSQL **internal** connection string and
+set `APP_ENV=production`, `SECRET_KEY`, and `JWT_SECRET_KEY`. Then deploy again.
+
 ## Running Tests
 
 To run the test suite, execute the following command from the `backend` directory:

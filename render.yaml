@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: smart-farm-erp-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: ./scripts/start_web.sh
+    healthCheckPath: /health
