@@ -159,6 +159,12 @@
           <div class="value">{{ animal.days_in_milk if animal.days_in_milk is not none else 'N/A' }}</div>
         </div>
       </div>
+      <div class="meta-row">
+        <div class="meta-cell">
+          <div class="label">Birth Weight</div>
+          <div class="value">{{ (animal.birth_weight_kg ~ ' kg') if animal.birth_weight_kg is not none else 'Not recorded' }}</div>
+        </div>
+      </div>
     </div>
   </div>
 

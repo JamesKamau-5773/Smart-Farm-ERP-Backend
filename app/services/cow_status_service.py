@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING
+from dateutil.relativedelta import relativedelta
 
 from app.models.livestock import CowStatus, LactationCycle
+if TYPE_CHECKING:
+    from app.models.livestock import Cow
 from app.repositories.breeding_repo import BreedingLogRepository
 
 
@@ -21,22 +25,62 @@ class CowStatusService:
     BRED_PENDING = "Bred - Pending"
 
     @staticmethod
-    def compute_pregnancy_status(cow, tenant_id: int) -> str:
-        if cow.current_status == CowStatus.CALF:
-            return CowStatusService.NOT_APPLICABLE
-        if cow.current_status == "Pregnant":
+    def compute_current_status(cow: "Cow") -> str:
+        """
+        Computes the current status of a cow, respecting manual overrides
+        for 'Lactating' or 'Dry' status, before falling back to derived logic.
+        """
+        # 1. Pregnancy is the primary reproductive status, including for
+        # cows that are still lactating when pregnancy is confirmed.
+        if cow.pregnancy_status == 'Pregnant':
             return CowStatusService.PREGNANT
 
+        # 2. Respect explicit status set by calving or drying-off events.
+        if cow.status in (CowStatus.LACTATING, CowStatus.DRY):
+            return cow.status
+
+        # 3. Check for historical lactation cycles to determine status.
+        latest_cycle = (
+            LactationCycle.query
+            .filter(LactationCycle.cow_id == cow.id)
+            .order_by(LactationCycle.actual_calving_date.desc())
+            .first()
+        )
+
+        if latest_cycle:
+            # Has calved before. Is she currently milking or dry?
+            return CowStatus.LACTATING if latest_cycle.end_date is None else CowStatus.DRY
+
+        # 4. No calving history, so she's a Calf or Heifer based on age.
+        if not cow.date_of_birth:
+            return CowStatus.HEIFER  # Default for unknown age
+
+        age = relativedelta(date.today(), cow.date_of_birth)
+        # Industry standard: calf until ~1 year, then heifer until first calving.
+        return CowStatus.CALF if age.years < 1 else CowStatus.HEIFER
+
+    @staticmethod
+    def compute_pregnancy_status(cow, tenant_id: int) -> str:
+        # A calf cannot be pregnant. Determine if it's a calf by age.
+        age = relativedelta(date.today(), cow.date_of_birth) if cow.date_of_birth else None
+        if age and age.years < 1:
+            return CowStatusService.NOT_APPLICABLE
+
+        # The cow.pregnancy_status field is the authoritative source, updated by breeding workflows.
+        if cow.pregnancy_status == "Pregnant":
+            return CowStatusService.PREGNANT
+
+        # Fallback to breeding log for 'Bred - Pending' status if master record is not yet 'Pregnant'.
         latest_log = BreedingLogRepository.get_most_recent_for_cow(cow.id, tenant_id)
-        if latest_log is None:
-            return CowStatusService.OPEN
-        if latest_log.status == "Pending":
+        if latest_log and latest_log.status == "Pending":
             return CowStatusService.BRED_PENDING
+
+        # Default to Open if not pregnant and no pending insemination.
         return CowStatusService.OPEN
 
     @staticmethod
     def compute_days_in_milk(cow) -> int | None:
-        if cow.current_status != CowStatus.LACTATING:
+        if CowStatusService.compute_current_status(cow) != CowStatus.LACTATING:
             return None
 
         latest_cycle = (
@@ -48,9 +92,14 @@ class CowStatusService:
             .order_by(LactationCycle.actual_calving_date.desc())
             .first()
         )
-        if latest_cycle is None or latest_cycle.actual_calving_date is None:
+        calving_date = (
+            latest_cycle.actual_calving_date
+            if latest_cycle is not None
+            else cow.last_calving_date
+        )
+        if calving_date is None:
             return None
-        return max((date.today() - latest_cycle.actual_calving_date).days, 0)
+        return max((date.today() - calving_date).days, 0)
 
     @staticmethod
     def compute_days_open(cow, tenant_id: int) -> int | None:
@@ -79,6 +128,7 @@ class CowStatusService:
     @staticmethod
     def compute_status_fields(cow, tenant_id: int) -> dict:
         return {
+            "current_status": CowStatusService.compute_current_status(cow),
             "pregnancy_status": CowStatusService.compute_pregnancy_status(cow, tenant_id),
             "days_in_milk": CowStatusService.compute_days_in_milk(cow),
             "days_open": CowStatusService.compute_days_open(cow, tenant_id),

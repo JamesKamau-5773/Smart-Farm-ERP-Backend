@@ -17,12 +17,16 @@ class TestRecipeFormulationAPI(BaseTestCase):
         """Set up test ingredients and authentication."""
         super().setUp()
         self.auth_headers = self.get_auth_headers()
-        
+
         # Create test ingredients with realistic protein values
         self.ingredients = {
             "maize_germ": InventoryItem(
                 tenant_id=self.tenant_id,
                 name="Maize Germ",
+                category="Bulk Feed",
+                unit="kg",
+                current_qty=Decimal("1000"),
+                minimum_threshold=Decimal("0"),
                 protein_grams_per_kg=Decimal("120"),
                 energy_mj_per_kg=Decimal("14.5"),
                 fiber_grams_per_kg=Decimal("50"),
@@ -31,6 +35,10 @@ class TestRecipeFormulationAPI(BaseTestCase):
             "wheat_bran": InventoryItem(
                 tenant_id=self.tenant_id,
                 name="Wheat Bran",
+                category="Bulk Feed",
+                unit="kg",
+                current_qty=Decimal("1000"),
+                minimum_threshold=Decimal("0"),
                 protein_grams_per_kg=Decimal("80"),
                 energy_mj_per_kg=Decimal("12.0"),
                 fiber_grams_per_kg=Decimal("100"),
@@ -39,13 +47,17 @@ class TestRecipeFormulationAPI(BaseTestCase):
             "sunflower_cake": InventoryItem(
                 tenant_id=self.tenant_id,
                 name="Sunflower Cake",
+                category="Bulk Feed",
+                unit="kg",
+                current_qty=Decimal("1000"),
+                minimum_threshold=Decimal("0"),
                 protein_grams_per_kg=Decimal("200"),
                 energy_mj_per_kg=Decimal("13.0"),
                 fiber_grams_per_kg=Decimal("80"),
                 cost_per_kg=Decimal("35.00"),
             ),
         }
-        
+
         db.session.add_all(self.ingredients.values())
         db.session.commit()
 
@@ -59,13 +71,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 20},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/calculate-nutrition",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data["batch_size_kg"] == 500
@@ -101,13 +113,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 100},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/calculate-nutrition",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
         assert "batch_size_kg" in response.get_json()["error"]
 
@@ -117,13 +129,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
             "batch_size_kg": 500,
             "ingredients": []
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/calculate-nutrition",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
         assert "ingredient" in response.get_json()["error"].lower()
 
@@ -138,13 +150,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 20},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/formulate",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data["current_protein_percent"] == 12.4
@@ -162,13 +174,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 100},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/formulate",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
 
     def test_formulate_recipe_returns_422_when_target_is_unreachable(self):
@@ -209,13 +221,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 20},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/formulate",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data["adjustment_needed"] == 0
@@ -233,13 +245,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 40},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/auto-save",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 201
         data = response.get_json()
         assert data["status"] == "ADOPTED"
@@ -247,7 +259,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
         assert data["target_protein_percent"] == 16.5
         assert "formulated and adopted" in data["message"]
         assert data["recipe_id"] is not None
-        
+
         # Verify recipe was persisted
         recipe = FeedRecipe.query.filter_by(id=data["recipe_id"]).first()
         assert recipe is not None
@@ -263,13 +275,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 100},
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/auto-save",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
         assert "recipe_name" in response.get_json()["error"]
 
@@ -283,15 +295,68 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": 9999, "percentage": 100},  # Non-existent
             ]
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/auto-save",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
         assert "not found" in response.get_json()["error"].lower()
+
+    def test_auto_save_recipe_rejects_incomplete_percentage_total(self):
+        response = self.client.post(
+            "/api/v1/recipes/auto-save",
+            json={
+                "recipe_name": "Incomplete Recipe",
+                "batch_size_kg": 500,
+                "target_protein_percent": 16.5,
+                "adjusted_ingredients": [
+                    {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 40},
+                    {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 40},
+                ],
+            },
+            headers=self.auth_headers,
+        )
+
+        assert response.status_code == 400
+        assert "must total 100" in response.get_json()["error"]
+        assert FeedRecipe.query.filter_by(recipe_name="Incomplete Recipe").first() is None
+
+    def test_auto_save_recipe_allows_zero_protein_premix(self):
+        premix = InventoryItem(
+            tenant_id=self.tenant_id,
+            name="Dairy Premix",
+            category="Bulk Feed",
+            unit="kg",
+            current_qty=Decimal("1000"),
+            minimum_threshold=Decimal("0"),
+            protein_grams_per_kg=Decimal("0"),
+            energy_mj_per_kg=Decimal("10"),
+            fiber_grams_per_kg=Decimal("50"),
+            cost_per_kg=Decimal("20"),
+        )
+        db.session.add(premix)
+        db.session.commit()
+
+        response = self.client.post(
+            "/api/v1/recipes/auto-save",
+            json={
+                "recipe_name": "Dairy Meal With Premix",
+                "batch_size_kg": 500,
+                "target_protein_percent": 16.5,
+                "adjusted_ingredients": [
+                    {"ingredient_id": self.ingredients["maize_germ"].id, "percentage": 95},
+                    {"ingredient_id": premix.id, "percentage": 5},
+                ],
+            },
+            headers=self.auth_headers,
+        )
+
+        assert response.status_code == 201
+        assert response.get_json()["achieved_protein_percent"] == 11.4
+        assert FeedRecipe.query.filter_by(recipe_name="Dairy Meal With Premix").first() is not None
 
     def test_auto_save_recipe_with_yield_target_id(self):
         """Test POST /api/v1/recipes/auto-save with yield_target_id for Milk Lab integration."""
@@ -306,13 +371,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
             ],
             "yield_target_id": 123
         }
-        
+
         response = self.client.post(
             "/api/v1/recipes/auto-save",
             json=payload,
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 201
         data = response.get_json()
         assert data["status"] == "ADOPTED"
@@ -321,7 +386,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
         """Test GET /api/v1/feed-formulation/suggested-mix success."""
         # First, we need to set up yield targets (mocking Milk Lab state)
         from app.models.livestock import Cow, CowStatus
-        
+
         # Create a lactating cow with yield target
         cow = Cow(
             tenant_id=self.tenant_id,
@@ -331,7 +396,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
         )
         db.session.add(cow)
         db.session.commit()
-        
+
         # Create yield target
         from app.models.livestock import AnimalYieldTarget
         target = AnimalYieldTarget(
@@ -344,13 +409,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
         )
         db.session.add(target)
         db.session.commit()
-        
+
         # Now request suggested mix
         response = self.client.get(
             "/api/v1/feed-formulation/suggested-mix?batch_size_kg=500",
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 200
         data = response.get_json()
         assert data["herd_total_target_liters"] == 20.0
@@ -364,14 +429,14 @@ class TestRecipeFormulationAPI(BaseTestCase):
             "/api/v1/feed-formulation/suggested-mix?batch_size_kg=500",
             headers=self.auth_headers,
         )
-        
+
         assert response.status_code == 400
         data = response.get_json()
         assert "No active yield targets" in data.get("message", data.get("error", ""))
 
     def test_complete_workflow_calculate_formulate_save(self):
         """Test complete workflow: calculate → formulate → save."""
-        
+
         # Step 1: Calculate current nutrition
         calc_payload = {
             "batch_size_kg": 500,
@@ -381,7 +446,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 {"ingredient_id": self.ingredients["sunflower_cake"].id, "percentage": 20},
             ]
         }
-        
+
         calc_response = self.client.post(
             "/api/v1/recipes/calculate-nutrition",
             json=calc_payload,
@@ -390,13 +455,13 @@ class TestRecipeFormulationAPI(BaseTestCase):
         assert calc_response.status_code == 200
         current_nutrition = calc_response.get_json()
         assert current_nutrition["average_protein_percent"] == 12.4
-        
+
         # Step 2: Formulate with target
         formulate_payload = {
             **calc_payload,
             "target_protein_percent": 16.5
         }
-        
+
         formulate_response = self.client.post(
             "/api/v1/recipes/formulate",
             json=formulate_payload,
@@ -405,7 +470,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
         assert formulate_response.status_code == 200
         suggestions = formulate_response.get_json()
         assert suggestions["target_protein_percent"] == 16.5
-        
+
         # Step 3: Save recipe with adjusted ingredients
         save_payload = {
             "recipe_name": "Complete Workflow Test Recipe",
@@ -419,7 +484,7 @@ class TestRecipeFormulationAPI(BaseTestCase):
                 for ing in suggestions["adjusted_ingredients"]
             ]
         }
-        
+
         save_response = self.client.post(
             "/api/v1/recipes/auto-save",
             json=save_payload,

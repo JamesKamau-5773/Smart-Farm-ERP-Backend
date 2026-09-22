@@ -9,6 +9,7 @@ from app import db
 from app.services.finance_service import FinanceService
 from app.models.supply import InventoryItem, InventoryTransaction, MilkLog
 from app.models.livestock import Cow
+from app.repositories.milk_disposition_repo import MilkInventoryRepository
 from app.utils.jwt_payload import parse_public_int_id
 
 dashboard_bp = Blueprint('dashboard', __name__)
@@ -68,13 +69,14 @@ def get_command_center_summary():
         # This ensures both dashboards (/api/production/summary and /api/v1/dashboard/summary)
         # show the exact same financial metrics.
         financial_summary = FinanceService.get_daily_financial_summary(tenant_id)
-        
+
         today_revenue = financial_summary['revenue_total_kes']
         feed_cost = financial_summary['feed_cost_total_kes']
 
         return jsonify({
             "today_revenue_kes": int(today_revenue),
             "today_feed_cost_kes": int(feed_cost),
+            "today_total_costs_kes": int(financial_summary['total_costs_kes']),
             "net_margin_kes": int(financial_summary['net_margin_kes']),
         }), 200
 
@@ -94,6 +96,7 @@ def get_production_summary():
     financial_summary = FinanceService.get_daily_financial_summary(tenant_id)
     revenue_total = financial_summary.get('revenue_total_kes', 0)
     feed_cost = financial_summary.get('feed_cost_total_kes', 0)
+    total_costs = financial_summary.get('total_costs_kes', feed_cost)
     net_margin = financial_summary.get('net_margin_kes', 0)
 
     from app.models.finance import SalesLedger, Delivery
@@ -102,18 +105,9 @@ def get_production_summary():
     start_of_day = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
     next_day = start_of_day + timedelta(days=1)
 
-    total_liters = db.session.query(func.coalesce(func.sum(MilkLog.amount_liters), 0)).filter(
-        MilkLog.tenant_id == tenant_id,
-        MilkLog.timestamp >= start_of_day,
-        MilkLog.timestamp < next_day,
-    ).scalar() or 0
-
-    saleable_liters = db.session.query(func.coalesce(func.sum(MilkLog.amount_liters), 0)).filter(
-        MilkLog.tenant_id == tenant_id,
-        MilkLog.timestamp >= start_of_day,
-        MilkLog.timestamp < next_day,
-        MilkLog.is_saleable.is_(True),
-    ).scalar() or 0
+    milk_inventory = MilkInventoryRepository.summary_for_date(tenant_id=tenant_id, inventory_date=today)
+    total_liters = milk_inventory['produced_liters']
+    saleable_liters = milk_inventory['medically_saleable_liters']
 
     # Calculate total milk sold today from both buyer and customer sales channels
     total_sold_buyers = db.session.query(func.coalesce(func.sum(SalesLedger.liters_sold), 0)).filter(
@@ -127,7 +121,7 @@ def get_production_summary():
     ).scalar() or 0
 
     total_sold = float(total_sold_buyers) + float(total_sold_customers)
-    remaining_milk = float(saleable_liters) - total_sold
+    remaining_milk = float(milk_inventory['remaining_liters'])
 
     cows_milked = db.session.query(func.count(func.distinct(MilkLog.cow_id))).filter(
         MilkLog.tenant_id == tenant_id,
@@ -135,12 +129,12 @@ def get_production_summary():
         MilkLog.timestamp < next_day,
     ).scalar() or 0
 
-    avg_per_cow = float(total_liters) / int(cows_milked) if cows_milked else 0.0
+    avg_per_cow = round(float(total_liters) / int(cows_milked), 1) if cows_milked else 0.0
     profit_per_liter = float(net_margin) / float(saleable_liters) if float(saleable_liters) > 0 else 0.0
 
     alert_count = db.session.query(func.count(Cow.id)).filter(
         Cow.is_active.is_(True),
-        Cow.current_status.in_(['Calf', 'Heifer', 'Lactating', 'Dry']),
+        Cow.status.in_(['Calf', 'Heifer', 'Lactating', 'Dry']),
     ).scalar() or 0
 
     return jsonify({
@@ -148,9 +142,14 @@ def get_production_summary():
         'production_total_liters': float(total_liters),
         'saleable_liters': float(saleable_liters),
         'total_sold_liters': total_sold,
+        'calf_fed_liters': float(milk_inventory['disposition_liters']),
+        'personal_consumption_liters': float(
+            milk_inventory['customer_delivery_liters'] - Decimal(str(total_sold_customers))
+        ),
         'remaining_milk_liters': remaining_milk,
         'revenue_total_kes': float(revenue_total),
         'feed_cost_total_kes': float(feed_cost),
+        'total_costs_kes': float(total_costs),
         'net_margin_kes': float(net_margin),
         'operational_alerts': int(alert_count),
         'cows_milked': int(cows_milked),

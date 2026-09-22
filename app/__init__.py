@@ -50,8 +50,9 @@ def create_app(config_class=Config):
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Headers'] = request.headers.get(
             'Access-Control-Request-Headers',
-            'Authorization,Content-Type,X-Tenant-ID,X-Farm-ID',
+            'Authorization,Content-Type,Idempotency-Key,X-Tenant-ID,X-Farm-ID',
         )
+        response.headers['Access-Control-Expose-Headers'] = 'Idempotency-Replayed'
         response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PATCH,PUT,DELETE,OPTIONS'
 
         # Baseline hardening for browser responses.
@@ -63,8 +64,16 @@ def create_app(config_class=Config):
         return response
 
     # Register the middleware
-    from app.middleware import set_tenant_context
+    from app.middleware import (
+        begin_idempotent_request,
+        complete_idempotent_request,
+        enforce_required_password_reset,
+        set_tenant_context,
+    )
     app.before_request(set_tenant_context)
+    app.before_request(enforce_required_password_reset)
+    app.before_request(begin_idempotent_request)
+    app.after_request(complete_idempotent_request)
 
 
     # --- Model Imports for Alembic Autodiscovery ---
@@ -73,17 +82,25 @@ def create_app(config_class=Config):
     # here, we ensure all model classes are registered with SQLAlchemy's metadata.
     # We import model classes directly from their modules to avoid circular dependencies.
     from app.models.user import User
-    from app.models.finance import Buyer, Customer, Delivery, SalesLedger, Transaction
-    from app.models.supply import MilkLog # Inferred from finance API
+    from app.models.user import RevokedToken
+    from app.models.finance import Buyer, Customer, Delivery, Receipt, SalesLedger, Transaction
+    from app.models.supply import MilkDisposition, MilkLog # Inferred from finance API
     # The following modules are also imported for model discovery by Alembic.
     # The Cow model is imported from livestock.py as per the diagnosis.
     from app.models.livestock import Cow
     from app.models.audit import AuditLog
     from app.models.tenant import Tenant
     from app.models.farm import Farm
-    from app.models.hr import Employee, Payroll
+    from app.models.hr import Employee, Payroll, PayrollRun, PayrollRunLineItem
     # Correcting Genetics to GeneticProfile based on the relationship in the Cow model
     from app.models.genetics import GeneticProfile
+    from app.models.messaging import ChatSession
+    from app.models.idempotency import IdempotencyRecord
+
+    @jwt.token_in_blocklist_loader
+    def is_token_revoked(_jwt_header, jwt_payload):
+        token_id = jwt_payload.get('jti')
+        return bool(token_id and RevokedToken.query.filter_by(jti=token_id).first())
 
     # --- Blueprint Registration ---
     from app.api.clinical import clinical_bp
@@ -94,6 +111,7 @@ def create_app(config_class=Config):
     from app.api.inventory import inventory_bp
     from app.api.finance import finance_bp
     from app.api.webhooks import webhooks_bp
+    from app.api.whatsapp_webhook import whatsapp_bp
     from app.api.hr import hr_bp
     from app.api.tenant import tenant_bp
     from app.api.feed import feed_bp
@@ -105,8 +123,11 @@ def create_app(config_class=Config):
     from app.api.herd import herd_bp
     from app.api.genetics import genetics_bp
     from app.api.reports import reports_bp
+    from app.api.uploads import uploads_bp
+    from app.api.milk_dispositions import milk_dispositions_bp
+    from app.api.onboarding import onboarding_bp
     from app.api import api_bp
-    
+
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
     register_error_handlers(app)
@@ -116,6 +137,8 @@ def create_app(config_class=Config):
 
     @app.before_request
     def ensure_bootstrapped_super_admin():
+        if request.endpoint == 'whatsapp.verify_webhook':
+            return None
         if app.extensions.get('super_admin_bootstrapped'):
             return None
         ensure_super_admin_account()
@@ -128,8 +151,10 @@ def create_app(config_class=Config):
     app.register_blueprint(breeding_bp, url_prefix='/api/v1/breeding')
     app.register_blueprint(export_bp)
     app.register_blueprint(inventory_bp)
-    app.register_blueprint(finance_bp, url_prefix='/api')
+    app.register_blueprint(finance_bp, url_prefix='/api/finance')
+    app.register_blueprint(finance_bp, url_prefix='/api', name='finance_legacy')
     app.register_blueprint(webhooks_bp)
+    app.register_blueprint(whatsapp_bp)
     app.register_blueprint(hr_bp, url_prefix='/api/hr')
     app.register_blueprint(tenant_bp, url_prefix='/api/tenant')
     app.register_blueprint(feed_bp)
@@ -143,6 +168,9 @@ def create_app(config_class=Config):
     app.register_blueprint(veterinary_bp)
     app.register_blueprint(genetics_bp, url_prefix='/api/v1/genetics')
     app.register_blueprint(reports_bp)
+    app.register_blueprint(uploads_bp)
+    app.register_blueprint(milk_dispositions_bp)
+    app.register_blueprint(onboarding_bp, url_prefix='/api/onboarding')
     app.register_blueprint(api_bp, url_prefix='/api')
 
     @app.route('/health', methods=['GET'])
@@ -154,4 +182,3 @@ def create_app(config_class=Config):
 
     return app
 
-    

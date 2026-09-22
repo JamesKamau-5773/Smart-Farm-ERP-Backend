@@ -1,7 +1,9 @@
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_jwt_extended import get_jwt, jwt_required, get_jwt_identity
 from app.services.auth_service import AuthService
+from app.services.account_invitation_service import AccountInvitationService
 from app.services.cooperative_service import CooperativeService
+from app.services.password_reset_service import PasswordResetService
 from app import limiter
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import parse_public_int_id
@@ -63,7 +65,22 @@ def claim_account():
     password = data.get('password') or ''
     if not token or not password:
         return jsonify({"error": "token and password are required"}), 400
-    return CooperativeService.claim_member_invite(token, password)
+    return AccountInvitationService.claim_invite(token, password)
+
+
+@auth_bp.route('/change-password', methods=['POST'])
+@jwt_required()
+def complete_password_reset():
+    user_id = get_jwt_identity()
+    user = UserRepository.get_by_id(int(user_id)) if user_id else None
+    if not user:
+        return jsonify({'error': 'User not found.'}), 404
+    return PasswordResetService.complete_required_reset(
+        user,
+        request.get_json(silent=True) or {},
+        get_jwt() or {},
+        ip_address=request.remote_addr,
+    )
 
 
 @auth_bp.route('/me', methods=['GET'])
@@ -87,6 +104,7 @@ def me():
         'phone_number': phone_number,
         'role': user.role,
         'is_active': user.is_active,
+        'requires_password_reset': user.requires_password_reset,
         'farm_location': getattr(user, 'farm_location', None),
         'tenant_id': claims.get('tenant_id') or (f'tenant_{tenant.id}' if tenant else None),
         'tenant_name': claims.get('tenant_name') or (tenant.name if tenant else None),
@@ -96,6 +114,27 @@ def me():
         'available_farms': claims.get('available_farms', []),
         'permissions': [user.role],
     }), 200
+
+
+@auth_bp.route('/me', methods=['PATCH'])
+@jwt_required()
+def update_me():
+    """Edit own profile. Supports updating name/farm_location and setting or
+    clearing the WhatsApp phone number used by the bot.
+
+    Body: {
+        "name": str (optional),
+        "farm_location": str (optional),
+        "phone_number": str (optional; '' or null clears it)
+    }
+    """
+    user_id = get_jwt_identity()
+    user = UserRepository.get_by_id(int(user_id)) if user_id else None
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    return AuthService.update_profile(user, data)
 
 
 @auth_bp.route('/status', methods=['GET'])

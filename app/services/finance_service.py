@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import func
 
 from app import db
-from app.models.finance import Transaction, TransactionType
+from app.models.finance import Transaction, TransactionCategory, TransactionStatus, TransactionType
 
 
 class FinanceService:
@@ -32,7 +32,8 @@ class FinanceService:
         ).filter(
             Transaction.tenant_id == tenant_id,
             Transaction.timestamp >= start_of_day,
-            Transaction.timestamp <= end_of_day
+            Transaction.timestamp <= end_of_day,
+            Transaction.status == TransactionStatus.POSTED.value,
         )
 
         # FIX: Use the TransactionType.REVENUE enum member instead of a hardcoded string.
@@ -40,15 +41,20 @@ class FinanceService:
             Transaction.transaction_type == TransactionType.REVENUE
         ).scalar() or Decimal('0.0')
 
-        # FIX: Use the TransactionType.EXPENSE enum member for costs.
-        feed_cost_total = base_query.filter(
+        total_costs = base_query.filter(
             Transaction.transaction_type == TransactionType.EXPENSE
         ).scalar() or Decimal('0.0')
 
-        net_margin = revenue_total - feed_cost_total
+        feed_cost_total = base_query.filter(
+            Transaction.transaction_type == TransactionType.EXPENSE,
+            Transaction.category == TransactionCategory.FEED_PURCHASE,
+        ).scalar() or Decimal('0.0')
+
+        net_margin = revenue_total - total_costs
 
         return {
             'revenue_total_kes': revenue_total,
             'feed_cost_total_kes': feed_cost_total,
+            'total_costs_kes': total_costs,
             'net_margin_kes': net_margin,
         }

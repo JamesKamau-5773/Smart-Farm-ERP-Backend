@@ -3,7 +3,7 @@ from datetime import date
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
-from app.models.hr import Employee, Payroll
+from app.models.hr import Employee, Payroll, PayrollRun, PayrollRunLineItem
 
 
 class EmployeeRepository:
@@ -48,6 +48,10 @@ class EmployeeRepository:
         return Employee.query.filter_by(tenant_id=tenant_id).order_by(Employee.id.desc()).all()
 
     @staticmethod
+    def count_active_by_tenant(tenant_id: int) -> int:
+        return Employee.query.filter_by(tenant_id=tenant_id, is_active=True).count()
+
+    @staticmethod
     def get_by_id_for_tenant(employee_id: int, tenant_id: int) -> Employee:
         return Employee.query.filter_by(id=employee_id, tenant_id=tenant_id).first()
 
@@ -57,6 +61,8 @@ class EmployeeRepository:
 
 
 class PayrollRepository:
+    MODEL = Payroll
+
     @staticmethod
     def create(*, tenant_id: int, staff_id: int, payroll_year: int, payroll_month: int, base_salary, bonuses=0, deductions=0, net_pay=None, payment_date=None, status='Pending', notes=None) -> Payroll:
         try:
@@ -96,3 +102,26 @@ class PayrollRepository:
             payroll_year=payroll_year,
             payroll_month=payroll_month,
         ).first()
+
+    @staticmethod
+    def get_run(*, tenant_id: int, payroll_year: int, payroll_month: int, for_update=False):
+        query = PayrollRun.query.filter_by(
+            tenant_id=tenant_id,
+            payroll_year=payroll_year,
+            payroll_month=payroll_month,
+        )
+        if for_update:
+            query = query.with_for_update()
+        return query.first()
+
+    @staticmethod
+    def list_runs(*, tenant_id: int):
+        return PayrollRun.query.filter_by(tenant_id=tenant_id).order_by(
+            PayrollRun.payroll_year.desc(), PayrollRun.payroll_month.desc()
+        ).all()
+
+    @staticmethod
+    def get_run_line_items(*, run_id: int):
+        return PayrollRunLineItem.query.filter_by(payroll_run_id=run_id).order_by(
+            PayrollRunLineItem.staff_id
+        ).all()

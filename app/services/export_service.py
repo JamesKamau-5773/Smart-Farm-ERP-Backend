@@ -122,6 +122,7 @@ class AnimalPassportService:
             'current_status': animal.current_status,
             'is_active': animal.is_active,
             'is_hardlocked': animal.is_hardlocked,
+            'birth_weight_kg': float(animal.birth_weight_kg) if animal.birth_weight_kg is not None else None,
             **CowStatusService.compute_status_fields(animal, tenant_id),
         }
 

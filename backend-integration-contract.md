@@ -100,6 +100,187 @@ Production, herd, breeding, lab, milk history, safety, records, and routine plan
 
 Feed dashboards and formulation screens need recipe, ingredient, unit, and profitability data. The backend should provide deterministic conversion and cost inputs so the UI does not invent calculations locally.
 
+#### Group Planning UI Contract
+
+The group planning UI uses three nutrition endpoints with strict request and response shapes.
+
+1. GET /api/v1/nutrition/feeding-groups/profiles
+
+Response 200:
+
+```json
+{
+  "tenant_id": 1,
+  "profiles": [
+    {
+      "feeding_group": "lactating",
+      "avg_body_weight_kg": 500.0,
+      "dmi_percent_bw": 3.0,
+      "target_protein_percent": 16.5,
+      "feeding_times_per_day": 3,
+      "is_default": true
+    },
+    {
+      "feeding_group": "dry",
+      "avg_body_weight_kg": 480.0,
+      "dmi_percent_bw": 2.0,
+      "target_protein_percent": 12.0,
+      "feeding_times_per_day": 2,
+      "is_default": true
+    }
+  ],
+  "count": 5
+}
+```
+
+2. PUT /api/v1/nutrition/feeding-groups/profiles/{feeding_group}
+
+Path parameter:
+
+- feeding_group enum: lactating, dry, calf_0_3m, calf_3_6m, heifer
+
+Request body:
+
+```json
+{
+  "avg_body_weight_kg": 600,
+  "dmi_percent_bw": 3.0,
+  "target_protein_percent": 13.5,
+  "feeding_times_per_day": 3
+}
+```
+
+Validation rules:
+
+- avg_body_weight_kg: required, numeric, greater than 0
+- dmi_percent_bw: required, numeric, greater than 0 and less than or equal to 10
+- target_protein_percent: required, numeric, greater than 0 and less than or equal to 100
+- feeding_times_per_day: required, integer-like numeric, greater than 0 and less than or equal to 12
+
+Success response 200:
+
+```json
+{
+  "feeding_group": "dry",
+  "avg_body_weight_kg": 600.0,
+  "dmi_percent_bw": 3.0,
+  "target_protein_percent": 13.5,
+  "feeding_times_per_day": 3,
+  "message": "Profile saved."
+}
+```
+
+Error response 400:
+
+```json
+{
+  "error": "dmi_percent_bw must be > 0 and <= 10."
+}
+```
+
+3. GET /api/v1/nutrition/herd/feeding-plan/by-group
+
+Response 200:
+
+```json
+{
+  "generated_on": "2026-08-25",
+  "tenant_id": 1,
+  "groups": [
+    {
+      "feeding_group": "lactating",
+      "headcount": 20,
+      "avg_body_weight_kg": 500.0,
+      "dmi_percent_bw": 3.0,
+      "target_protein_percent": 16.5,
+      "feeding_times_per_day": 3,
+      "daily_feed_per_head_kg": 15.0,
+      "daily_group_feed_kg": 300.0,
+      "daily_group_protein_kg": 49.5,
+      "profile_source": "custom"
+    },
+    {
+      "feeding_group": "dry",
+      "headcount": 12,
+      "avg_body_weight_kg": 480.0,
+      "dmi_percent_bw": 2.0,
+      "target_protein_percent": 12.0,
+      "feeding_times_per_day": 2,
+      "quantity_basis": "total_ration",
+      "quantity_label": "Total ration (dry matter)",
+      "total_ration_kg_per_head_day": 9.6,
+      "daily_kg_per_head": 9.6,
+      "kg_per_head_per_feeding": 4.8,
+      "daily_group_batch_kg": 115.2,
+      "group_batch_per_feeding_kg": 57.6,
+      "daily_feed_per_head_kg": 9.6,
+      "daily_group_feed_kg": 115.2,
+      "daily_group_protein_kg": 13.82,
+      "profile_source": "default",
+      "assigned_recipe": {
+        "id": 14,
+        "name": "Dry Cow Total Ration",
+        "recipe_type": "main_meal",
+        "quantity_basis": "total_ration",
+        "ingredients": [
+          {
+            "inventory_item_id": 8,
+            "name": "Hay",
+            "percentage": 60.0,
+            "daily_group_kg": 69.12,
+            "group_kg_per_feeding": 34.56
+          }
+        ]
+      },
+      "physical_measures": {
+        "bulk_density_kg_per_litre": 0.4,
+        "bucket_volume_litres": 20.0,
+        "kg_per_bucket": 8.0,
+        "daily_group_buckets": 14.4,
+        "group_buckets_per_feeding": 7.2,
+        "kg_per_scoop": 2.0,
+        "daily_group_scoops": 57.6,
+        "group_scoops_per_feeding": 28.8
+      },
+      "requires_concentrate_rate": false
+    }
+  ],
+  "totals": {
+    "total_active_animals": 87,
+    "total_daily_feed_kg": 1260.4,
+    "total_planned_mix_kg": 1260.4,
+    "total_daily_protein_kg": 188.51
+  }
+}
+```
+
+Notes for frontend implementation:
+
+- profile_source is default when no custom profile exists for that group.
+- feeding_group values are stable enums and should be represented as union types in frontend models.
+- values are rounded by backend for presentation-safe UI rendering.
+- quantity_basis is `total_ration` or `concentrate`; the frontend must always show quantity_label beside amounts.
+- concentrate recipes require `concentrate_kg_per_head_day`. If missing, planned mix quantities are zero and `requires_concentrate_rate` is true; never substitute total-ration DMI.
+- ingredient kilograms are scaled from the assigned recipe percentages and the authoritative group batch.
+- physical_measures is null until calibration exists. Bucket conversion requires both `bulk_density_kg_per_litre` and `bucket_volume_litres`; scoop conversion requires `scoop_weight_kg`.
+- kilograms are authoritative. Bucket and scoop values are operational equivalents, not independent quantities.
+
+4. PATCH /api/feed/recipes/{recipe_id}
+
+Recipe allocation and physical-measure settings:
+
+```json
+{
+  "quantity_basis": "concentrate",
+  "concentrate_kg_per_head_day": 2.5,
+  "bulk_density_kg_per_litre": 0.55,
+  "bucket_volume_litres": 20,
+  "scoop_weight_kg": 1.25
+}
+```
+
+All numeric calibration values must be positive. Bulk density and bucket volume must be supplied together. Send null to clear an optional calibration.
+
 ### Inventory and Finance
 
 Inventory, buyers, ledger, and customer profile screens depend on transaction histories, balances, and statement data. The backend should support paging, filtering, and tokenized statement access where the external portal needs it.
@@ -123,6 +304,28 @@ Returns one staff record plus audit-relevant leave and verification fields.
 `POST /api/hr/staff`
 
 Creates a staff record.
+
+`POST /api/onboarding/invite`
+
+Creates or reissues a 48-hour login invitation for an existing staff record. The request includes `employee_id` and a role of `FARM_ADMIN`, `FARM_MANAGER`, `FARM_SUPERVISOR`, `FARM_HAND`, or `VETERINARY_DOCTOR`. Platform roles cannot be assigned. The response includes `claim_url`, `expires_in_hours`, and `onboarding_status`. Reissuing invalidates every earlier token. The account remains inactive until claimed through `POST /api/auth/claim-account`.
+
+`POST /api/onboarding/provision`
+
+Creates an active employee-linked account immediately from `employee_id`, `role`, and a temporary `password`. The password is hashed and never returned. The response sets `requires_password_reset: true` and the employee state to `PASSWORD_RESET_REQUIRED`.
+
+`POST /api/auth/change-password`
+
+Completes a required password reset using matching `password` and `confirm_password` fields. The temporary password cannot be reused. Success revokes the current restricted token, returns a new unrestricted token, and moves the employee state to `ACTIVE`.
+
+While `requires_password_reset` is true, the backend rejects protected routes with `403` and code `PASSWORD_RESET_REQUIRED`. Login, account identity, password change, and logout remain available. React Router should use the login or `/api/auth/me` flag for navigation, but the backend remains authoritative.
+
+Legacy `POST /api/hr/staff/:id/account-invite` remains available as an alias.
+
+The employee record and login account are separate but linked: all workers can be represented in HR/payroll, while only workers who need application access require an account.
+
+`GET /api/hr/staffing-recommendations`
+
+Returns advisory role counts based on the tenant's active employee count. Recommendations never create accounts or grant permissions automatically. Current bands are: up to 5 employees (`SMALL`), 6-15 (`GROWING`), 16-30 (`ESTABLISHED`), and above 30 (`LARGE`).
 
 `PATCH /api/hr/staff/:id`
 
@@ -181,6 +384,8 @@ If the backend prefers the exact route inventory already supplied by the server 
 - `ACTIVE` is the default working state.
 - `ON_LEAVE` means an approved leave state with start and return dates.
 - `OVERDUE` means the employee has not returned by the expected return date and requires verification.
+- Headcount recommendations are advisory; access is assigned explicitly according to responsibility.
+- Managers inherit supervisor and farmhand operational access. Supervisors inherit farmhand operational access.
 - Verification is a separate workflow from profile edits.
 - Payroll deduction logic must be deterministic and auditable.
 - All mutations should return structured errors with validation messages.

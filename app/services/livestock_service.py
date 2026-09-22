@@ -1,6 +1,6 @@
 import logging
-from datetime import date, datetime
-from typing import Any, Dict
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, TYPE_CHECKING
 
 from dateutil.relativedelta import relativedelta
 
@@ -16,6 +16,10 @@ LivestockRepository = MagicMock()
 class UnprocessableEntityError(ValueError): pass
 class ConflictError(ValueError): pass
 class NotFoundError(ValueError): pass
+
+if TYPE_CHECKING:
+    from app.models.livestock import Cow, AnimalTimelineEvent
+
 
 
 log = logging.getLogger(__name__)
@@ -97,3 +101,53 @@ class LivestockService:
             raise NotFoundError(f"Livestock with tag number '{tag_number}' not found for this tenant.")
 
         return animal
+
+    @staticmethod
+    def process_calving_event(cow: "Cow", event: "AnimalTimelineEvent"):
+        """
+        Updates the cow's master record and triggers calving domain updates after a calving event.
+        - Sets status to Lactating.
+        - Sets last_calving_date.
+        - Resets pregnancy_status to Open.
+        - Manages LactationCycle state.
+        - Updates BreedingLog to 'Calved'.
+        """
+        from app import db
+        from app.models.livestock import LactationCycle, BreedingLog
+
+        calving_date = event.event_date.date()
+
+        # 1. Update the cow's master record
+        cow.status = CowStatus.LACTATING
+        cow.last_calving_date = calving_date
+        cow.pregnancy_status = "Open"
+        cow.due_date = None
+
+        # 2. Deactivate previous lactation cycles and create new active one
+        existing_cycles = LactationCycle.query.filter_by(cow_id=cow.id).all()
+        for cycle in existing_cycles:
+            cycle.is_active = False
+            db.session.add(cycle)
+
+        new_cycle = LactationCycle(
+            cow_id=cow.id,
+            cycle_number=len(existing_cycles) + 1,
+            actual_calving_date=calving_date,
+            is_active=True,
+        )
+        db.session.add(new_cycle)
+        db.session.add(cow)
+
+        # 3. Update BreedingLog to 'Calved' if applicable
+        breeding_log = (
+            BreedingLog.query.filter(
+                BreedingLog.cow_id == cow.id,
+                BreedingLog.tenant_id == cow.tenant_id,
+                BreedingLog.status.in_(["Pregnant", "Pending"]),
+            )
+            .order_by(BreedingLog.insemination_date.desc(), BreedingLog.id.desc())
+            .first()
+        )
+        if breeding_log:
+            breeding_log.status = "Calved"
+            db.session.add(breeding_log)

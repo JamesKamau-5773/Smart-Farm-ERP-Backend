@@ -11,6 +11,8 @@ from app import db
 from sqlalchemy import func
 from app.services.audit_service import record_audit
 from app.repositories.hr_repo import EmployeeRepository, PayrollRepository
+from app.models.hr import PayrollRun, PayrollRunLineItem, PayrollRunStatus
+from app.services.payroll_ledger_service import PayrollLedgerService
 
 
 class HRService:
@@ -128,6 +130,16 @@ class HRService:
         status = HRService._current_status(employee)
         return {
             'id': employee.id,
+            'userId': employee.user_id,
+            'user_id': employee.user_id,
+            'accountStatus': employee.onboarding_status,
+            'account_status': employee.onboarding_status,
+            'onboardingStatus': employee.onboarding_status,
+            'onboarding_status': employee.onboarding_status,
+            'requiresPasswordReset': bool(employee.user and employee.user.requires_password_reset),
+            'requires_password_reset': bool(employee.user and employee.user.requires_password_reset),
+            'inviteExpiresAt': HRService._iso_datetime(employee.onboarding_invite_expires_at),
+            'invite_expires_at': HRService._iso_datetime(employee.onboarding_invite_expires_at),
             'name': employee.full_name,
             'full_name': employee.full_name,
             'role': employee.role,
@@ -261,6 +273,111 @@ class HRService:
             'actualReturnDate': HRService._iso_date(employee.actual_return_date),
             'actual_return_date': HRService._iso_date(employee.actual_return_date),
         }
+
+    @staticmethod
+    def _payroll_run_totals(line_items):
+        total_gross = sum(Decimal(str(item['grossPay'])) for item in line_items)
+        total_net = sum(Decimal(str(item['netPay'])) for item in line_items)
+        total_leave = sum(Decimal(str(item['leaveDeduction'])) for item in line_items)
+        total_overdue = sum(Decimal(str(item['overduePenaltyDeduction'])) for item in line_items)
+        total_advance = sum(Decimal(str(item['advanceDeduction'])) for item in line_items)
+        return {
+            'gross': total_gross,
+            'net': total_net,
+            'leave': total_leave,
+            'overdue': total_overdue,
+            'advance': total_advance,
+            'deductions': total_leave + total_overdue + total_advance,
+        }
+
+    @staticmethod
+    def _serialize_payroll_run(run, line_items=None, *, include_lines=True):
+        line_items = line_items if line_items is not None else PayrollRepository.get_run_line_items(run_id=run.id)
+        total_leave = sum((HRService._to_decimal(item.leave_deduction) for item in line_items), Decimal('0'))
+        total_overdue = sum((HRService._to_decimal(item.overdue_penalty_deduction) for item in line_items), Decimal('0'))
+        total_advance = sum((HRService._to_decimal(item.advance_deduction) for item in line_items), Decimal('0'))
+        totals = {
+            'gross': HRService._to_decimal(run.total_gross_pay),
+            'net': HRService._to_decimal(run.total_net_pay),
+            'deductions': HRService._to_decimal(run.total_deductions),
+            'leave': total_leave,
+            'overdue': total_overdue,
+            'advance': total_advance,
+        }
+        line_payload = []
+        for item in line_items:
+            line_payload.append({
+                'staffId': item.staff_id,
+                'staff_id': item.staff_id,
+                'staffName': item.staff_name,
+                'staff_name': item.staff_name,
+                'status': item.status,
+                'baseSalary': HRService._to_float(item.base_salary),
+                'base_salary': HRService._to_float(item.base_salary),
+                'approvedLeaveDays': item.approved_leave_days,
+                'approved_leave_days': item.approved_leave_days,
+                'overduePenaltyDays': item.overdue_penalty_days,
+                'overdue_penalty_days': item.overdue_penalty_days,
+                'leaveDeduction': HRService._to_float(item.leave_deduction),
+                'leave_deduction': HRService._to_float(item.leave_deduction),
+                'advanceDeduction': HRService._to_float(item.advance_deduction),
+                'advance_deduction': HRService._to_float(item.advance_deduction),
+                'overduePenaltyDeduction': HRService._to_float(item.overdue_penalty_deduction),
+                'overdue_penalty_deduction': HRService._to_float(item.overdue_penalty_deduction),
+                'grossPay': HRService._to_float(item.gross_pay),
+                'gross_pay': HRService._to_float(item.gross_pay),
+                'netPay': HRService._to_float(item.net_pay),
+                'net_pay': HRService._to_float(item.net_pay),
+                'loanBalance': HRService._to_float(item.loan_balance),
+                'loan_balance': HRService._to_float(item.loan_balance),
+                'monthlyDeduction': HRService._to_float(item.monthly_deduction),
+                'monthly_deduction': HRService._to_float(item.monthly_deduction),
+                'leaveType': item.leave_type,
+                'leave_type': item.leave_type,
+                'leaveStartDate': HRService._iso_date(item.leave_start_date),
+                'leave_start_date': HRService._iso_date(item.leave_start_date),
+                'leaveEndDate': HRService._iso_date(item.leave_end_date),
+                'leave_end_date': HRService._iso_date(item.leave_end_date),
+                'expectedReturnDate': HRService._iso_date(item.expected_return_date),
+                'expected_return_date': HRService._iso_date(item.expected_return_date),
+                'actualReturnDate': HRService._iso_date(item.actual_return_date),
+                'actual_return_date': HRService._iso_date(item.actual_return_date),
+            })
+        response = {
+            'run': {
+                'id': f'{run.payroll_year:04d}-{run.payroll_month:02d}',
+                'payrollYear': run.payroll_year,
+                'payrollMonth': run.payroll_month,
+                'farmId': run.farm_id,
+                'status': run.status,
+                'generatedAt': HRService._iso_datetime(run.generated_at),
+                'generatedBy': run.generated_by,
+                'finalizedAt': HRService._iso_datetime(run.finalized_at),
+                'paidAt': HRService._iso_datetime(run.paid_at),
+                'finalizedBy': run.finalized_by,
+                'paidBy': run.paid_by,
+                'staffCount': len(line_payload),
+                'totalGrossPay': float(totals['gross']),
+                'totalNetPay': float(totals['net']),
+                'totalLeaveDeductions': float(totals['leave']),
+                'totalOverduePenaltyDeductions': float(totals['overdue']),
+                'totalAdvanceDeductions': float(totals['advance']),
+                'totalDeductions': float(totals['deductions']),
+                'notes': run.notes,
+            },
+            'summary': {
+                'staff_count': len(line_payload),
+                'total_gross_pay': float(totals['gross']),
+                'total_net_pay': float(totals['net']),
+                'total_leave_deductions': float(totals['leave']),
+                'total_overdue_penalty_deductions': float(totals['overdue']),
+                'total_advance_deductions': float(totals['advance']),
+                'total_deductions': float(totals['deductions']),
+            },
+        }
+        if include_lines:
+            response['lineItems'] = line_payload
+        return response
 
     @staticmethod
     def register_employee(tenant_id: int, data: dict):
@@ -653,86 +770,80 @@ class HRService:
             return jsonify({'error': 'payroll_year and payroll_month must be integers.'}), 400
 
         employees = EmployeeRepository.list_by_tenant(tenant_id)
+        if not employees:
+            return jsonify({'error': 'Cannot generate payroll because no employees are registered.'}), 409
+
+        existing = PayrollRepository.get_run(
+            tenant_id=tenant_id, payroll_year=payroll_year, payroll_month=payroll_month,
+        )
+        if existing:
+            if existing.status != PayrollRunStatus.DRAFT or existing.line_items:
+                return jsonify({
+                    'message': 'Payroll run already exists.',
+                    'ledger_posted': existing.status in {PayrollRunStatus.FINALIZED, PayrollRunStatus.PAID},
+                    **HRService._serialize_payroll_run(existing),
+                }), 200
+            db.session.delete(existing)
+            db.session.flush()
+
         HRService._synchronize_employee_statuses(employees)
         line_items = [HRService._build_payroll_run_line_item(employee, payroll_year, payroll_month) for employee in employees]
-        total_gross = sum(Decimal(str(item['grossPay'])) for item in line_items)
-        total_net = sum(Decimal(str(item['netPay'])) for item in line_items)
-        total_leave_deductions = sum(Decimal(str(item['leaveDeduction'])) for item in line_items)
-        total_overdue_penalty_deductions = sum(Decimal(str(item['overduePenaltyDeduction'])) for item in line_items)
-        total_advance_deductions = sum(Decimal(str(item['advanceDeduction'])) for item in line_items)
-        total_deductions = total_leave_deductions + total_overdue_penalty_deductions + total_advance_deductions
-
-        generated_at = datetime.now(timezone.utc)
-        response = {
-            'message': 'Payroll run generated successfully.',
-            'run': {
-                'id': f'{payroll_year:04d}-{payroll_month:02d}',
-                'payrollYear': payroll_year,
-                'payrollMonth': payroll_month,
-                'generatedAt': generated_at.isoformat(),
-                'generatedBy': generated_by,
-                'farmId': farm_id,
-                'staffCount': len(line_items),
-                'totalGrossPay': float(total_gross),
-                'totalNetPay': float(total_net),
-                'totalLeaveDeductions': float(total_leave_deductions),
-                'totalOverduePenaltyDeductions': float(total_overdue_penalty_deductions),
-                'totalAdvanceDeductions': float(total_advance_deductions),
-                'totalDeductions': float(total_deductions),
-                'metadata': {
-                    'tenantId': tenant_id,
-                    'payrollYear': payroll_year,
-                    'payrollMonth': payroll_month,
-                    'calculationSource': 'server',
-                },
-            },
-            'summary': {
-                'staff_count': len(line_items),
-                'total_gross_pay': float(total_gross),
-                'total_net_pay': float(total_net),
-                'total_leave_deductions': float(total_leave_deductions),
-                'total_overdue_penalty_deductions': float(total_overdue_penalty_deductions),
-                'total_advance_deductions': float(total_advance_deductions),
-                'total_deductions': float(total_deductions),
-            },
-            'lineItems': line_items,
-        }
-        return jsonify(response), 200
+        totals = HRService._payroll_run_totals(line_items)
+        try:
+            run = PayrollRun(
+                tenant_id=tenant_id,
+                farm_id=farm_id,
+                payroll_year=payroll_year,
+                payroll_month=payroll_month,
+                generated_by=int(generated_by) if generated_by is not None else None,
+                total_gross_pay=totals['gross'],
+                total_net_pay=totals['net'],
+                total_deductions=totals['deductions'],
+                notes=data.get('notes'),
+            )
+            db.session.add(run)
+            db.session.flush()
+            for item in line_items:
+                db.session.add(PayrollRunLineItem(
+                    payroll_run_id=run.id,
+                    staff_id=item['staff_id'],
+                    staff_name=item['staff_name'],
+                    status=item['status'],
+                    base_salary=item['base_salary'],
+                    approved_leave_days=item['approved_leave_days'],
+                    overdue_penalty_days=item['overdue_penalty_days'],
+                    leave_deduction=item['leave_deduction'],
+                    overdue_penalty_deduction=item['overdue_penalty_deduction'],
+                    advance_deduction=item['advance_deduction'],
+                    gross_pay=item['gross_pay'],
+                    net_pay=item['net_pay'],
+                    loan_balance=item['loan_balance'],
+                    monthly_deduction=item['monthly_deduction'],
+                    leave_type=item['leave_type'],
+                    leave_start_date=HRService._parse_date(item['leave_start_date'], 'leave_start_date'),
+                    leave_end_date=HRService._parse_date(item['leave_end_date'], 'leave_end_date'),
+                    expected_return_date=HRService._parse_date(item['expected_return_date'], 'expected_return_date'),
+                    actual_return_date=HRService._parse_date(item['actual_return_date'], 'actual_return_date'),
+                ))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+            existing = PayrollRepository.get_run(
+                tenant_id=tenant_id, payroll_year=payroll_year, payroll_month=payroll_month,
+            )
+            if existing:
+                return jsonify({'message': 'Payroll run already exists.', **HRService._serialize_payroll_run(existing)}), 200
+            raise
+        return jsonify({
+            'message': 'Payroll draft generated successfully. Finalize it to post the labor expense.',
+            'ledger_posted': False,
+            **HRService._serialize_payroll_run(run, include_lines=True),
+        }), 200
 
     @staticmethod
     def list_payroll_runs(tenant_id: int):
-        """
-        Lists aggregated payroll runs, grouped by year and month.
-        This query is more efficient as it performs aggregation in the database.
-        """
-        runs = (
-            db.session.query(
-                PayrollRepository.MODEL.payroll_year,
-                PayrollRepository.MODEL.payroll_month,
-                func.count(PayrollRepository.MODEL.id).label('staff_count'),
-                func.sum(PayrollRepository.MODEL.base_salary + PayrollRepository.MODEL.bonuses).label('total_gross_pay'),
-                func.sum(PayrollRepository.MODEL.net_pay).label('total_net_pay'),
-                func.max(PayrollRepository.MODEL.created_at).label('generated_at')
-            )
-            .filter(PayrollRepository.MODEL.tenant_id == tenant_id)
-            .group_by(PayrollRepository.MODEL.payroll_year, PayrollRepository.MODEL.payroll_month)
-            .order_by(PayrollRepository.MODEL.payroll_year.desc(), PayrollRepository.MODEL.payroll_month.desc())
-            .all()
-        )
-
-        payload = [
-            {
-                'id': f'{run.payroll_year:04d}-{run.payroll_month:02d}',
-                'payrollYear': run.payroll_year,
-                'payrollMonth': run.payroll_month,
-                'staffCount': run.staff_count,
-                'totalGrossPay': HRService._to_float(run.total_gross_pay),
-                'totalNetPay': HRService._to_float(run.total_net_pay),
-                'generatedAt': HRService._iso_datetime(run.generated_at),
-            }
-            for run in runs
-        ]
-        return jsonify(payload), 200
+        runs = PayrollRepository.list_runs(tenant_id=tenant_id)
+        return jsonify([HRService._serialize_payroll_run(run, include_lines=False)['run'] for run in runs]), 200
 
     @staticmethod
     def get_payroll_run(tenant_id: int, run_id: str):
@@ -743,38 +854,95 @@ class HRService:
         except (ValueError, TypeError):
             return jsonify({'error': 'run_id must be in YYYY-MM format.'}), 400
 
-        employees = EmployeeRepository.list_by_tenant(tenant_id)
-        HRService._synchronize_employee_statuses(employees)
-        line_items = [HRService._build_payroll_run_line_item(employee, payroll_year, payroll_month) for employee in employees]
-        total_gross = sum(Decimal(str(item['grossPay'])) for item in line_items)
-        total_net = sum(Decimal(str(item['netPay'])) for item in line_items)
-        total_leave_deductions = sum(Decimal(str(item['leaveDeduction'])) for item in line_items)
-        total_overdue_penalty_deductions = sum(Decimal(str(item['overduePenaltyDeduction'])) for item in line_items)
-        total_advance_deductions = sum(Decimal(str(item['advanceDeduction'])) for item in line_items)
-        total_deductions = total_leave_deductions + total_overdue_penalty_deductions + total_advance_deductions
+        run = PayrollRepository.get_run(
+            tenant_id=tenant_id, payroll_year=payroll_year, payroll_month=payroll_month,
+        )
+        if not run:
+            return jsonify({'error': 'Payroll run not found.'}), 404
+        return jsonify(HRService._serialize_payroll_run(run)), 200
 
-        payload = {
-            'run': {
-                'id': f'{payroll_year:04d}-{payroll_month:02d}',
-                'payrollYear': payroll_year,
-                'payrollMonth': payroll_month,
-                'staffCount': len(line_items),
-                'totalGrossPay': float(total_gross),
-                'totalNetPay': float(total_net),
-                'totalLeaveDeductions': float(total_leave_deductions),
-                'totalOverduePenaltyDeductions': float(total_overdue_penalty_deductions),
-                'totalAdvanceDeductions': float(total_advance_deductions),
-                'totalDeductions': float(total_deductions),
-            },
-            'summary': {
-                'staff_count': len(line_items),
-                'total_gross_pay': float(total_gross),
-                'total_net_pay': float(total_net),
-                'total_leave_deductions': float(total_leave_deductions),
-                'total_overdue_penalty_deductions': float(total_overdue_penalty_deductions),
-                'total_advance_deductions': float(total_advance_deductions),
-                'total_deductions': float(total_deductions),
-            },
-            'lineItems': line_items,
-        }
-        return jsonify(payload), 200
+    @staticmethod
+    def finalize_payroll_run(tenant_id: int, run_id: str, *, actor_id=None, farm_id=None):
+        run, error = HRService._get_run_by_public_id(tenant_id, run_id, for_update=True)
+        if error:
+            return error
+        if run.status == PayrollRunStatus.FINALIZED or run.status == PayrollRunStatus.PAID:
+            ledger_transaction = HRService._ensure_payroll_ledger_expense(
+                run,
+                actor_id=actor_id,
+                farm_id=farm_id,
+            )
+            db.session.commit()
+            return jsonify({
+                'message': 'Payroll already finalized; labor expense reconciled.',
+                'ledger_posted': ledger_transaction is not None,
+                'ledger_transaction_id': ledger_transaction.id if ledger_transaction else None,
+                **HRService._serialize_payroll_run(run),
+            }), 200
+        if run.status != PayrollRunStatus.DRAFT:
+            return jsonify({'error': f'Payroll run cannot be finalized from {run.status}.'}), 409
+        if not run.line_items:
+            return jsonify({'error': 'Cannot finalize a payroll run with no employees.'}), 409
+        run.status = PayrollRunStatus.FINALIZED
+        run.finalized_at = datetime.now(timezone.utc)
+        run.finalized_by = int(actor_id) if actor_id is not None else None
+        ledger_transaction = HRService._ensure_payroll_ledger_expense(
+            run,
+            actor_id=actor_id,
+            farm_id=farm_id,
+        )
+        db.session.commit()
+        return jsonify({
+            'message': 'Payroll finalized and labor expense posted.',
+            'ledger_posted': ledger_transaction is not None,
+            'ledger_transaction_id': ledger_transaction.id if ledger_transaction else None,
+            **HRService._serialize_payroll_run(run),
+        }), 200
+
+    @staticmethod
+    def pay_payroll_run(tenant_id: int, run_id: str, *, actor_id=None, payment_reference=None, farm_id=None):
+        run, error = HRService._get_run_by_public_id(tenant_id, run_id, for_update=True)
+        if error:
+            return error
+        if run.status == PayrollRunStatus.PAID:
+            HRService._ensure_payroll_ledger_expense(run, actor_id=actor_id, farm_id=farm_id)
+            db.session.commit()
+            return jsonify(HRService._serialize_payroll_run(run)), 200
+        if run.status != PayrollRunStatus.FINALIZED:
+            return jsonify({'error': 'Payroll run must be finalized before payment.'}), 409
+        HRService._ensure_payroll_ledger_expense(run, actor_id=actor_id, farm_id=farm_id)
+        for item in run.line_items:
+            employee = EmployeeRepository.get_by_id_for_tenant(item.staff_id, tenant_id)
+            if employee and item.advance_deduction:
+                employee.loan_balance = max(HRService._to_decimal(employee.loan_balance) - HRService._to_decimal(item.advance_deduction), Decimal('0'))
+        run.status = PayrollRunStatus.PAID
+        run.paid_at = datetime.now(timezone.utc)
+        run.paid_by = int(actor_id) if actor_id is not None else None
+        if payment_reference:
+            run.notes = f'{run.notes or ""}\nPayment reference: {payment_reference}'.strip()
+        db.session.commit()
+        return jsonify(HRService._serialize_payroll_run(run)), 200
+
+    @staticmethod
+    def _ensure_payroll_ledger_expense(run, *, actor_id=None, farm_id=None):
+        if run.farm_id is None:
+            run.farm_id = farm_id
+        if run.farm_id is None:
+            return None
+        if run.finalized_at is None:
+            run.finalized_at = datetime.now(timezone.utc)
+        return PayrollLedgerService.post_expense(run, actor_id=actor_id)
+
+    @staticmethod
+    def _get_run_by_public_id(tenant_id: int, run_id: str, *, for_update=False):
+        try:
+            payroll_year_str, payroll_month_str = str(run_id).split('-', 1)
+            payroll_year, payroll_month = int(payroll_year_str), int(payroll_month_str)
+        except (ValueError, TypeError):
+            return None, (jsonify({'error': 'run_id must be in YYYY-MM format.'}), 400)
+        run = PayrollRepository.get_run(
+            tenant_id=tenant_id, payroll_year=payroll_year, payroll_month=payroll_month, for_update=for_update,
+        )
+        if not run:
+            return None, (jsonify({'error': 'Payroll run not found.'}), 404)
+        return run, None

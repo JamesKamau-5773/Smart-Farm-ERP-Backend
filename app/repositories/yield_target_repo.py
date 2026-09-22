@@ -57,16 +57,27 @@ class YieldTargetRepository:
     def get_all_for_lactating_cows(tenant_id: int | None = None) -> list[AnimalYieldTarget]:
         """Fetch yield targets only for cows currently in LACTATING status."""
         resolved_tenant_id = _resolve_tenant_id(tenant_id)
+
+        # `Cow.current_status` is a plain @property (derived via CowStatusService, not a
+        # DB column), so it cannot be compared in a SQL filter — `Cow.current_status == X`
+        # silently evaluates to a Python bool and gets coerced into `WHERE false`. Filter
+        # on the real `is_active` column in SQL, then apply the derived status in Python.
+        from app.services.cow_status_service import CowStatusService
+
         query = db.session.query(AnimalYieldTarget).join(
             Cow, AnimalYieldTarget.animal_id == Cow.id
         ).filter(
             AnimalYieldTarget.status == 'Active',
-            Cow.current_status == CowStatus.LACTATING,
             Cow.is_active == True
         )
         if resolved_tenant_id:
             query = query.filter(AnimalYieldTarget.tenant_id == resolved_tenant_id)
-        return query.all()
+        candidates = query.all()
+        return [
+            target for target in candidates
+            if CowStatusService.compute_current_status(target.cow) == CowStatus.LACTATING
+        ]
+
 
     @staticmethod
     def create(

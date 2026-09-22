@@ -7,6 +7,8 @@ from app.models.user import Role
 from app.services.nutrition_service import NutritionService
 from app.services.animal_yield_target_service import AnimalYieldTargetService
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
+from app.services.group_feeding_plan_service import GroupFeedingPlanService
+from app.services.feeding_group_recipe_policy_service import FeedingGroupRecipePolicyService
 from app.services.recipe_formulation_service import RecipeFormulationService, FormulationInfeasibleError
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
@@ -149,6 +151,41 @@ def _parse_recipe_type(value, *, default=FeedMixerPolicyService.MAIN_MEAL):
     return recipe_type
 
 
+def _parse_feeding_group(value, *, default=None):
+    if value is None:
+        return default
+    return FeedingGroupRecipePolicyService.normalize_feeding_group(value)
+
+
+def _parse_recipe_measurement_settings(data: dict, *, recipe_type: str, current=None) -> dict:
+    quantity_basis = data.get(
+        'quantity_basis',
+        getattr(current, 'quantity_basis', None) or (
+            'concentrate' if recipe_type == FeedMixerPolicyService.DAIRY_MEAL else 'total_ration'
+        ),
+    )
+    if quantity_basis not in {'total_ration', 'concentrate'}:
+        raise ValueError('quantity_basis must be total_ration or concentrate.')
+
+    settings = {'quantity_basis': quantity_basis}
+    for field in ('concentrate_kg_per_head_day', 'bulk_density_kg_per_litre', 'bucket_volume_litres', 'scoop_weight_kg'):
+        raw_value = data.get(field, getattr(current, field, None))
+        if raw_value in (None, ''):
+            settings[field] = None
+            continue
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f'{field} must be a positive number.')
+        if value <= 0:
+            raise ValueError(f'{field} must be a positive number.')
+        settings[field] = value
+
+    if bool(settings['bulk_density_kg_per_litre']) != bool(settings['bucket_volume_litres']):
+        raise ValueError('bulk_density_kg_per_litre and bucket_volume_litres must be provided together.')
+    return settings
+
+
 def _validate_recipe_type_membership(*, tenant_id: int, recipe_type: str, ingredient_ids: list[int]):
     _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
         tenant_id=tenant_id,
@@ -162,6 +199,20 @@ def _validate_recipe_type_membership(*, tenant_id: int, recipe_type: str, ingred
             f'Ingredient(s) not eligible for recipe_type {recipe_type}: {ineligible_ids}. '
             'Use mixer eligibility from backend inventory payloads.'
         )
+
+
+def _resolve_recipe_type(*, tenant_id: int, ingredient_ids: list[int], feeding_group: str | None, requested_recipe_type):
+    inferred_recipe_type = None
+    if requested_recipe_type in (None, ''):
+        inferred_recipe_type = FeedMixerPolicyService.infer_unique_recipe_type(
+            tenant_id=tenant_id,
+            ingredient_ids=ingredient_ids,
+        )
+
+    return FeedingGroupRecipePolicyService.resolve_recipe_type(
+        feeding_group=feeding_group,
+        requested_recipe_type=requested_recipe_type or inferred_recipe_type,
+    )
 
 
 @nutrition_bp.route('/batches', methods=['POST'])
@@ -180,6 +231,17 @@ def process_and_save_batch():
 
     data = request.get_json() or {}
     return NutritionService.process_and_save_batch(tenant_id=tenant_id, user_id=user_id, data=data)
+
+
+@nutrition_bp.route('/batches/<int:batch_id>/consumption-status', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def get_batch_consumption_status(batch_id):
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    return NutritionService.get_batch_consumption_status(tenant_id=tenant_id, batch_id=batch_id)
 
 
 @nutrition_bp.route('/batches/<int:batch_id>/consumption-events', methods=['POST'])
@@ -229,6 +291,17 @@ def active_batch_roi_trend_weekly():
     return NutritionService.get_weekly_active_batch_roi_trend(tenant_id=tenant_id, saleable_only=saleable_only)
 
 
+@nutrition_bp.route('/analytics/feed-cost-by-group', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def feed_cost_by_group():
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    return NutritionService.get_feed_cost_by_group(tenant_id=tenant_id)
+
+
 @nutrition_bp.route('/dashboard', methods=['GET'])
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
@@ -256,6 +329,7 @@ def list_recipes():
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
     recipes = FeedRecipe.query.filter_by(tenant_id=tenant_id).order_by(FeedRecipe.id.desc()).all()
+    performance = NutritionService.get_recipe_performance(tenant_id=tenant_id)
     return jsonify([
         {
             'id': recipe.id,
@@ -266,7 +340,14 @@ def list_recipes():
                 getattr(recipe, 'recipe_type', None),
                 default=FeedMixerPolicyService.MAIN_MEAL,
             ),
+            'feeding_group': getattr(recipe, 'feeding_group', None),
+            'quantity_basis': recipe.quantity_basis,
+            'concentrate_kg_per_head_day': float(recipe.concentrate_kg_per_head_day) if recipe.concentrate_kg_per_head_day is not None else None,
+            'bulk_density_kg_per_litre': float(recipe.bulk_density_kg_per_litre) if recipe.bulk_density_kg_per_litre is not None else None,
+            'bucket_volume_litres': float(recipe.bucket_volume_litres) if recipe.bucket_volume_litres is not None else None,
+            'scoop_weight_kg': float(recipe.scoop_weight_kg) if recipe.scoop_weight_kg is not None else None,
             'is_active': recipe.is_active,
+            'performance': performance.get(recipe.id),
             'ingredients': [
                 {
                     'ingredient_id': ri.inventory_item_id,
@@ -303,22 +384,34 @@ def create_recipe():
     recipe_name = (data.get('name') or data.get('recipe_name') or '').strip()
     if not recipe_name:
         return jsonify({'error': 'name is required.'}), 400
+    payload_ingredients = data.get('ingredients', [])
+    ingredient_ids = [
+        ingredient.get('inventory_item_id')
+        for ingredient in payload_ingredients
+        if ingredient.get('inventory_item_id') is not None
+    ]
     try:
-        recipe_type = _parse_recipe_type(data.get('recipe_type'), default=None)
+        feeding_group = _parse_feeding_group(data.get('feeding_group'), default=None)
+        recipe_type = _resolve_recipe_type(
+            tenant_id=tenant_id,
+            ingredient_ids=ingredient_ids,
+            feeding_group=feeding_group,
+            requested_recipe_type=data.get('recipe_type'),
+        )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
     try:
-        payload_ingredients = data.get('ingredients', [])
-        ingredient_ids = [ingredient.get('inventory_item_id') for ingredient in payload_ingredients if ingredient.get('inventory_item_id') is not None]
-        recipe_type_for_save = recipe_type or FeedMixerPolicyService.MAIN_MEAL
-        if recipe_type is not None:
-            _validate_recipe_type_membership(tenant_id=tenant_id, recipe_type=recipe_type, ingredient_ids=ingredient_ids)
+        recipe_type_for_save = recipe_type
+        _validate_recipe_type_membership(tenant_id=tenant_id, recipe_type=recipe_type_for_save, ingredient_ids=ingredient_ids)
+        measurement_settings = _parse_recipe_measurement_settings(data, recipe_type=recipe_type_for_save)
 
         recipe = FeedRecipe(
             tenant_id=tenant_id,
             recipe_name=recipe_name,
             target_protein_percentage=data.get('target_protein_percentage', 0),
             recipe_type=recipe_type_for_save,
+            feeding_group=feeding_group,
+            **measurement_settings,
             is_active=bool(data.get('is_active', True)),
         )
         db.session.add(recipe)
@@ -335,6 +428,11 @@ def create_recipe():
             db.session.add(RecipeIngredient(tenant_id=tenant_id, recipe_id=recipe.id, inventory_item_id=ingredient['inventory_item_id'], inclusion_percentage=ingredient['inclusion_percentage']))
         db.session.commit()
         return jsonify({'id': recipe.id, 'name': recipe.recipe_name}), 201
+    except ValueError as exc:
+        db.session.rollback()
+        message = str(exc)
+        status = 404 if message.startswith('Ingredient(s) not found for tenant:') else 400
+        return jsonify({'error': message}), status
     except IntegrityError:
         db.session.rollback()
         return jsonify({'error': 'Recipe already exists for this tenant.'}), 409
@@ -362,10 +460,40 @@ def update_recipe(recipe_id):
         recipe.recipe_name = (data.get('name') or '').strip() or recipe.recipe_name
     if 'target_protein_percentage' in data:
         recipe.target_protein_percentage = data.get('target_protein_percentage')
+    if 'feeding_group' in data:
+        try:
+            recipe.feeding_group = _parse_feeding_group(data.get('feeding_group'), default=None)
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+    if 'recipe_type' in data or 'feeding_group' in data:
+        try:
+            recipe.recipe_type = FeedingGroupRecipePolicyService.resolve_recipe_type(
+                feeding_group=recipe.feeding_group,
+                requested_recipe_type=data.get('recipe_type', recipe.recipe_type),
+            )
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
     if 'is_active' in data:
         recipe.is_active = bool(data.get('is_active'))
+    try:
+        measurement_settings = _parse_recipe_measurement_settings(data, recipe_type=recipe.recipe_type, current=recipe)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    for field, value in measurement_settings.items():
+        setattr(recipe, field, value)
     db.session.commit()
-    return jsonify({'id': recipe.id, 'name': recipe.recipe_name, 'is_active': recipe.is_active}), 200
+    return jsonify({
+        'id': recipe.id,
+        'name': recipe.recipe_name,
+        'is_active': recipe.is_active,
+        'feeding_group': recipe.feeding_group,
+        'recipe_type': recipe.recipe_type,
+        'quantity_basis': recipe.quantity_basis,
+        'concentrate_kg_per_head_day': float(recipe.concentrate_kg_per_head_day) if recipe.concentrate_kg_per_head_day is not None else None,
+        'bulk_density_kg_per_litre': float(recipe.bulk_density_kg_per_litre) if recipe.bulk_density_kg_per_litre is not None else None,
+        'bucket_volume_litres': float(recipe.bucket_volume_litres) if recipe.bucket_volume_litres is not None else None,
+        'scoop_weight_kg': float(recipe.scoop_weight_kg) if recipe.scoop_weight_kg is not None else None,
+    }), 200
 
 
 @nutrition_alias_bp.route('/api/feed/recipes/<int:recipe_id>', methods=['PATCH'])
@@ -486,12 +614,12 @@ def feed_costing_alias():
 @role_required(Role.FARMER, Role.FARM_HAND)
 def set_cow_yield_target(cow_id):
     """Set or update milk production target for a specific cow.
-    
+
     Request body:
     {
         "target_liters": 2.5
     }
-    
+
     Response 201:
     {
         "target_id": int,
@@ -537,7 +665,7 @@ def set_cow_yield_target_alias(cow_id):
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def get_cow_yield_target(cow_id):
     """Get milk production target for a specific cow.
-    
+
     Response 200:
     {
         "target_id": int,
@@ -578,7 +706,7 @@ def get_cow_yield_target_alias(cow_id):
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def list_herd_yield_targets():
     """List all active yield targets for the herd.
-    
+
     Response 200:
     {
         "total_cows": int,
@@ -621,11 +749,11 @@ def list_herd_yield_targets_alias():
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def calculate_herd_feeding_plan():
     """Calculate aggregated feeding plan based on per-cow yield targets.
-    
+
     Query parameters (optional):
         baseline_herd_meal_kg: float (default 4.0)
         milking_frequency: int (2, 3, or 4) - leave null for auto
-    
+
     Response 200:
     {
         "total_herd_target_liters": float,
@@ -701,7 +829,7 @@ def calculate_herd_feeding_plan_alias():
 def formulate_recipe_with_protein_target():
     """
     Calculate recipe with protein targeting and suggest ingredient adjustments.
-    
+
     Body:
     {
         "batch_size_kg": number,
@@ -709,10 +837,9 @@ def formulate_recipe_with_protein_target():
         "ingredients": [
             {"ingredient_id": int, "percentage": number},
             ...
-        ],
-        "yield_target_id": int (optional, for linking to Milk Lab)
+        ]
     }
-    
+
     Response 200:
     {
         "current_protein_percent": number,
@@ -750,7 +877,7 @@ def formulate_recipe_with_protein_target():
         return jsonify({'error': 'batch_size_kg and target_protein_percent must be valid numbers.'}), 400
     ingredients = _normalize_recipe_ingredients(data.get('ingredients', []))
     recipe_type_raw = data.get('recipe_type')
-    yield_target_id = data.get('yield_target_id')
+    feeding_group_raw = data.get('feeding_group')
 
     # Validation
     if not math.isfinite(batch_size_kg) or batch_size_kg <= 0:
@@ -773,14 +900,20 @@ def formulate_recipe_with_protein_target():
         return jsonify({'error': 'Each ingredient may only appear once in a formulation.'}), 400
 
     try:
-        recipe_type = _parse_recipe_type(recipe_type_raw, default=None)
-        if recipe_type is not None:
-            ingredient_ids = [int(ing['ingredient_id']) for ing in ingredients]
-            _validate_recipe_type_membership(
-                tenant_id=tenant_id,
-                recipe_type=recipe_type,
-                ingredient_ids=ingredient_ids,
-            )
+        feeding_group = _parse_feeding_group(feeding_group_raw, default=None)
+        recipe_type = _resolve_recipe_type(
+            tenant_id=tenant_id,
+            ingredient_ids=[int(ing['ingredient_id']) for ing in ingredients],
+            feeding_group=feeding_group,
+            requested_recipe_type=recipe_type_raw,
+        )
+        ingredient_ids = [int(ing['ingredient_id']) for ing in ingredients]
+        _validate_recipe_type_membership(
+            tenant_id=tenant_id,
+            recipe_type=recipe_type,
+            ingredient_ids=ingredient_ids,
+        )
+        measurement_settings = _parse_recipe_measurement_settings(data, recipe_type=recipe_type)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -791,6 +924,7 @@ def formulate_recipe_with_protein_target():
             base_ingredients=ingredients,
             target_protein_percent=target_protein_percent,
             recipe_type=recipe_type,
+            feeding_group=feeding_group,
         )
         return jsonify(adjustments), 200
     except FormulationInfeasibleError as e:
@@ -801,7 +935,16 @@ def formulate_recipe_with_protein_target():
             payload['minimum_achievable_protein_percent'] = round(float(e.minimum_achievable_protein_percent), 4)
         if e.maximum_achievable_protein_percent is not None:
             payload['maximum_achievable_protein_percent'] = round(float(e.maximum_achievable_protein_percent), 4)
-        if (
+        if getattr(e, 'limiting_ingredients', None):
+            payload['limiting_ingredients'] = e.limiting_ingredients
+        if getattr(e, 'max_feasible_mix', None):
+            payload['max_feasible_mix'] = e.max_feasible_mix
+            payload['hint'] = (
+                'Available stock limits this batch. The max_feasible_mix shows the '
+                'best mix possible with current stock; reduce the batch size or '
+                'restock the limiting items to reach the protein goal.'
+            )
+        elif (
             e.minimum_achievable_protein_percent is not None
             and e.maximum_achievable_protein_percent is not None
         ):
@@ -827,7 +970,7 @@ def formulate_recipe_with_protein_target():
 def calculate_recipe_nutrition():
     """
     Calculate current nutrition profile of a recipe.
-    
+
     Body:
     {
         "batch_size_kg": number,
@@ -836,7 +979,7 @@ def calculate_recipe_nutrition():
             ...
         ]
     }
-    
+
     Response 200:
     {
         "batch_size_kg": number,
@@ -868,6 +1011,7 @@ def calculate_recipe_nutrition():
         nutrition = RecipeFormulationService.calculate_batch_protein_content(
             batch_size_kg=float(batch_size_kg),
             ingredients_with_percentages=ingredients,
+            tenant_id=tenant_id,
         )
         return jsonify(nutrition), 200
     except ValueError as e:
@@ -883,7 +1027,7 @@ def auto_save_recipe():
     """
     Save a formulated recipe to the database and mark as adopted.
     This automatically adopts the recipe for the herd.
-    
+
     Body:
     {
         "recipe_name": str,
@@ -892,10 +1036,9 @@ def auto_save_recipe():
         "adjusted_ingredients": [
             {"ingredient_id": int, "percentage": number},
             ...
-        ],
-        "yield_target_id": int (optional, for linking to Milk Lab)
+        ]
     }
-    
+
     Response 201:
     {
         "recipe_id": int,
@@ -919,7 +1062,7 @@ def auto_save_recipe():
     target_protein_percent = data.get('target_protein_percent')
     adjusted_ingredients = _normalize_recipe_ingredients(data.get('adjusted_ingredients', []))
     recipe_type_raw = data.get('recipe_type')
-    yield_target_id = data.get('yield_target_id')
+    feeding_group_raw = data.get('feeding_group')
 
     # Validation
     if not recipe_name or recipe_name.strip() == '':
@@ -936,14 +1079,19 @@ def auto_save_recipe():
         return jsonify({'error': 'Each ingredient requires percentage as a number.'}), 400
 
     try:
-        recipe_type = _parse_recipe_type(recipe_type_raw, default=None)
-        if recipe_type is not None:
-            ingredient_ids = [int(ing['ingredient_id']) for ing in adjusted_ingredients]
-            _validate_recipe_type_membership(
-                tenant_id=tenant_id,
-                recipe_type=recipe_type,
-                ingredient_ids=ingredient_ids,
-            )
+        feeding_group = _parse_feeding_group(feeding_group_raw, default=None)
+        recipe_type = _resolve_recipe_type(
+            tenant_id=tenant_id,
+            ingredient_ids=[int(ing['ingredient_id']) for ing in adjusted_ingredients],
+            feeding_group=feeding_group,
+            requested_recipe_type=recipe_type_raw,
+        )
+        ingredient_ids = [int(ing['ingredient_id']) for ing in adjusted_ingredients]
+        _validate_recipe_type_membership(
+            tenant_id=tenant_id,
+            recipe_type=recipe_type,
+            ingredient_ids=ingredient_ids,
+        )
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -955,8 +1103,9 @@ def auto_save_recipe():
             adjusted_ingredients=adjusted_ingredients,
             target_protein_percent=float(target_protein_percent),
             recipe_type=recipe_type,
+            feeding_group=feeding_group,
+            measurement_settings=measurement_settings,
             user_id=user_id,
-            yield_target_id=yield_target_id,
         )
         return jsonify(result), 201
     except ValueError as e:
@@ -972,11 +1121,11 @@ def get_suggested_feed_mix():
     """
     Get suggested feed mix based on Milk Lab yield targets.
     Returns pre-calculated ingredient mix and protein target from herd feeding plan.
-    
+
     Query Parameters:
-    - yield_target_id: int (optional, for specific yield target)
-    - batch_size_kg: number (optional, default 500)
-    
+    - batch_size_kg: number (optional; defaults to the herd's computed daily
+      meal requirement from the feeding plan, or 500 when no plan exists)
+
     Response 200:
     {
         "herd_total_target_liters": number,
@@ -998,19 +1147,24 @@ def get_suggested_feed_mix():
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
-    batch_size_kg = request.args.get('batch_size_kg', 500, type=float)
-
     try:
         from app.services.herd_feeding_plan_service import HerdFeedingPlanService
         herd_plan = HerdFeedingPlanService.calculate_from_cow_targets(tenant_id=tenant_id)
-        
+
+        # Default the batch to the herd's computed daily meal requirement so the
+        # mixer pre-fills the quantity the feeding plan actually calls for.
+        daily_need_kg = float(herd_plan.get('total_meal_needed_kg') or 0)
+        batch_size_kg = request.args.get('batch_size_kg', type=float)
+        if not batch_size_kg or batch_size_kg <= 0:
+            batch_size_kg = daily_need_kg if daily_need_kg > 0 else 500.0
+
         # For now, suggest a default protein target based on average of high-producing herds
         # In production, this could be calculated from actual feed recipe history
         suggested_protein_percent = 16.5  # Standard dairy meal protein
-        
+
         # Get all active ingredients for suggestions
         ingredients = InventoryItem.query.filter_by(tenant_id=tenant_id).all()
-        
+
         suggested_ingredients = []
         for ing in ingredients:
             if ing.protein_grams_per_kg > 0:  # Only include ingredients with protein data
@@ -1023,6 +1177,7 @@ def get_suggested_feed_mix():
 
         return jsonify({
             "herd_total_target_liters": herd_plan["herd_total_target_liters"],
+            "daily_meal_need_kg": daily_need_kg,
             "suggested_protein_percent": suggested_protein_percent,
             "batch_size_kg": batch_size_kg,
             "suggested_ingredients": suggested_ingredients,
@@ -1034,6 +1189,143 @@ def get_suggested_feed_mix():
         return jsonify({'error': str(e), 'message': 'No yield targets found. Please set up yield targets in Milk Lab first.'}), 400
     except Exception as e:
         return jsonify({'error': 'Failed to get suggested mix.', 'details': str(e)}), 500
+
+
+@nutrition_bp.route('/feeding-groups/profiles', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def list_feeding_group_profiles():
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    try:
+        return jsonify(GroupFeedingPlanService.get_profiles(tenant_id=tenant_id)), 200
+    except Exception as exc:
+        return jsonify({'error': 'Failed to fetch feeding group profiles.', 'details': str(exc)}), 500
+
+
+@nutrition_bp.route('/feeding-groups/profiles/<string:feeding_group>', methods=['PUT'])
+@jwt_required()
+@role_required(Role.FARMER)
+def upsert_feeding_group_profile(feeding_group):
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    data = request.get_json() or {}
+    try:
+        result = GroupFeedingPlanService.upsert_profile(
+            tenant_id=tenant_id,
+            feeding_group=feeding_group,
+            payload=data,
+        )
+        return jsonify(result), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': 'Failed to save feeding group profile.', 'details': str(exc)}), 500
+
+
+@nutrition_bp.route('/herd/feeding-plan/by-group', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def calculate_herd_feeding_plan_by_group():
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    try:
+        plan = GroupFeedingPlanService.calculate_plan_by_group(tenant_id=tenant_id)
+        return jsonify(plan), 200
+    except Exception as exc:
+        return jsonify({'error': 'Failed to calculate group feeding plan.', 'details': str(exc)}), 500
+
+
+@nutrition_bp.route('/feed-formulation/suggested-mix/by-group', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def get_suggested_mix_by_group():
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+
+    try:
+        feeding_group = _parse_feeding_group(request.args.get('feeding_group'), default=None)
+        if feeding_group is None:
+            return jsonify({'error': 'feeding_group is required.'}), 400
+
+        plan = GroupFeedingPlanService.calculate_plan_by_group(tenant_id=tenant_id)
+        group_row = next((row for row in plan['groups'] if row['feeding_group'] == feeding_group), None)
+        if group_row is None:
+            return jsonify({'error': f'No planning row found for feeding_group {feeding_group}.'}), 404
+
+        recipe_type = FeedingGroupRecipePolicyService.resolve_recipe_type(
+            feeding_group=feeding_group,
+            requested_recipe_type=request.args.get('recipe_type'),
+        )
+        batch_size_kg = request.args.get('batch_size_kg', type=float)
+        if not batch_size_kg or batch_size_kg <= 0:
+            batch_size_kg = float(group_row.get('daily_group_feed_kg') or 0) or 250.0
+
+        rows = InventoryRepository.list_by_tenant(tenant_id)
+        suggested_ingredients = []
+        for row in rows:
+            policy = FeedMixerPolicyService.resolve_item_policy(row)
+            if recipe_type not in policy['allowed_mixers']:
+                continue
+            if float(row.protein_grams_per_kg or 0) <= 0:
+                continue
+            suggested_ingredients.append({
+                'ingredient_id': row.id,
+                'name': row.name,
+                'percentage': float(policy['defaults'].get(recipe_type, 0)),
+                'protein_grams_per_kg': float(row.protein_grams_per_kg),
+                'allowed_mixers': policy['allowed_mixers'],
+            })
+
+        return jsonify({
+            'feeding_group': feeding_group,
+            'recipe_type': recipe_type,
+            'headcount': group_row['headcount'],
+            'daily_group_feed_kg': group_row['daily_group_feed_kg'],
+            'suggested_protein_percent': group_row['target_protein_percent'],
+            'batch_size_kg': batch_size_kg,
+            'suggested_ingredients': suggested_ingredients,
+            'message': f'Suggested mix for {feeding_group} cohort.',
+        }), 200
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'error': 'Failed to get suggested mix by feeding group.', 'details': str(exc)}), 500
+
+
+@nutrition_alias_bp.route('/api/v1/nutrition/feeding-groups/profiles', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def list_feeding_group_profiles_alias():
+    return list_feeding_group_profiles()
+
+
+@nutrition_alias_bp.route('/api/v1/nutrition/feeding-groups/profiles/<string:feeding_group>', methods=['PUT'])
+@jwt_required()
+@role_required(Role.FARMER)
+def upsert_feeding_group_profile_alias(feeding_group):
+    return upsert_feeding_group_profile(feeding_group)
+
+
+@nutrition_alias_bp.route('/api/v1/nutrition/herd/feeding-plan/by-group', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def calculate_herd_feeding_plan_by_group_alias():
+    return calculate_herd_feeding_plan_by_group()
+
+
+@nutrition_alias_bp.route('/api/v1/nutrition/feed-formulation/suggested-mix/by-group', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def get_suggested_mix_by_group_alias():
+    return get_suggested_mix_by_group()
 
 
 @nutrition_alias_bp.route('/api/v1/recipes/formulate', methods=['POST'])
@@ -1055,6 +1347,13 @@ def calculate_recipe_nutrition_alias():
 @role_required(Role.FARMER)
 def auto_save_recipe_alias():
     return auto_save_recipe()
+
+
+@nutrition_alias_bp.route('/api/v1/nutrition/batches/<int:batch_id>/consumption-status', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def get_batch_consumption_status_alias(batch_id):
+    return get_batch_consumption_status(batch_id)
 
 
 @nutrition_alias_bp.route('/api/v1/feed-formulation/suggested-mix', methods=['GET'])
@@ -1095,6 +1394,8 @@ def list_mixer_ingredients(recipe_type):
             },
             'currentStock': float(row.current_qty),
             'current_qty': float(row.current_qty),
+            'cost_per_kg': float(row.cost_per_kg),
+            'costPerKg': float(row.cost_per_kg),
             'allowed_mixers': policy['allowed_mixers'],
             'role': policy['role'],
             'defaults': {

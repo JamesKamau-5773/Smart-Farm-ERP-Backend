@@ -37,6 +37,8 @@ class Cow(db.Model):
     dam_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=True)
     sire_name = db.Column(db.String(100), nullable=True)
     genetic_score = db.Column(db.Integer, nullable=True)
+    birth_weight_kg = db.Column(db.Numeric(5, 2), nullable=True)
+    photo_url = db.Column(db.String(255), nullable=True)
 
     # --- Fields for Status Derivation ---
     # This should be updated after each successful calving event.
@@ -47,7 +49,10 @@ class Cow(db.Model):
 
     # Operational State
     is_hardlocked = db.Column(db.Boolean, default=False)
-    status = db.Column(db.String(50), default=CowStatus.LACTATING, nullable=False) # Renamed to 'status' to avoid conflict with derived property
+    # Defaults to Heifer (not Lactating) so newly registered animals that omit an
+    # explicit status don't silently masquerade as milking cows in status-derived
+    # views (herd counts, feeding-group planning) until someone reviews them.
+    status = db.Column(db.String(50), default=CowStatus.HEIFER, nullable=False) # Renamed to 'status' to avoid conflict with derived property
     is_active = db.Column(db.Boolean, default=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
@@ -61,6 +66,7 @@ class Cow(db.Model):
     lactation_cycles = db.relationship('LactationCycle', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
     medical_records = db.relationship('MedicalRecord', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
     breeding_logs = db.relationship('BreedingLog', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
+    heat_observations = db.relationship('HeatObservation', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
     vet_visits = db.relationship('VetVisit', backref=db.backref('livestock', lazy=True), lazy=True, cascade='all, delete-orphan')
     timeline_events = db.relationship(
         'AnimalTimelineEvent',
@@ -97,34 +103,29 @@ class Cow(db.Model):
 
     @property
     def current_status(self):
-        """
-        Derives the real-world status of the cow based on its life-cycle data.
-        This is the single source of truth for the cow's current state.
-        """
-        today = date.today()
+        from app.services.cow_status_service import CowStatusService
 
-        # Rule 1: Calves (age-based)
-        if self.age_in_months is not None and self.age_in_months < CALF_AGE_THRESHOLD_MONTHS:
-            return "Calf"
+        return CowStatusService.compute_current_status(self)
 
-        # Rule 2: Heifers and Bulls (post-calf, pre-reproduction)
-        # Assuming 'gender' is a column in Cow model, if not, it needs to be added.
-        # For now, I'll assume it exists or default to female logic.
-        if hasattr(self, 'gender') and self.gender == 'Male':
-            return "Bull"
-        if not self.last_calving_date:
-            return "Heifer"
+    @current_status.setter
+    def current_status(self, value):
+        self.status = value
 
-        # Rule 3: Dry period before calving (highest priority for a mature cow)
-        if self.due_date and (self.due_date - today).days <= DRY_OFF_PERIOD_DAYS:
-            return "Dry"
+    @property
+    def last_calved(self):
+        return self.last_calving_date
 
-        # Rule 4: Lactating (if recently calved and not in pre-calving dry period)
-        if self.last_calving_date and (today - self.last_calving_date).days <= LACTATION_PERIOD_DAYS:
-            return "Lactating"
+    @last_calved.setter
+    def last_calved(self, value):
+        self.last_calving_date = value
 
-        # Rule 5: Default to Dry if post-lactation and not pregnant again.
-        return "Dry"
+    @property
+    def gender(self):
+        return getattr(self, '_gender', 'Female')
+
+    @gender.setter
+    def gender(self, value):
+        self._gender = value
 
 def _resolve_default_tenant_id():
     if has_app_context():
@@ -199,7 +200,16 @@ class BreedingLog(db.Model):
     inventory_semen_id = db.Column(db.Integer, db.ForeignKey('semen_inventory.id'), nullable=True, index=True)
     external_sire_code = db.Column(db.String(100), nullable=True)
     provided_by = db.Column(db.String(20), nullable=False, default='FARM')
+    sire_pta_scores = db.Column(db.JSON, nullable=True)
     insemination_date = db.Column(db.Date, nullable=False)
+    insemination_time = db.Column(db.Time, nullable=True)
+    certificate_number = db.Column(db.String(50), nullable=True)
+    technician_name = db.Column(db.String(120), nullable=True)
+    owner_name = db.Column(db.String(120), nullable=True)
+    farm_location = db.Column(db.String(150), nullable=True)
+    service_fee = db.Column(db.Numeric(10, 2), nullable=True)
+    is_repeat_service = db.Column(db.Boolean, nullable=False, default=False)
+    certificate_image_url = db.Column(db.String(255), nullable=True)
     expected_calving_date = db.Column(db.Date, nullable=True)
     status = db.Column(db.String(20), nullable=False, default='Pending')
 
@@ -209,7 +219,7 @@ class BreedingLog(db.Model):
             name='ck_breeding_logs_provided_by_valid'
         ),
         db.CheckConstraint(
-            "status IN ('Pending', 'Pregnant', 'Failed')",
+            "status IN ('Pending', 'Pregnant', 'Failed', 'Calved')",
             name='ck_breeding_logs_status_valid'
         ),
     )
@@ -225,6 +235,31 @@ class BreedingLog(db.Model):
     @semen_id.setter
     def semen_id(self, value):
         self.inventory_semen_id = value
+
+
+class HeatObservation(db.Model):
+    __tablename__ = 'heat_observations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    cow_id = db.Column(db.Integer, db.ForeignKey('cows.id', ondelete='CASCADE'), nullable=False, index=True)
+    observed_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    intensity = db.Column(db.String(20), nullable=False, default='MEDIUM')
+    signs = db.Column(db.JSON, nullable=False, default=list)
+    notes = db.Column(db.Text, nullable=True)
+    next_window_start = db.Column(db.Date, nullable=False)
+    next_window_end = db.Column(db.Date, nullable=False)
+    breeding_log_id = db.Column(db.Integer, db.ForeignKey('breeding_logs.id', ondelete='SET NULL'), nullable=True, unique=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    breeding_log = db.relationship('BreedingLog', backref=db.backref('heat_observation', uselist=False, lazy=True))
+
+    __table_args__ = (
+        db.CheckConstraint("intensity IN ('LOW', 'MEDIUM', 'HIGH')", name='ck_heat_observations_intensity_valid'),
+        db.CheckConstraint('next_window_end >= next_window_start', name='ck_heat_observations_window_valid'),
+        db.Index('ix_heat_observations_tenant_cow_observed', 'tenant_id', 'cow_id', 'observed_at'),
+    )
 
 class LactationCycle(db.Model):
     __tablename__ = 'lactation_cycles'

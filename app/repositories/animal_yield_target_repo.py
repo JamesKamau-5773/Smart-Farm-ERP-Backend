@@ -50,18 +50,28 @@ class AnimalYieldTargetRepository:
 
     @staticmethod
     def get_active_targets_for_herd(tenant_id: int | None = None) -> list[AnimalYieldTarget]:
-        """Get all active yield targets for a tenant, with cow details."""
+        """Get all active yield targets for a tenant, restricted to currently-lactating cows."""
         resolved_tenant_id = _resolve_tenant_id(tenant_id)
         if resolved_tenant_id is None:
             return []
-        
-        return (
+
+        # `Cow.current_status` is a plain @property (derived via CowStatusService, not a
+        # DB column), so it cannot be compared in a SQL filter — `Cow.current_status == X`
+        # silently evaluates to a Python bool and gets coerced into `WHERE false`. Filter
+        # on the real `is_active` column in SQL, then apply the derived status in Python.
+        from app.services.cow_status_service import CowStatusService
+
+        candidates = (
             AnimalYieldTarget.query
             .filter_by(tenant_id=resolved_tenant_id, status='Active')
             .join(Cow, AnimalYieldTarget.animal_id == Cow.id)
-            .filter(Cow.is_active == True, Cow.current_status == CowStatus.LACTATING)
+            .filter(Cow.is_active == True)
             .all()
         )
+        return [
+            target for target in candidates
+            if CowStatusService.compute_current_status(target.cow) == CowStatus.LACTATING
+        ]
 
     @staticmethod
     def get_all_targets_for_herd(tenant_id: int | None = None) -> list[AnimalYieldTarget]:
@@ -81,7 +91,7 @@ class AnimalYieldTargetRepository:
         status: str = 'Active'
     ) -> AnimalYieldTarget:
         """Create or update yield target for a cow.
-        
+
         Raises:
             ValueError: If cow not found or doesn't belong to tenant
             Exception: If database operation fails
@@ -139,7 +149,7 @@ class AnimalYieldTargetRepository:
             target = AnimalYieldTarget.query.filter_by(id=target_id)
             if resolved_tenant_id is not None:
                 target = target.filter_by(tenant_id=resolved_tenant_id)
-            
+
             target = target.first()
             if not target:
                 return False
@@ -160,7 +170,7 @@ class AnimalYieldTargetRepository:
             target = AnimalYieldTarget.query.filter_by(id=target_id)
             if resolved_tenant_id is not None:
                 target = target.filter_by(tenant_id=resolved_tenant_id)
-            
+
             target = target.first()
             if not target:
                 return False

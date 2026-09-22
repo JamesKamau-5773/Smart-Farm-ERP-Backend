@@ -7,7 +7,7 @@ from sqlalchemy import func, case
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import db
-from app.models.livestock import BreedingLog, Cow, SemenInventory
+from app.models.livestock import BreedingLog, Cow, HeatObservation, SemenInventory
 from app.models.supply import MilkLog
 
 
@@ -74,6 +74,7 @@ class BreedingLogRepository:
         inventory_semen_id: Optional[int],
         external_sire_code: Optional[str],
         provided_by: str,
+        sire_pta_scores: Optional[dict] = None,
         insemination_date: date,
         expected_calving_date=None,
         status: str = "Pending",
@@ -85,12 +86,13 @@ class BreedingLogRepository:
                 inventory_semen_id=inventory_semen_id,
                 external_sire_code=external_sire_code,
                 provided_by=provided_by,
+                sire_pta_scores=sire_pta_scores,
                 insemination_date=insemination_date,
                 expected_calving_date=expected_calving_date,
                 status=status,
             )
             db.session.add(log)
-            db.session.commit()
+            db.session.flush()
             return log
         except SQLAlchemyError:
             db.session.rollback()
@@ -102,11 +104,25 @@ class BreedingLogRepository:
 
     @staticmethod
     def get_most_recent_pregnant_for_cow(cow_id: int, tenant_id: int) -> BreedingLog:
-        """Fetch the most recent breeding log with status='Pregnant' for a given dam cow."""
+        """Fetch the most recent breeding log with status='Pregnant' or 'Calved' for a given dam cow."""
+        return (
+            BreedingLog.query
+            .filter(
+                BreedingLog.cow_id == cow_id,
+                BreedingLog.tenant_id == tenant_id,
+                BreedingLog.status.in_(["Pregnant", "Calved"]),
+            )
+            .order_by(BreedingLog.insemination_date.desc(), BreedingLog.id.desc())
+            .first()
+        )
+
+    @staticmethod
+    def get_active_pregnancy_for_cow(cow_id: int, tenant_id: int) -> BreedingLog:
+        """Fetch the current active 'Pregnant' breeding log for a given cow."""
         return (
             BreedingLog.query
             .filter_by(cow_id=cow_id, tenant_id=tenant_id, status="Pregnant")
-            .order_by(BreedingLog.insemination_date.desc())
+            .order_by(BreedingLog.insemination_date.desc(), BreedingLog.id.desc())
             .first()
         )
 
@@ -129,6 +145,19 @@ class BreedingLogRepository:
             raise Exception("Failed, Database error while updating breeding log.")
 
 
+class HeatObservationRepository:
+    @staticmethod
+    def get_by_id_for_tenant(observation_id: int, tenant_id: int) -> HeatObservation:
+        return HeatObservation.query.filter_by(id=observation_id, tenant_id=tenant_id).first()
+
+    @staticmethod
+    def list_by_tenant(tenant_id: int, cow_id: int | None = None) -> list[HeatObservation]:
+        query = HeatObservation.query.filter_by(tenant_id=tenant_id)
+        if cow_id is not None:
+            query = query.filter_by(cow_id=cow_id)
+        return query.order_by(HeatObservation.observed_at.desc(), HeatObservation.id.desc()).all()
+
+
 class BreedingAnalyticsRepository:
     @staticmethod
     def bull_conception_summary(tenant_id: int) -> list:
@@ -138,7 +167,7 @@ class BreedingAnalyticsRepository:
                 SemenInventory.bull_name,
                 SemenInventory.straw_code,
                 func.count(BreedingLog.id).label("total_services"),
-                func.sum(case((BreedingLog.status == "Pregnant", 1), else_=0)).label("pregnant_cases"),
+                func.sum(case((BreedingLog.status.in_(["Pregnant", "Calved"]), 1), else_=0)).label("pregnant_cases"),
             )
             .join(BreedingLog, BreedingLog.inventory_semen_id == SemenInventory.id)
             .filter(SemenInventory.tenant_id == tenant_id, BreedingLog.tenant_id == tenant_id)
@@ -156,7 +185,7 @@ class BreedingAnalyticsRepository:
             .filter(
                 BreedingLog.tenant_id == tenant_id,
                 BreedingLog.inventory_semen_id == semen_id,
-                BreedingLog.status == "Pregnant",
+                BreedingLog.status.in_(["Pregnant", "Calved"]),
             )
             .scalar()
         )
@@ -170,7 +199,7 @@ class BreedingAnalyticsRepository:
             .filter(
                 BreedingLog.tenant_id == tenant_id,
                 BreedingLog.inventory_semen_id == semen_id,
-                BreedingLog.status == "Pregnant",
+                BreedingLog.status.in_(["Pregnant", "Calved"]),
                 MilkLog.butterfat_pct.isnot(None),
             )
             .scalar()

@@ -5,8 +5,7 @@ from datetime import datetime
 from flask import current_app, jsonify
 from requests.auth import HTTPBasicAuth
 from app.repositories.customer_repo import CustomerRepository
-from app.services.finance_service import FinanceService
-from app.models.finance import TransactionType, TransactionCategory
+from app.services.payment_service import PaymentService
 
 
 class MpesaService:
@@ -163,20 +162,17 @@ class MpesaService:
                 customer = CustomerRepository.get_by_phone(phone_number)
                 customer_id = customer.id if customer else None
 
-                # 2. Update the Customer's Ledger
-                if customer_id:
-                    CustomerRepository.credit_account(customer_id, amount)
+                if not customer:
+                    return False
 
-                # 3. Record the Revenue Transaction (System Admin defaults to user_id 1 for automated entries)
-                FinanceService.record_transaction(
-                    t_type=TransactionType.REVENUE,
-                    category=TransactionCategory.MILK_SALE,
-                    amount=amount,
-                    user_id=1,
-                    ip_address="127.0.0.1",  # System-initiated action
+                # Record the receipt and balance change in one database transaction.
+                PaymentService.record_customer_payment(
+                    tenant_id=customer.tenant_id,
                     customer_id=customer_id,
-                    ref_code=receipt_number,
-                    desc=f"M-Pesa payment from {phone_number}"
+                    amount=amount,
+                    recorded_by=1,
+                    reference_code=receipt_number,
+                    description=f"M-Pesa payment from {phone_number}",
                 )
 
                 # In production, you would trigger an SMS receipt to the farmer/customer here.

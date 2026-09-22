@@ -132,12 +132,17 @@ class FeedMixerPolicyService:
             }
 
         if any(keyword in normalized_name for keyword in cls._PREMIX_KEYWORDS):
+            # Premixes/additives are blended into the dairy meal only; the main
+            # meal receives them via the formulated dairy meal product.
             return {
                 'allowed_mixers': [cls.DAIRY_MEAL],
                 'role': 'premix',
             }
 
         if any(keyword in normalized_name for keyword in cls._CONCENTRATE_KEYWORDS):
+            # Raw concentrate components belong in the dairy meal. The main
+            # meal (TMR) includes the formulated dairy meal product rather
+            # than the individual concentrate components.
             return {
                 'allowed_mixers': [cls.DAIRY_MEAL],
                 'role': 'concentrate_component',
@@ -258,3 +263,24 @@ class FeedMixerPolicyService:
                 ineligible_ids.append(ingredient_id)
 
         return rows, missing_ids, ineligible_ids
+
+    @classmethod
+    def infer_unique_recipe_type(cls, *, tenant_id: int, ingredient_ids: list[int]) -> str | None:
+        """Infer a mixer only when every selected item permits one common mixer."""
+        unique_ids = list(dict.fromkeys(ingredient_ids))
+        if not unique_ids:
+            return None
+
+        rows = (
+            InventoryItem.query
+            .filter(InventoryItem.tenant_id == tenant_id, InventoryItem.id.in_(unique_ids))
+            .all()
+        )
+        if len(rows) != len(unique_ids):
+            return None
+
+        common_mixers = set(cls.VALID_MIXERS)
+        for row in rows:
+            common_mixers.intersection_update(cls.resolve_item_policy(row)['allowed_mixers'])
+
+        return next(iter(common_mixers)) if len(common_mixers) == 1 else None

@@ -25,7 +25,7 @@ def public_farm_id(farm_pk: int) -> str:
 
 
 def parse_public_id(value: str, prefix: str) -> str:
-    value = (value or "").strip()
+    value = str(value or "").strip()
     if value.startswith(prefix):
         return value[len(prefix) :]
     return value
@@ -41,6 +41,7 @@ def build_auth_payload(*,
     name: str,
     phone_number: str,
     role: str,
+    requires_password_reset: bool,
     farm_location: Optional[str],
     tenant_pk: int,
     tenant_name: str,
@@ -59,6 +60,7 @@ def build_auth_payload(*,
         "name": name,
         "phone_number": phone_number,
         "role": role,
+        "requires_password_reset": requires_password_reset,
         "tenant_id": cooperative_id,
         "cooperative_id": cooperative_id,
         "tenant_name": tenant_name,

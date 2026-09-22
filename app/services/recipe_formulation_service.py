@@ -3,12 +3,13 @@ from __future__ import annotations
 Service for recipe formulation with protein targeting.
 Single Responsibility: Calculate and adjust ingredient percentages to hit target protein levels.
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 from app import db
 from app.models.supply import InventoryItem, FeedRecipe, RecipeIngredient
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
+from app.services.feeding_group_recipe_policy_service import FeedingGroupRecipePolicyService
 from app.repositories.cow_repo import CowRepository
 
 
@@ -27,10 +28,56 @@ class FormulationInfeasibleError(ValueError):
         self.target_protein_percent = target_protein_percent
         self.minimum_achievable_protein_percent = minimum_achievable_protein_percent
         self.maximum_achievable_protein_percent = maximum_achievable_protein_percent
+        self.limiting_ingredients: list[dict] = []
+        self.max_feasible_mix: list[dict] = []
 
 
 class RecipeFormulationService:
     """Handles recipe creation with automatic protein targeting and ingredient adjustment."""
+
+    @staticmethod
+    def _validate_recipe_ingredients(tenant_id: int, ingredients: list[dict]) -> dict[int, InventoryItem]:
+        if not ingredients:
+            raise ValueError("At least one ingredient is required.")
+
+        ingredient_ids = []
+        total_percentage = Decimal("0")
+        for ingredient in ingredients:
+            try:
+                ingredient_id = int(ingredient["ingredient_id"])
+                percentage_raw = ingredient.get("percentage", ingredient.get("adjusted_percentage"))
+                percentage = Decimal(str(percentage_raw))
+            except (KeyError, TypeError, ValueError, InvalidOperation):
+                raise ValueError("Each ingredient requires a valid ingredient_id and percentage.")
+            if percentage <= 0 or percentage > 100:
+                raise ValueError("Each ingredient percentage must be greater than 0 and no more than 100.")
+            ingredient_ids.append(ingredient_id)
+            total_percentage += percentage
+            ingredient["percentage"] = float(percentage)
+
+        if len(set(ingredient_ids)) != len(ingredient_ids):
+            raise ValueError("Each ingredient may appear only once in a recipe.")
+        if abs(total_percentage - Decimal("100")) > Decimal("0.01"):
+            raise ValueError(f"Ingredient percentages must total 100; got {total_percentage}.")
+
+        inventory_items = InventoryItem.query.filter(
+            InventoryItem.tenant_id == tenant_id,
+            InventoryItem.id.in_(ingredient_ids),
+        ).all()
+        item_lookup = {item.id: item for item in inventory_items}
+        missing_ids = [ingredient_id for ingredient_id in ingredient_ids if ingredient_id not in item_lookup]
+        if missing_ids:
+            raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
+
+        invalid_protein = [
+            item.name for item in inventory_items
+            if Decimal(str(item.protein_grams_per_kg or 0)) < 0
+        ]
+        if invalid_protein:
+            raise ValueError(
+                "protein_grams_per_kg cannot be negative for: " + ", ".join(sorted(invalid_protein)) + "."
+            )
+        return item_lookup
 
     @staticmethod
     def _seed_percentages_when_all_zero(base_ingredients: list[dict], ingredient_lookup: dict[int, dict]) -> list[dict]:
@@ -60,7 +107,7 @@ class RecipeFormulationService:
     def get_ingredient_nutrition_profile(ingredient_id: int, tenant_id: int) -> dict:
         """
         Get nutritional profile of an ingredient.
-        
+
         Returns:
         {
             "ingredient_id": int,
@@ -87,11 +134,12 @@ class RecipeFormulationService:
     @staticmethod
     def calculate_batch_protein_content(
         batch_size_kg: float,
-        ingredients_with_percentages: list[dict]  # [{"ingredient_id": int, "percentage": float}, ...]
+        ingredients_with_percentages: list[dict],  # [{"ingredient_id": int, "percentage": float}, ...]
+        tenant_id: int | None = None,
     ) -> dict:
         """
         Calculate total and average protein in a batch given ingredient percentages.
-        
+
         Returns:
         {
             "batch_size_kg": float,
@@ -119,9 +167,12 @@ class RecipeFormulationService:
             weight_kg = (percentage / 100.0) * batch_size_kg
 
             # Fetch ingredient nutrition
-            ingredient = InventoryItem.query.filter_by(id=ingredient_id).first()
+            ingredient_query = InventoryItem.query.filter_by(id=ingredient_id)
+            if tenant_id is not None:
+                ingredient_query = ingredient_query.filter_by(tenant_id=tenant_id)
+            ingredient = ingredient_query.first()
             if not ingredient:
-                raise ValueError(f"Ingredient {ingredient_id} not found.")
+                raise ValueError(f"Ingredient {ingredient_id} not found for this tenant.")
 
             protein_per_kg = float(ingredient.protein_grams_per_kg)
             total_protein = weight_kg * protein_per_kg
@@ -153,11 +204,12 @@ class RecipeFormulationService:
         base_ingredients: list[dict],  # [{"ingredient_id": int, "percentage": float}, ...]
         target_protein_percent: float,
         recipe_type: str | None = None,
+        feeding_group: str | None = None,
     ) -> dict:
         """
         Suggest adjustments to ingredient percentages to achieve target protein.
         Uses a simple proportional scaling algorithm.
-        
+
         Returns:
         {
             "current_protein_percent": float,
@@ -180,24 +232,23 @@ class RecipeFormulationService:
             "adjustment_strategy": str,
         }
         """
-        requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
-            recipe_type,
-            default=None,
+        normalized_feeding_group = FeedingGroupRecipePolicyService.normalize_feeding_group(feeding_group)
+        normalized_recipe_type = FeedingGroupRecipePolicyService.resolve_recipe_type(
+            feeding_group=normalized_feeding_group,
+            requested_recipe_type=recipe_type,
         )
-        normalized_recipe_type = requested_recipe_type or FeedMixerPolicyService.MAIN_MEAL
-        if requested_recipe_type is not None:
-            ingredient_ids = [int(ing["ingredient_id"]) for ing in base_ingredients]
-            _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
-                tenant_id=tenant_id,
-                ingredient_ids=ingredient_ids,
-                recipe_type=requested_recipe_type,
+        ingredient_ids = [int(ing["ingredient_id"]) for ing in base_ingredients]
+        _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
+            tenant_id=tenant_id,
+            ingredient_ids=ingredient_ids,
+            recipe_type=normalized_recipe_type,
+        )
+        if missing_ids:
+            raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
+        if ineligible_ids:
+            raise ValueError(
+                f"Ingredient(s) not eligible for recipe_type {normalized_recipe_type}: {ineligible_ids}."
             )
-            if missing_ids:
-                raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
-            if ineligible_ids:
-                raise ValueError(
-                    f"Ingredient(s) not eligible for recipe_type {requested_recipe_type}: {ineligible_ids}."
-                )
 
         # Pre-load ingredient metadata used by both seeding and adjustments.
         ingredient_lookup = {}
@@ -223,14 +274,16 @@ class RecipeFormulationService:
         # Get current nutrition profile
         current = RecipeFormulationService.calculate_batch_protein_content(
             batch_size_kg,
-            base_ingredients
+            base_ingredients,
+            tenant_id=tenant_id,
         )
         current_protein = current["average_protein_percent"]
 
         # Calculate adjustment needed
         adjustment_needed = target_protein_percent - current_protein
 
-        if abs(adjustment_needed) < 1e-6:
+        zero_share_present = any(float(ing.get("percentage") or 0) <= 1e-9 for ing in base_ingredients)
+        if abs(adjustment_needed) < 1e-6 and (len(base_ingredients) <= 1 or not zero_share_present):
             return {
                 "current_protein_percent": current_protein,
                 "target_protein_percent": target_protein_percent,
@@ -247,6 +300,9 @@ class RecipeFormulationService:
                 "projected_nutrition": current,
                 "adjustment_strategy": "No adjustment needed - target already achieved.",
             }
+        # When the target is met only because some ingredients sit at 0%, fall
+        # through so the full-participation solver can bring every feed into
+        # the mix while keeping the protein target.
 
         proteins = [ingredient_lookup[ing["ingredient_id"]]["protein_per_kg"] for ing in base_ingredients]
         # g/kg divided by 10 is protein expressed as a percentage of the mix.
@@ -261,6 +317,15 @@ class RecipeFormulationService:
             ing_id: metadata["protein_per_kg"] / 10.0
             for ing_id, metadata in ingredient_lookup.items()
         }
+        # An ingredient can never take a larger share of the batch than its
+        # in-stock quantity allows for this batch size. This is the same
+        # consumption math the batch processor applies (share% * batch_kg).
+        stock_cap_pct = {}
+        for ing_id, metadata in ingredient_lookup.items():
+            if float(batch_size_kg) > 1e-9:
+                stock_cap_pct[ing_id] = metadata["available_qty_kg"] * 100.0 / float(batch_size_kg)
+            else:
+                stock_cap_pct[ing_id] = 100.0
 
         def _build_unreachable_target_message() -> str:
             return (
@@ -326,10 +391,10 @@ class RecipeFormulationService:
         if target < minimum_achievable - 1e-9 or target > maximum_achievable + 1e-9:
             _raise_unreachable_target()
 
-        # Cost-and-quantity aware optimizer:
-        # 1) keep a small floor share when feasible so all ingredients can
-        #    participate, 2) solve the remaining blend with the cheapest
-        #    effective-cost protein pair spanning the target.
+        # Full-participation optimizer: every selected ingredient keeps a
+        # meaningful floor share, and the remaining mass is spread across ALL
+        # ingredients (weighted toward abundant, lower-cost feeds) while the
+        # blend is solved so weighted protein hits the target exactly.
         ingredient_ids = list(adjusted_percentages.keys())
         total_available_qty = sum(
             max(0.0, ingredient_lookup[i]["available_qty_kg"])
@@ -345,83 +410,270 @@ class RecipeFormulationService:
             # toward abundant ingredients while still optimizing for cost.
             return base_cost / max(qty_ratio, 1e-6)
 
-        optimized_mix = None
-        for floor_pct in (1.0, 0.5, 0.1, 0.0):
-            if floor_pct * len(ingredient_ids) > 100.0 + 1e-9:
-                continue
+        def _preference_weight(ingredient_id: int) -> float:
+            # Prefer feeds that are abundant in stock and cheap, but damp both
+            # signals so no single feed can starve the others of share. Cost
+            # of zero is treated as "unknown" (neutral) rather than "free".
+            qty = max(0.0, ingredient_lookup[ingredient_id]["available_qty_kg"])
+            cost = max(0.0, ingredient_lookup[ingredient_id]["cost_per_kg"])
+            return (qty ** 0.5) / (1.0 + cost)
 
-            remainder_pct = 100.0 - floor_pct * len(ingredient_ids)
-            if remainder_pct < -1e-9:
-                continue
+        def _solve_full_participation_mix(floor_pct: float) -> dict[int, float] | None:
+            """Give every ingredient `floor_pct`, then distribute the remainder
+            across all feeds with a single group-level scale factor solved so
+            the mix hits the target protein exactly. Shares inside each group
+            are equal (keeps the 2x2 solve well-conditioned); the preference
+            for abundant feeds is expressed through the stock caps, which let
+            plentiful ingredients absorb larger shares. Returns None when this
+            floor cannot reach the target."""
+            n = len(ingredient_ids)
+            if n == 0 or floor_pct * n > 100.0 + 1e-9:
+                return None
 
-            protein_mass_floor = floor_pct * sum(protein_percent[i] for i in ingredient_ids)
-            required_total_protein_mass = target * 100.0
-            remaining_required_mass = required_total_protein_mass - protein_mass_floor
+            remainder_pct = 100.0 - floor_pct * n
+            floor_protein_mass = floor_pct * sum(protein_percent[i] for i in ingredient_ids)
+            required_protein_mass = target * 100.0
+
+            low_id = min(ingredient_ids, key=lambda i: protein_percent[i])
+            high_id = max(ingredient_ids, key=lambda i: protein_percent[i])
+            min_mix = (floor_protein_mass + remainder_pct * protein_percent[low_id]) / 100.0
+            max_mix = (floor_protein_mass + remainder_pct * protein_percent[high_id]) / 100.0
+            if target < min_mix - 1e-9 or target > max_mix + 1e-9:
+                return None
 
             if remainder_pct <= 1e-9:
-                if abs(remaining_required_mass) <= 1e-6:
-                    optimized_mix = {i: floor_pct for i in ingredient_ids}
+                if abs(floor_protein_mass - required_protein_mass) <= 1e-6:
+                    return {i: floor_pct for i in ingredient_ids}
+                return None
+
+            required_remainder_protein = (required_protein_mass - floor_protein_mass) / remainder_pct
+
+            high_group = {i for i in ingredient_ids if protein_percent[i] >= required_remainder_protein}
+            low_group = set(ingredient_ids) - high_group
+
+            if not high_group or not low_group:
+                # Only exact when every feed has (nearly) the same protein.
+                proteins = [protein_percent[i] for i in ingredient_ids]
+                if max(proteins) - min(proteins) > 1e-9:
+                    return None
+                scale = remainder_pct / len(ingredient_ids)
+                return {i: floor_pct + scale for i in ingredient_ids}
+
+            # Equal weight per feed inside each group keeps the determinant of
+            # the 2x2 group-scale solve well away from zero regardless of how
+            # many feeds are selected.
+            weights = {i: 1.0 for i in ingredient_ids}
+            w_high = sum(weights[i] for i in high_group)
+            w_low = sum(weights[i] for i in low_group)
+            p_high = sum(weights[i] * protein_percent[i] for i in high_group)
+            p_low = sum(weights[i] * protein_percent[i] for i in low_group)
+
+            # Solve group scales alpha (high-protein group) and beta (low):
+            #   alpha*w_high + beta*w_low = remainder_pct
+            #   alpha*p_high + beta*p_low = required_remainder_protein * remainder_pct
+            det = w_high * p_low - w_low * p_high
+            if abs(det) <= 1e-12:
+                return None
+            alpha = remainder_pct * (p_low - required_remainder_protein * w_low) / det
+            beta = remainder_pct * (w_high * required_remainder_protein - p_high) / det
+            if alpha < -1e-9 or beta < -1e-9:
+                return None
+            alpha = max(alpha, 0.0)
+            beta = max(beta, 0.0)
+
+            mix = {}
+            for i in ingredient_ids:
+                extra = alpha * weights[i] if i in high_group else beta * weights[i]
+                mix[i] = floor_pct + max(0.0, extra)
+
+            # Absorb floating-point drift on the largest share so shares total 100.
+            drift = 100.0 - sum(mix.values())
+            if abs(drift) > 1e-9:
+                anchor = max(mix, key=lambda i: mix[i])
+                mix[anchor] = max(0.0, mix[anchor] + drift)
+            return mix
+
+        def _cap_mix_to_stock(mix: dict[int, float]) -> dict[int, float]:
+            """Clip shares at stock caps and re-solve the two-group scales with
+            capped items fixed at their cap, repeating until no share exceeds
+            its cap. Returns None when the fixed caps make the target
+            unreachable (i.e. stock is the binding constraint)."""
+            mix = dict(mix)
+            fixed: set[int] = set()
+            for _ in range(len(ingredient_ids) + 2):
+                newly_fixed = False
+                for i in mix:
+                    if i in fixed:
+                        mix[i] = min(mix[i], stock_cap_pct[i])
+                    elif mix[i] > stock_cap_pct[i] + 1e-9:
+                        mix[i] = stock_cap_pct[i]
+                        fixed.add(i)
+                        newly_fixed = True
+                if not newly_fixed:
                     break
+
+                free_ids = [i for i in mix if i not in fixed]
+                if not free_ids:
+                    break
+                fixed_pct = sum(mix[i] for i in fixed)
+                fixed_protein = sum(mix[i] * protein_percent[i] for i in fixed)
+                free_pct = 100.0 - fixed_pct
+                if free_pct <= 1e-9:
+                    break
+                required_free_protein = (target * 100.0 - fixed_protein) / free_pct
+
+                free_high = [i for i in free_ids if protein_percent[i] >= required_free_protein]
+                free_low = [i for i in free_ids if protein_percent[i] < required_free_protein]
+                if not free_high and free_low:
+                    # No free feed sits above the required protein: put the
+                    # richest free feed on the alpha side so its scale can
+                    # grow while the rest shrink on beta.
+                    richest = max(free_low, key=lambda i: protein_percent[i])
+                    free_high = [richest]
+                    free_low = [i for i in free_low if i != richest]
+                if not free_high or not free_low:
+                    proteins = [protein_percent[i] for i in free_ids]
+                    if max(proteins) - min(proteins) > 1e-9:
+                        return None
+                    equal = free_pct / len(free_ids)
+                    for i in free_ids:
+                        mix[i] = equal
+                    continue
+
+                w_high = len(free_high)
+                w_low = len(free_low)
+                p_high = sum(protein_percent[i] for i in free_high)
+                p_low = sum(protein_percent[i] for i in free_low)
+                det = w_high * p_low - w_low * p_high
+                if abs(det) <= 1e-12:
+                    return None
+                alpha = free_pct * (p_low - required_free_protein * w_low) / det
+                beta = free_pct * (w_high * required_free_protein - p_high) / det
+                if alpha < -1e-9 or beta < -1e-9:
+                    return None
+                alpha = max(alpha, 0.0)
+                beta = max(beta, 0.0)
+                for i in free_ids:
+                    mix[i] = alpha if i in free_high else beta
+
+            drift = 100.0 - sum(mix.values())
+            if abs(drift) > 1e-9:
+                flexible = [i for i in mix if i not in fixed and mix[i] < stock_cap_pct[i] - 1e-9]
+                if flexible:
+                    anchor = max(flexible, key=lambda i: mix[i])
+                    mix[anchor] = max(0.0, mix[anchor] + drift)
+            return mix
+
+        def _mix_protein(mix: dict[int, float]) -> float:
+            return sum(mix[i] * protein_percent[i] for i in mix) / 100.0
+
+        def _max_protein_stock_mix() -> dict[int, float]:
+            """Highest-protein mix that respects the stock caps: pour every feed
+            up to its cap, protein-richest first. When the stock pool cannot
+            fill 100% of the batch, shares are normalized up proportionally so
+            the mix stays a valid 100%-total blend (and this is also the
+            truthful maximum-protein composition for that case)."""
+            by_protein = sorted(ingredient_ids, key=lambda i: -protein_percent[i])
+            mix = {i: 0.0 for i in ingredient_ids}
+            remaining = 100.0
+            for i in by_protein:
+                share = min(stock_cap_pct[i], remaining)
+                mix[i] = share
+                remaining -= share
+                if remaining <= 1e-9:
+                    break
+            total_share = sum(mix.values())
+            if total_share > 1e-9 and abs(total_share - 100.0) > 1e-9:
+                # Under-pour: pool can't fill the batch -> proportional scale is
+                # also the max-protein composition. Over-pour: numerical spill
+                # from caps -> normalize back to a valid 100% blend.
+                scale = 100.0 / total_share
+                mix = {i: mix[i] * scale for i in ingredient_ids}
+            return mix
+
+        optimized_mix = None
+        uncapped_mix = None
+        for floor_pct in (5.0, 2.0, 1.0, 0.5, 0.1, 0.0):
+            uncapped_mix = _solve_full_participation_mix(floor_pct)
+            if uncapped_mix is None:
                 continue
-
-            target_remainder_protein = remaining_required_mass / remainder_pct
-
-            best_pair = None
-            for low_id in ingredient_ids:
-                for high_id in ingredient_ids:
-                    if low_id == high_id:
-                        continue
-                    low_protein = protein_percent[low_id]
-                    high_protein = protein_percent[high_id]
-                    spread = high_protein - low_protein
-                    if spread <= 1e-9:
-                        continue
-                    if target_remainder_protein < low_protein - 1e-9 or target_remainder_protein > high_protein + 1e-9:
-                        continue
-
-                    high_weight = (target_remainder_protein - low_protein) / spread
-                    low_weight = 1.0 - high_weight
-                    if low_weight < -1e-9 or high_weight < -1e-9:
-                        continue
-
-                    pair_effective_cost = (
-                        low_weight * _effective_cost(low_id)
-                        + high_weight * _effective_cost(high_id)
-                    )
-                    pair_cost = (
-                        low_weight * ingredient_lookup[low_id]["cost_per_kg"]
-                        + high_weight * ingredient_lookup[high_id]["cost_per_kg"]
-                    )
-
-                    candidate = (
-                        pair_effective_cost,
-                        pair_cost,
-                        -(
-                            ingredient_lookup[low_id]["available_qty_kg"]
-                            + ingredient_lookup[high_id]["available_qty_kg"]
-                        ),
-                        low_id,
-                        high_id,
-                        low_weight,
-                        high_weight,
-                    )
-
-                    if best_pair is None or candidate < best_pair:
-                        best_pair = candidate
-
-            if best_pair is None:
-                continue
-
-            _, _, _, low_id, high_id, low_weight, high_weight = best_pair
-            optimized_mix = {i: floor_pct for i in ingredient_ids}
-            optimized_mix[low_id] += max(0.0, remainder_pct * low_weight)
-            optimized_mix[high_id] += max(0.0, remainder_pct * high_weight)
-            break
+            candidate = _cap_mix_to_stock(uncapped_mix)
+            if candidate is not None and _mix_protein(candidate) >= target - 0.05:
+                optimized_mix = candidate
+                break
 
         if optimized_mix is None:
-            optimized_mix = _build_fallback_feasible_mix()
+            fallback = _build_fallback_feasible_mix()
+            if fallback is not None:
+                candidate = _cap_mix_to_stock(fallback)
+                if candidate is not None and _mix_protein(candidate) >= target - 0.05:
+                    optimized_mix = candidate
         if optimized_mix is None:
-            _raise_unreachable_target()
+            max_mix = _max_protein_stock_mix()
+            pool_fill_pct = sum(min(100.0, stock_cap_pct[i]) for i in ingredient_ids)
+            if (
+                pool_fill_pct >= 100.0 - 1e-9
+                and _mix_protein(max_mix) + 0.05 >= target
+            ):
+                optimized_mix = max_mix
+            else:
+                exc = FormulationInfeasibleError(
+                    (
+                        f"Not enough stock of higher-protein feeds to reach {target:g}% protein "
+                        f"for a {float(batch_size_kg):g} kg batch with the selected feeds. "
+                        f"Reduce the batch size or restock the limiting items."
+                    ),
+                    target_protein_percent=target,
+                    minimum_achievable_protein_percent=minimum_achievable,
+                    maximum_achievable_protein_percent=maximum_achievable,
+                )
+                limiting = [
+                    {
+                        "ingredient_id": i,
+                        "name": ingredient_lookup[i]["name"],
+                        "protein_grams_per_kg": ingredient_lookup[i]["protein_per_kg"],
+                        "available_quantity_kg": round(float(ingredient_lookup[i]["available_qty_kg"]), 4),
+                    }
+                    for i in ingredient_ids
+                    if protein_percent[i] > target and stock_cap_pct[i] < 100.0 - 1e-9
+                ]
+                if not limiting:
+                    # Whole stock pool is the constraint (or no feed beats the
+                    # target): report everything that ran short.
+                    limiting = [
+                        {
+                            "ingredient_id": i,
+                            "name": ingredient_lookup[i]["name"],
+                            "protein_grams_per_kg": ingredient_lookup[i]["protein_per_kg"],
+                            "available_quantity_kg": round(float(ingredient_lookup[i]["available_qty_kg"]), 4),
+                        }
+                        for i in ingredient_ids
+                        if stock_cap_pct[i] < 100.0 - 1e-9
+                    ]
+                exc.limiting_ingredients = limiting
+                exc.max_feasible_mix = [
+                    {
+                        "ingredient_id": i,
+                        "name": ingredient_lookup[i]["name"],
+                        "percentage": round(max_mix[i], 4),
+                        "weight_kg": round(max_mix[i] * float(batch_size_kg) / 100.0, 4),
+                        "protein_grams_per_kg": ingredient_lookup[i]["protein_per_kg"],
+                    }
+                    for i in ingredient_ids
+                    if max_mix[i] > 1e-9
+                ]
+                raise exc
+
+        participation_warning = None
+        zero_share_ids = [i for i, share in (uncapped_mix or optimized_mix).items() if share <= 1e-9]
+        if zero_share_ids and len(ingredient_ids) > 1:
+            zero_names = [ingredient_lookup[i]["name"] for i in zero_share_ids]
+            participation_warning = (
+                f"The {target:g}% protein target is at the edge of what the selected feeds can "
+                f"reach, so these feeds had to be left out of the mix: {', '.join(zero_names)}. "
+                "Add a higher-protein feed or lower the protein "
+                "goal to blend every selected feed."
+            )
 
         adjusted_percentages = optimized_mix
 
@@ -448,7 +700,8 @@ class RecipeFormulationService:
         ]
         projected = RecipeFormulationService.calculate_batch_protein_content(
             batch_size_kg,
-            adjusted_ingredient_list
+            adjusted_ingredient_list,
+            tenant_id=tenant_id,
         )
 
         projected_protein = sum(
@@ -479,7 +732,8 @@ class RecipeFormulationService:
             ]
             projected = RecipeFormulationService.calculate_batch_protein_content(
                 batch_size_kg,
-                adjusted_ingredient_list
+                adjusted_ingredient_list,
+                tenant_id=tenant_id,
             )
 
         projected_cost_per_kg = sum(
@@ -491,6 +745,7 @@ class RecipeFormulationService:
         return {
             "current_protein_percent": round(current_protein, 2),
             "target_protein_percent": target_protein_percent,
+            "feeding_group": normalized_feeding_group,
             "recipe_type": normalized_recipe_type,
             "adjustment_needed": round(adjustment_needed, 2),
             "adjusted_ingredients": adjusted_ingredients,
@@ -499,9 +754,11 @@ class RecipeFormulationService:
                 "cost_per_kg": round(projected_cost_per_kg, 4),
                 "total_cost": round(projected_total_cost, 2),
             },
+            "participation_warning": participation_warning,
             "adjustment_strategy": (
-                f"Optimized ingredient inclusion to meet the {target:g}% protein target "
-                f"at lower effective cost, prioritizing higher-quantity and lower-cost feeds "
+                f"Blended every selected feed to meet the {target:g}% protein target, "
+                f"giving each ingredient a minimum share and weighting the rest toward "
+                f"abundant, lower-cost feeds "
                 f"(projected protein {round(projected['average_protein_percent'], 2)}%)."
             ),
         }
@@ -514,46 +771,78 @@ class RecipeFormulationService:
         adjusted_ingredients: list[dict],  # [{"ingredient_id": int, "percentage": float}, ...]
         target_protein_percent: float,
         recipe_type: str | None = None,
+        feeding_group: str | None = None,
+        measurement_settings: dict | None = None,
         user_id: Optional[int] = None,
-        yield_target_id: Optional[int] = None,
     ) -> dict:
         """
         Save a formulated recipe to the database.
         Mark it as 'adopted' for the herd.
-        
+
         Returns saved recipe with ID and status.
         """
         try:
-            requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
-                recipe_type,
-                default=None,
+            ingredient_lookup = RecipeFormulationService._validate_recipe_ingredients(
+                tenant_id,
+                adjusted_ingredients,
             )
-            normalized_recipe_type = requested_recipe_type or FeedMixerPolicyService.MAIN_MEAL
-            if requested_recipe_type is not None:
-                ingredient_ids = [int(ing_data["ingredient_id"]) for ing_data in adjusted_ingredients]
-                _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
-                    tenant_id=tenant_id,
-                    ingredient_ids=ingredient_ids,
-                    recipe_type=requested_recipe_type,
+            normalized_feeding_group = FeedingGroupRecipePolicyService.normalize_feeding_group(feeding_group)
+            normalized_recipe_type = FeedingGroupRecipePolicyService.resolve_recipe_type(
+                feeding_group=normalized_feeding_group,
+                requested_recipe_type=recipe_type,
+            )
+            settings = measurement_settings or {
+                'quantity_basis': 'concentrate' if normalized_recipe_type == 'dairy_meal' else 'total_ration',
+                'concentrate_kg_per_head_day': None,
+                'bulk_density_kg_per_litre': None,
+                'bucket_volume_litres': None,
+                'scoop_weight_kg': None,
+            }
+            ingredient_ids = [int(ing_data["ingredient_id"]) for ing_data in adjusted_ingredients]
+            _, missing_ids, ineligible_ids = FeedMixerPolicyService.validate_items_for_recipe_type(
+                tenant_id=tenant_id,
+                ingredient_ids=ingredient_ids,
+                recipe_type=normalized_recipe_type,
+            )
+            if missing_ids:
+                raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
+            if ineligible_ids:
+                raise ValueError(
+                    f"Ingredient(s) not eligible for recipe_type {normalized_recipe_type}: {ineligible_ids}."
                 )
-                if missing_ids:
-                    raise ValueError(f"Ingredient(s) not found for tenant: {missing_ids}.")
-                if ineligible_ids:
-                    raise ValueError(
-                        f"Ingredient(s) not eligible for recipe_type {requested_recipe_type}: {ineligible_ids}."
-                    )
 
-            # Create recipe
-            recipe = FeedRecipe(
+            # Upsert by (tenant, name, type): re-saving a mix updates the
+            # existing recipe in place instead of piling up duplicate rows.
+            recipe = FeedRecipe.query.filter_by(
                 tenant_id=tenant_id,
                 recipe_name=recipe_name,
-                target_protein_percentage=target_protein_percent,
                 recipe_type=normalized_recipe_type,
-                is_active=True,  # Auto-adopt the recipe
-                created_by=user_id,
-            )
-            db.session.add(recipe)
-            db.session.flush()
+            ).first()
+            if recipe is not None:
+                recipe.target_protein_percentage = target_protein_percent
+                recipe.is_active = True
+                for field, value in settings.items():
+                    setattr(recipe, field, value)
+                RecipeIngredient.query.filter_by(
+                    tenant_id=tenant_id, recipe_id=recipe.id
+                ).delete()
+                db.session.flush()
+            else:
+                recipe = FeedRecipe(
+                    tenant_id=tenant_id,
+                    recipe_name=recipe_name,
+                    target_protein_percentage=target_protein_percent,
+                    recipe_type=normalized_recipe_type,
+                    feeding_group=normalized_feeding_group,
+                    **settings,
+                    is_active=True,  # Auto-adopt the recipe
+                    created_by=user_id,
+                )
+                db.session.add(recipe)
+                db.session.flush()
+
+            if recipe is not None:
+                recipe.feeding_group = normalized_feeding_group
 
             # Add ingredients
             for ing_data in adjusted_ingredients:
@@ -561,9 +850,7 @@ class RecipeFormulationService:
                 percentage = ing_data["percentage"]
 
                 # Verify ingredient exists
-                ingredient = InventoryItem.query.filter_by(id=ingredient_id, tenant_id=tenant_id).first()
-                if not ingredient:
-                    raise ValueError(f"Ingredient {ingredient_id} not found for this tenant.")
+                ingredient = ingredient_lookup[ingredient_id]
 
                 recipe_ing = RecipeIngredient(
                     tenant_id=tenant_id,
@@ -578,13 +865,15 @@ class RecipeFormulationService:
             # Calculate final nutrition
             nutrition = RecipeFormulationService.calculate_batch_protein_content(
                 batch_size_kg,
-                adjusted_ingredients
+                adjusted_ingredients,
+                tenant_id=tenant_id,
             )
 
             return {
                 "recipe_id": recipe.id,
                 "recipe_name": recipe_name,
                 "target_protein_percent": target_protein_percent,
+                "feeding_group": normalized_feeding_group,
                 "recipe_type": normalized_recipe_type,
                 "achieved_protein_percent": nutrition["average_protein_percent"],
                 "batch_size_kg": batch_size_kg,
@@ -593,6 +882,9 @@ class RecipeFormulationService:
                 "nutrition_summary": nutrition,
             }
 
+        except ValueError:
+            db.session.rollback()
+            raise
         except Exception as e:
             db.session.rollback()
             raise Exception(f"Failed to save recipe: {str(e)}")

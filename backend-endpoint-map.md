@@ -220,6 +220,11 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `GET /api/finance/customers/<customer_id>`
 - `GET /api/finance/ledger`
 - `POST /api/finance/ledger`
+- `POST /api/finance/transactions/<transaction_id>/receipt`
+- `GET /api/finance/receipts/<receipt_id>`
+- `GET /api/finance/receipts/<receipt_id>/pdf`
+- `POST /api/finance/receipts/<receipt_id>/void`
+- `GET /api/finance/receipts/<receipt_id>/audit`
 - `GET /api/finance/buyers`
 - `POST /api/finance/buyers`
 - `GET /api/finance/buyers/<buyer_id>`
@@ -229,6 +234,12 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `GET /api/finance/statements/<token>`
 - `POST /api/finance/billing/stk-push`
 - `POST /api/finance/mpesa/callback`
+
+Posted revenue and payment transactions atomically issue one immutable, tenant- and farm-scoped receipt. Its sequence-backed `RCPT-YYYY-######` number is distinct from the submitted payment reference. The initially rendered PDF bytes and SHA-256 are retained; downloads never rerender the artifact. Corrections void the receipt with a reason and audit event rather than editing or deleting it. Expense and draft transactions are not eligible.
+
+Expense ledger creation requires `paid_to`. Current frontend clients also require `item_name` and a positive numeric `quantity`; these identify the purchased commodity and amount independently from the supplier and free-text `description`. The nullable backend fields preserve compatibility with older clients and are returned on ledger transaction responses.
+
+Expense requests may include `cost_class`: `COGS`, `CUSTOMER_ACQUISITION`, `OPERATING`, or `CAPITAL`. Older clients receive category-based defaults. `GET /api/reports/dairy-unit-economics` uses posted `COGS` to allocate production cost per sold litre and returns observed contribution as `realized_ltv_kes`/`ltv_kes`; assumption-based lifespan projection is returned separately as `forecast_ltv_kes`. CAC uses only classified customer-acquisition expenses unless explicitly overridden.
 
 ### Finance create schemas
 
@@ -312,6 +323,15 @@ Dashboard tenant scope behavior:
 
 - `PATCH /api/v1/breeding/insemination/<log_id>/outcome`
 
+## Feeding Group Quantities
+
+- `GET /api/v1/nutrition/feeding-groups/profiles`
+- `PUT /api/v1/nutrition/feeding-groups/profiles/<feeding_group>`
+- `GET /api/v1/nutrition/herd/feeding-plan/by-group`
+- `PATCH /api/feed/recipes/<recipe_id>` configures total-ration/concentrate basis and optional bucket/scoop calibration.
+
+The group plan returns kg/head/day, kg/head/feeding, daily group batch, batch/feeding, scaled recipe ingredients, and calibrated physical measures. Kilograms remain authoritative.
+
 ### Production yield create and edit schema
 
 Yield create request:
@@ -375,6 +395,7 @@ Yield detail response (`GET /api/production/yield/<log_id>`) includes:
 - `POST /api/v1/nutrition/batches`
 - `POST /api/v1/nutrition/batches/<batch_id>/consumption-events`
 - `GET /api/v1/nutrition/analytics/feed-cost-efficiency`
+- `GET /api/v1/nutrition/analytics/feed-cost-by-group`
 - `GET /api/v1/nutrition/analytics/active-batch-roi-trend-weekly`
 - `GET /api/v1/nutrition/dashboard`
 - `GET /api/nutrition/dashboard`
@@ -388,6 +409,10 @@ Yield detail response (`GET /api/production/yield/<log_id>`) includes:
 - `DELETE /api/feed/recipes/<recipe_id>`
 - `POST /api/v1/nutrition/feed/formulate`
 - `POST /api/feed/formulate`
+- `GET /api/v1/nutrition/feeding-groups/profiles`
+- `PUT /api/v1/nutrition/feeding-groups/profiles/<feeding_group>`
+- `GET /api/v1/nutrition/herd/feeding-plan/by-group`
+- `GET /api/v1/nutrition/feed-formulation/suggested-mix/by-group`
 - `GET /api/v1/nutrition/units/conversions`
 - `POST /api/v1/nutrition/units/conversions`
 - `GET /api/units/conversions`

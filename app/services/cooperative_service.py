@@ -6,7 +6,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 from flask import jsonify, current_app
-from flask_jwt_extended import create_access_token, decode_token
+from flask_jwt_extended import create_access_token
 from sqlalchemy.exc import IntegrityError
 
 from app import db
@@ -14,6 +14,7 @@ from app.models.farm import Farm
 from app.models.tenant import Tenant
 from app.models.user import Role, User
 from app.services.auth_service import AuthService
+from app.services.account_invitation_service import AccountInvitationService
 from app.utils.jwt_payload import normalize_tenant_type, public_tenant_id
 
 
@@ -133,25 +134,28 @@ class CooperativeService:
         }), 201
 
     @staticmethod
-    def invite_member(cooperative_id: str, data: dict):
+    def invite_member(cooperative_id: str, data: dict, assignable_roles=None):
         try:
             cooperative_pk = int(str(cooperative_id).replace('tenant_', '').strip())
         except (TypeError, ValueError):
             return jsonify({'error': 'Invalid cooperative id.'}), 400
 
         tenant = db.session.get(Tenant, cooperative_pk)
-        if not tenant or normalize_tenant_type(getattr(tenant, 'tenant_type', None)) != 'cooperative':
-            return jsonify({'error': 'Cooperative not found.'}), 404
+        if not tenant:
+            return jsonify({'error': 'Tenant not found.'}), 404
 
         full_name = (data.get('full_name') or data.get('name') or '').strip()
         phone_number = AuthService._normalize_phone_number(data.get('phone_number') or data.get('phoneNumber'))
         email = (data.get('email') or '').strip() or None
-        role = (data.get('role') or Role.FARMER).strip() or Role.FARMER
+        role = (data.get('role') or Role.FARMER).strip().upper() or Role.FARMER
 
         if not full_name:
             return jsonify({'error': 'full_name is required.'}), 400
         if not phone_number:
             return jsonify({'error': 'phone_number is required.'}), 400
+        allowed_roles = set(assignable_roles or Role.assignable_tenant_member_roles())
+        if role not in allowed_roles:
+            return jsonify({'error': 'role is not assignable to a tenant member.'}), 400
 
         username = CooperativeService._normalize_username(data, phone_number, full_name)
 
@@ -214,15 +218,17 @@ class CooperativeService:
         }), 201
 
     @staticmethod
-    def import_members_from_csv(cooperative_id: str, file_storage):
+    def import_members_from_csv(cooperative_id: str, file_storage, assignable_roles=None):
         try:
             cooperative_pk = int(str(cooperative_id).replace('tenant_', '').strip())
         except (TypeError, ValueError):
             return jsonify({'error': 'Invalid cooperative id.'}), 400
 
         tenant = db.session.get(Tenant, cooperative_pk)
-        if not tenant or normalize_tenant_type(getattr(tenant, 'tenant_type', None)) != 'cooperative':
-            return jsonify({'error': 'Cooperative not found.'}), 404
+        if not tenant:
+            return jsonify({'error': 'Tenant not found.'}), 404
+
+        allowed_roles = set(assignable_roles or Role.assignable_tenant_member_roles())
 
         if not file_storage:
             return jsonify({'error': 'CSV file is required.'}), 400
@@ -248,11 +254,14 @@ class CooperativeService:
             phone_number = CooperativeService._csv_value(row, 'phone_number', 'phone', 'phoneNumber')
             email = CooperativeService._csv_value(row, 'email') or None
             farm_location = CooperativeService._csv_value(row, 'farm_location', 'farmLocation', 'location') or None
-            role = CooperativeService._csv_value(row, 'role') or Role.FARMER
+            role = (CooperativeService._csv_value(row, 'role') or Role.FARMER).upper()
             username = CooperativeService._normalize_username(row, phone_number, full_name)
 
             if not full_name or not phone_number:
                 errors.append({'row': row_number, 'error': 'full_name and phone_number are required.'})
+                continue
+            if role not in allowed_roles:
+                errors.append({'row': row_number, 'error': 'role is not assignable to a tenant member.'})
                 continue
 
             normalized_phone = AuthService._normalize_phone_number(phone_number)
@@ -329,48 +338,4 @@ class CooperativeService:
 
     @staticmethod
     def claim_member_invite(token: str, password: str):
-        try:
-            decoded = decode_token(token)
-        except Exception:
-            return jsonify({'error': 'Invalid or expired invite token.'}), 400
-
-        if decoded.get('purpose') != 'member_invite':
-            return jsonify({'error': 'Invalid invite token.'}), 400
-
-        try:
-            member_id = int(decoded.get('sub'))
-        except (TypeError, ValueError):
-            return jsonify({'error': 'Invalid invite token subject.'}), 400
-
-        member = db.session.get(User, member_id)
-        if not member:
-            return jsonify({'error': 'Member not found.'}), 404
-
-        member.set_password(password)
-        member.is_active = True
-        db.session.commit()
-
-        tenant = getattr(member, 'tenant', None)
-        if tenant is None:
-            return jsonify({'error': 'Cooperative context missing.'}), 400
-
-        farms = list(getattr(tenant, 'farms', []) or [])
-        if not farms:
-            farm = Farm(tenant_id=tenant.id, name=CooperativeService._default_farm_name(tenant.name))
-            db.session.add(farm)
-            db.session.commit()
-            farms = [farm]
-
-        active_farm = farms[0]
-        access_token, payload = AuthService._issue_token_and_payload(
-            user=member,
-            tenant=tenant,
-            farms=farms,
-            active_farm=active_farm,
-        )
-
-        return jsonify({
-            'message': 'Account claimed successfully.',
-            'access_token': access_token,
-            **payload,
-        }), 200
+        return AccountInvitationService.claim_invite(token, password)

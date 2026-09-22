@@ -6,6 +6,7 @@ from config import TestConfig
 from app.models.tenant import Tenant
 from app.models.farm import Farm
 from app.models.user import User
+from app.models.user import Role
 
 class BaseTestCase(unittest.TestCase):
     """A base test case for the application."""
@@ -15,6 +16,7 @@ class BaseTestCase(unittest.TestCase):
         self.client = self.app.test_client()
         self.app_context = self.app.app_context()
         self.app_context.push()
+        db.session.rollback()
         db.session.remove()
         db.drop_all()
         db.create_all()
@@ -26,6 +28,8 @@ class BaseTestCase(unittest.TestCase):
         self.farm = Farm(tenant_id=self.tenant.id, name='Default Farm')
         db.session.add(self.farm)
         db.session.commit()
+        self.tenant_id = self.tenant.id
+        self.user_id = None
 
     def create_tenant(self, *, name='Tenant', tenant_type='single'):
         tenant = Tenant(name=name, tenant_type=tenant_type)
@@ -54,7 +58,20 @@ class BaseTestCase(unittest.TestCase):
         db.session.commit()
         return user
 
+    def get_auth_headers(self, role: str = Role.FARMER):
+        username = f'test_{role.lower()}'
+        password = 'password'
+        self.create_user(username=username, password=password, role=role)
+        response = self.client.post(
+            '/api/auth/login',
+            json={'username': username, 'password': password},
+        )
+        self.assertEqual(response.status_code, 200)
+        return {'Authorization': f"Bearer {response.get_json()['access_token']}"}
+
     def tearDown(self):
+        db.session.rollback()
         db.session.remove()
         db.drop_all()
+        db.engine.dispose()
         self.app_context.pop()

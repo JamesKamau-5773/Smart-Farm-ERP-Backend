@@ -83,6 +83,12 @@ class AuthTestCase(BaseTestCase):
             data = json.loads(response.data.decode())
             self.assertEqual(data['message'], 'Successfully logged out.')
 
+            rejected_response = self.client.get(
+                '/api/auth/me',
+                headers={'Authorization': f'Bearer {token}'},
+            )
+            self.assertEqual(rejected_response.status_code, 401)
+
     def test_switch_farm_cooperative(self):
         """Cooperative users can switch farms and receive a new token/payload."""
         user, tenant, farms = self._create_tenant_user(tenant_type='cooperative', farm_count=2)
@@ -135,6 +141,21 @@ class AuthTestCase(BaseTestCase):
             self.assertEqual(data['farm_name'], 'Green Valley Farm')
             self.assertEqual(data['role'], Role.FARMER)
             self.assertEqual(data['phone_number'], '254712345678')
+
+    def test_login_ignores_stale_access_token_cookie(self):
+        self.create_user(username='cookie_user', password='password', role=Role.FARMER)
+        self.client.set_cookie(
+            'access_token_cookie',
+            'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzdGFsZSJ9.invalid-signature',
+        )
+
+        response = self.client.post(
+            '/api/auth/login',
+            json={'username': 'cookie_user', 'password': 'password'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('access_token', response.get_json())
 
     def test_register_workspace_ignores_client_role_without_bootstrap_key(self):
         with self.client:

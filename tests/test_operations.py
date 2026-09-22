@@ -1,10 +1,12 @@
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 from tests.base import BaseTestCase
 from app.models.user import Role
+from app.models.genetics import GeneticProfile, GeneticTraitDefinition, GeneticTraitScore
 from app.models.livestock import Cow, BreedingLog, SemenInventory, MedicalRecord, LactationCycle
-from app.models.supply import MilkLog
+from app.models.supply import MilkDropAlert, MilkLog
 from app import db
 from flask_jwt_extended import create_access_token
 
@@ -45,6 +47,49 @@ class OperationsTestCase(BaseTestCase):
             self.assertIn('milkingDate', data)
             self.assertIn('status', data)
 
+    def test_record_milk_production_accepts_cow_tag(self):
+        self._login('farmer', 'password')
+
+        with self.client:
+            response = self.client.post(
+                '/api/production/yield',
+                data=json.dumps({
+                    'cow_id': self.cow.tag_number,
+                    'amount': 6.6,
+                    'session': 'morning',
+                    'milking_date': '2026-08-26',
+                }),
+                content_type='application/json',
+            )
+
+        self.assertEqual(response.status_code, 201)
+        payload = json.loads(response.data.decode())
+        self.assertEqual(payload['cow_id'], self.cow.id)
+        self.assertEqual(payload['amount'], 6.6)
+        self.assertEqual(payload['milkingDate'], '2026-08-26')
+
+    def test_replays_idempotent_milk_write_without_duplicate(self):
+        self._login('farmer', 'password')
+        headers = {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'offline:test-milk-write',
+        }
+        payload = {
+            'cow_id': self.cow.tag_number,
+            'amount': 6.6,
+            'session': 'morning',
+            'milking_date': '2026-08-26',
+        }
+
+        first = self.client.post('/api/production/yield', json=payload, headers=headers)
+        replay = self.client.post('/api/production/yield', json=payload, headers=headers)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(replay.status_code, 201)
+        self.assertEqual(replay.headers.get('Idempotency-Replayed'), 'true')
+        self.assertEqual(first.get_json(), replay.get_json())
+        self.assertEqual(MilkLog.query.count(), 1)
+
     def test_canonical_herd_alias_route(self):
         """Canonical frontend path should work without /api/operations/api duplication."""
         self._login('farmer', 'password')
@@ -54,6 +99,106 @@ class OperationsTestCase(BaseTestCase):
             payload = json.loads(response.data.decode())
             self.assertIn('items', payload)
             self.assertIn('meta', payload)
+
+    def test_genetic_progress_compares_daughter_and_dam_milk_volume_traits(self):
+        trait = GeneticTraitDefinition(
+            name='milk_volume',
+            display_name='Milk Volume',
+            category='Production',
+            unit='liters/day',
+        )
+        dam = Cow(
+            tenant_id=self.tenant.id,
+            tag_number='DAM001',
+            date_of_birth=date(2020, 1, 1),
+            genetic_score=99,
+        )
+        db.session.add_all([trait, dam])
+        db.session.flush()
+
+        daughters = [
+            Cow(
+                tenant_id=self.tenant.id,
+                tag_number='DAU001',
+                date_of_birth=date(2025, 2, 1),
+                dam_id=dam.id,
+                genetic_score=1,
+            ),
+            Cow(
+                tenant_id=self.tenant.id,
+                tag_number='DAU002',
+                date_of_birth=date(2025, 8, 1),
+                dam_id=dam.id,
+                genetic_score=2,
+            ),
+        ]
+        db.session.add_all(daughters)
+        db.session.flush()
+
+        profiles = [
+            GeneticProfile(cow_id=dam.id, tenant_id=self.tenant.id, source='MANUAL'),
+            GeneticProfile(cow_id=daughters[0].id, tenant_id=self.tenant.id, source='PROJECTED'),
+            GeneticProfile(cow_id=daughters[1].id, tenant_id=self.tenant.id, source='PROJECTED'),
+        ]
+        db.session.add_all(profiles)
+        db.session.flush()
+        db.session.add_all([
+            GeneticTraitScore(profile_id=profiles[0].id, trait_definition_id=trait.id, value=20),
+            GeneticTraitScore(profile_id=profiles[1].id, trait_definition_id=trait.id, value=24),
+            GeneticTraitScore(profile_id=profiles[2].id, trait_definition_id=trait.id, value=26),
+        ])
+        db.session.commit()
+
+        self._login('farmer', 'password')
+        response = self.client.get('/api/herd/genetic-progress')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['items'], [{
+            'year': 2025,
+            'daughters_yield': 25.0,
+            'mothers_yield': 20.0,
+            'sample_size': 2,
+        }])
+        self.assertEqual(payload['meta']['trait'], 'milk_volume')
+        self.assertEqual(payload['meta']['pair_count'], 2)
+
+    def test_milk_drop_alert_includes_cow_identity_and_can_be_resolved(self):
+        self.cow.name = 'Malaika'
+        alert = MilkDropAlert(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            alert_date=date(2026, 9, 14),
+            missing_milk_liters=Decimal('3.00'),
+            status='INVESTIGATING',
+            reason='Yield below target',
+        )
+        db.session.add(alert)
+        db.session.commit()
+        self._login('farmer', 'password')
+
+        with self.client:
+            list_response = self.client.get('/api/production/milk-drop-alerts')
+            self.assertEqual(list_response.status_code, 200)
+            listed_alert = list_response.get_json()['items'][0]
+            self.assertEqual(listed_alert['cow_name'], 'Malaika')
+            self.assertEqual(listed_alert['cow_tag'], 'COW001')
+
+            close_response = self.client.post(
+                f'/api/production/milk-drop-alerts/{alert.id}/investigate',
+                json={
+                    'status': 'RESOLVED',
+                    'selected_reasons': ['Not enough feed given'],
+                    'notes': 'Feed ration corrected.',
+                },
+            )
+
+        self.assertEqual(close_response.status_code, 200)
+        self.assertEqual(close_response.get_json()['status'], 'RESOLVED')
+        db.session.refresh(alert)
+        self.assertEqual(alert.status, 'RESOLVED')
+        self.assertEqual(alert.investigation_notes, 'Feed ration corrected.')
+        self.assertEqual(alert.selected_reasons, ['Not enough feed given'])
 
     def test_herd_list_includes_persisted_timestamps(self):
         self._login('farmer', 'password')
@@ -129,6 +274,64 @@ class OperationsTestCase(BaseTestCase):
             self.assertAlmostEqual(payload['summary']['average_yield'], 20.0)
             self.assertAlmostEqual(payload['summary']['peak_yield'], 20.0)
 
+    def test_animal_summary_includes_recent_daily_yield_metrics(self):
+        today = date.today()
+        db.session.add_all([
+            MilkLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                amount_liters=Decimal('6.50'),
+                session='Morning',
+                recorded_by=self.farmer.id,
+                timestamp=datetime.combine(today - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+            ),
+            MilkLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                amount_liters=Decimal('5.00'),
+                session='Evening',
+                recorded_by=self.farmer.id,
+                timestamp=datetime.combine(today - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=15),
+            ),
+            MilkLog(
+                tenant_id=self.tenant.id,
+                cow_id=self.cow.id,
+                amount_liters=Decimal('7.00'),
+                session='Morning',
+                recorded_by=self.farmer.id,
+                timestamp=datetime.combine(today - timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc),
+            ),
+        ])
+        db.session.commit()
+
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.get(f'/api/animals/{self.cow.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['yesterday_yield_liters'], 11.5)
+        self.assertAlmostEqual(payload['seven_day_average_liters'], 18.5 / 7, places=2)
+
+    def test_animal_summary_uses_lactation_cycle_for_days_in_milk(self):
+        self.cow.status = 'Lactating'
+        db.session.add(LactationCycle(
+            cow_id=self.cow.id,
+            cycle_number=1,
+            actual_calving_date=date.today() - timedelta(days=42),
+            is_active=True,
+        ))
+        db.session.commit()
+
+        self._login('farmer', 'password')
+        with self.client:
+            response = self.client.get(f'/api/animals/{self.cow.id}')
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload['current_status'], 'Lactating')
+        self.assertEqual(payload['days_in_milk'], 42)
+
     def test_animal_milk_history_end_date_includes_whole_day(self):
         self._login('farmer', 'password')
 
@@ -192,6 +395,29 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(patched['id'], log_id)
             self.assertEqual(patched['amount'], 16.5)
             self.assertEqual(patched['session'], 'Evening')
+
+    def test_delete_production_yield_is_idempotent(self):
+        self._login('farmer', 'password')
+        log = MilkLog(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            amount_liters=12.0,
+            session='Morning',
+            recorded_by=self.farmer.id,
+        )
+        db.session.add(log)
+        db.session.commit()
+        log_id = log.id
+
+        with self.client:
+            first_response = self.client.delete(f'/api/production/yield/{log_id}')
+            second_response = self.client.delete(f'/api/production/yield/{log_id}')
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertFalse(json.loads(first_response.data.decode())['already_deleted'])
+        self.assertEqual(second_response.status_code, 200)
+        self.assertTrue(json.loads(second_response.data.decode())['already_deleted'])
+        self.assertIsNone(MilkLog.query.filter_by(id=log_id).first())
 
     def test_production_history_route_alias_returns_animal_scoped_payload(self):
         self._login('farmer', 'password')

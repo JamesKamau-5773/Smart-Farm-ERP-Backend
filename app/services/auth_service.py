@@ -1,6 +1,6 @@
 from __future__ import annotations
 from flask import jsonify, current_app
-from flask_jwt_extended import create_access_token, set_access_cookies, unset_jwt_cookies
+from flask_jwt_extended import create_access_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
 from uuid import uuid4
 from sqlalchemy import or_
@@ -8,7 +8,8 @@ from sqlalchemy import or_
 from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
-from app.models.user import User
+from app.models.user import RevokedToken, User
+from datetime import datetime, timezone
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import (
     build_auth_payload,
@@ -104,6 +105,7 @@ class AuthService:
             name=(user.name or user.username),
             phone_number=phone_number,
             role=user.role,
+            requires_password_reset=bool(user.requires_password_reset),
             farm_location=getattr(user, 'farm_location', None),
             tenant_pk=tenant.id,
             tenant_name=tenant.name,
@@ -127,14 +129,14 @@ class AuthService:
     def authenticate_user(username, password, farm_id=None):
         lookup_value = AuthService._normalize_phone_number(username) or username
         user = UserRepository.get_by_username(lookup_value) or UserRepository.get_by_username(username)
-        
+
         # 1. Verify User Exists and Password Matches
         if user and user.check_password(password):
-            
+
             # 2. Check if account is locked/inactive
             if not user.is_active:
                 return jsonify({"error": "Account is disabled. Contact Farm Administrator."}), 403
-            
+
             tenant, farms = AuthService._ensure_default_tenant_and_farm(user)
             try:
                 active_farm = AuthService._pick_active_farm(tenant=tenant, farms=farms, requested_farm_id=farm_id)
@@ -158,8 +160,52 @@ class AuthService:
 
             set_access_cookies(response, access_token)
             return response, 200
-            
+
         return jsonify({"error": "Invalid username or password"}), 401
+
+    @staticmethod
+    def update_profile(user, data):
+        """Apply profile edits to a user. Handles the WhatsApp phone number
+        (set / change / clear) with normalization and a uniqueness check so the
+        number stays routable and can't collide with another account.
+        """
+        data = data or {}
+        try:
+            if 'name' in data:
+                user.name = (data.get('name') or '').strip() or user.name
+            if 'farm_location' in data:
+                user.farm_location = (data.get('farm_location') or '').strip() or None
+
+            if 'phone_number' in data:
+                raw = data.get('phone_number')
+                normalized = AuthService._normalize_phone_number(raw)
+                if not normalized:
+                    # Empty/null clears the number (disconnects the WhatsApp bot).
+                    user.phone_number = None
+                else:
+                    conflict = User.query.filter(
+                        User.phone_number == normalized,
+                        User.id != user.id,
+                    ).first()
+                    if conflict:
+                        return jsonify({"error": "phone_number is already in use by another account"}), 409
+                    user.phone_number = normalized
+
+            db.session.commit()
+        except IntegrityError:
+            db.session.rollback()
+            return jsonify({"error": "phone_number is already in use by another account"}), 409
+        except Exception:
+            db.session.rollback()
+            return jsonify({"error": "Failed to update profile"}), 500
+
+        return jsonify({
+            "message": "Profile updated",
+            "id": user.id,
+            "name": user.name,
+            "farm_location": getattr(user, 'farm_location', None),
+            "phone_number": user.phone_number,
+        }), 200
 
     @staticmethod
     def register_workspace(data):
@@ -304,6 +350,18 @@ class AuthService:
 
     @staticmethod
     def logout_user():
+        verify_jwt_in_request(optional=True)
+        claims = get_jwt() or {}
+        token_id = claims.get('jti')
+        expires_at = claims.get('exp')
+        if token_id and expires_at:
+            existing = RevokedToken.query.filter_by(jti=token_id).first()
+            if not existing:
+                db.session.add(RevokedToken(
+                    jti=token_id,
+                    expires_at=datetime.fromtimestamp(expires_at, tz=timezone.utc),
+                ))
+                db.session.commit()
         response = jsonify({"message": "Successfully logged out."})
         unset_jwt_cookies(response)
         return response, 200

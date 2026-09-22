@@ -1,12 +1,45 @@
+# Environment and local runtime data
 .env
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+.env.*
+!.env.example
+.envrc
 .venv/
 venv/
-.envrc
 instance/
 *.db
+*.sqlite
+*.sqlite3
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+.hypothesis/
+
+# Coverage and test output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# Packaging and build output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Logs and editor/OS artifacts
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

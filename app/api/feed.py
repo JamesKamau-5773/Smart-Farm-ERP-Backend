@@ -51,27 +51,28 @@ def calculate_schedule():
     lactating_cow_ids = data.get('lactating_cow_ids')  # NEW
     target_mode = data.get('target_mode', 'herd')  # NEW (default to 'herd' for backward compat)
 
-    if target_liters is None:
-        return jsonify({"error": "target_liters is required"}), 400
-
     try:
         # NEW: Support per-cow calculation mode
-        if target_mode == 'per_cow' and animal_targets:
-            # Calculate based on per-cow targets
-            effective_target = sum(t.get('target_liters', 0) for t in animal_targets)
-            if effective_target <= 0:
-                return jsonify({"error": "animal_targets must contain positive target_liters"}), 400
+        if target_mode == 'per_cow':
+            # Delegate to the full-featured service to get the per-cow breakdown.
+            # This makes this endpoint a true alias for the custom plan endpoint.
+            plan = HerdFeedingPlanService.calculate_from_manual_targets(
+                cow_targets=animal_targets or [],
+                baseline_herd_meal_kg=baseline_herd_meal_kg,
+                milking_frequency=milking_frequency,
+            )
+            return jsonify(plan), 200
         else:
             # OLD: Herd-level calculation (backward compatible)
-            effective_target = target_liters
-        
-        schedule = FeedFrequencyHelper.calculate_milking_schedule(
-            target_liters=effective_target,
-            baseline_herd_meal_kg=baseline_herd_meal_kg,
-            milking_frequency=milking_frequency,
-        )
-        
-        return jsonify(schedule), 200
+            if target_liters is None:
+                return jsonify({"error": "target_liters is required for 'herd' mode."}), 400
+
+            schedule = FeedFrequencyHelper.calculate_milking_schedule(
+                target_liters=target_liters,
+                baseline_herd_meal_kg=baseline_herd_meal_kg,
+                milking_frequency=milking_frequency,
+            )
+            return jsonify(schedule), 200
         
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400

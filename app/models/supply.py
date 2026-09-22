@@ -176,6 +176,12 @@ class FeedRecipe(db.Model):
     recipe_name = db.Column(db.String(100), nullable=False)
     target_protein_percentage = db.Column(db.Numeric(5, 2), nullable=False)
     recipe_type = db.Column(db.String(40), nullable=False, default='main_meal')
+    feeding_group = db.Column(db.String(40), nullable=True)
+    quantity_basis = db.Column(db.String(30), nullable=False, default='total_ration')
+    concentrate_kg_per_head_day = db.Column(db.Numeric(7, 3), nullable=True)
+    bulk_density_kg_per_litre = db.Column(db.Numeric(7, 4), nullable=True)
+    bucket_volume_litres = db.Column(db.Numeric(7, 3), nullable=True)
+    scoop_weight_kg = db.Column(db.Numeric(7, 3), nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
 
@@ -188,6 +194,51 @@ class FeedRecipe(db.Model):
 
     __table_args__ = (
         db.CheckConstraint("recipe_type IN ('dairy_meal', 'main_meal')", name='ck_feed_recipes_recipe_type_valid'),
+        db.CheckConstraint(
+            "feeding_group IS NULL OR feeding_group IN ('lactating', 'dry', 'calf_0_3m', 'calf_3_6m', 'heifer')",
+            name='ck_feed_recipes_feeding_group_valid',
+        ),
+        db.CheckConstraint("quantity_basis IN ('total_ration', 'concentrate')", name='ck_feed_recipes_quantity_basis_valid'),
+        db.CheckConstraint('concentrate_kg_per_head_day IS NULL OR concentrate_kg_per_head_day > 0', name='ck_feed_recipes_concentrate_rate_positive'),
+        db.CheckConstraint('bulk_density_kg_per_litre IS NULL OR bulk_density_kg_per_litre > 0', name='ck_feed_recipes_bulk_density_positive'),
+        db.CheckConstraint('bucket_volume_litres IS NULL OR bucket_volume_litres > 0', name='ck_feed_recipes_bucket_volume_positive'),
+        db.CheckConstraint('scoop_weight_kg IS NULL OR scoop_weight_kg > 0', name='ck_feed_recipes_scoop_weight_positive'),
+        # Composite uniqueness so feed_batches can reference a recipe
+        # tenant-safely via (tenant_id, recipe_id).
+        db.UniqueConstraint('tenant_id', 'id', name='uq_feed_recipes_tenant_id'),
+    )
+
+
+class FeedingGroupProfile(db.Model):
+    """Tenant-level ration profile for biological feeding cohorts."""
+    __tablename__ = 'feeding_group_profiles'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    feeding_group = db.Column(db.String(40), nullable=False)
+    avg_body_weight_kg = db.Column(db.Numeric(7, 2), nullable=False)
+    dmi_percent_bw = db.Column(db.Numeric(5, 2), nullable=False)
+    target_protein_percent = db.Column(db.Numeric(5, 2), nullable=False)
+    feeding_times_per_day = db.Column(db.Integer, nullable=False, default=2)
+    is_active = db.Column(db.Boolean, nullable=False, default=True)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'feeding_group', name='uq_feeding_group_profiles_tenant_group'),
+        db.CheckConstraint(
+            "feeding_group IN ('lactating', 'dry', 'calf_0_3m', 'calf_3_6m', 'heifer')",
+            name='ck_feeding_group_profiles_group_valid',
+        ),
+        db.CheckConstraint('avg_body_weight_kg > 0', name='ck_feeding_group_profiles_body_weight_positive'),
+        db.CheckConstraint('dmi_percent_bw > 0 AND dmi_percent_bw <= 10', name='ck_feeding_group_profiles_dmi_range'),
+        db.CheckConstraint('target_protein_percent > 0 AND target_protein_percent <= 100', name='ck_feeding_group_profiles_protein_range'),
+        db.CheckConstraint('feeding_times_per_day > 0 AND feeding_times_per_day <= 12', name='ck_feeding_group_profiles_times_range'),
     )
 
 
@@ -302,6 +353,10 @@ class FeedBatch(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     formula_id = db.Column(db.Integer, nullable=True, index=True)
+    # Direct link to the planner recipe this batch was mixed from. Nullable so
+    # legacy batches (which only ever carried a template formula_id) keep NULL
+    # and fall back to ingredient-signature attribution.
+    recipe_id = db.Column(db.Integer, nullable=True, index=True)
     batch_name = db.Column(db.String(255), nullable=False)
     total_weight = db.Column(db.Numeric(14, 3), nullable=False)
     total_cost = db.Column(db.Numeric(14, 4), nullable=False)
@@ -333,6 +388,12 @@ class FeedBatch(db.Model):
             ondelete='RESTRICT',
             name='fk_feed_batches_formula_tenant',
         ),
+        ForeignKeyConstraint(
+            ['tenant_id', 'recipe_id'],
+            ['feed_recipes.tenant_id', 'feed_recipes.id'],
+            ondelete='SET NULL',
+            name='fk_feed_batches_recipe_tenant',
+        ),
         db.UniqueConstraint('tenant_id', 'id', name='uq_feed_batches_tenant_id'),
         db.CheckConstraint("status IN ('ACTIVE', 'DEPLETED', 'VOIDED')", name='ck_feed_batches_status_valid'),
         db.CheckConstraint('total_weight > 0', name='ck_feed_batches_total_weight_positive'),
@@ -340,6 +401,7 @@ class FeedBatch(db.Model):
         db.CheckConstraint('cost_per_kg >= 0', name='ck_feed_batches_cost_per_kg_non_negative'),
         db.CheckConstraint('depleted_on IS NULL OR depleted_on >= mixed_on', name='ck_feed_batches_depleted_after_mixed'),
         db.Index('ix_feed_batches_tenant_status_mixed_on', 'tenant_id', 'status', 'mixed_on'),
+        db.Index('ix_feed_batches_tenant_recipe', 'tenant_id', 'recipe_id'),
     )
 
 
@@ -394,6 +456,7 @@ class FeedBatchConsumptionEvent(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     batch_id = db.Column(db.Integer, nullable=False, index=True)
+    feeding_group = db.Column(db.String(40), nullable=True)
     consumed_weight = db.Column(db.Numeric(14, 3), nullable=False)
     consumed_on = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
     created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
@@ -405,6 +468,10 @@ class FeedBatchConsumptionEvent(db.Model):
             ['feed_batches.tenant_id', 'feed_batches.id'],
             ondelete='CASCADE',
             name='fk_feed_batch_consumption_events_batch_tenant',
+        ),
+        db.CheckConstraint(
+            "feeding_group IS NULL OR feeding_group IN ('lactating', 'dry', 'calf_0_3m', 'calf_3_6m', 'heifer')",
+            name='ck_feed_batch_consumption_events_feeding_group_valid',
         ),
         db.CheckConstraint('consumed_weight > 0', name='ck_feed_batch_consumption_events_weight_positive'),
         db.Index('ix_feed_batch_consumption_events_tenant_batch_date', 'tenant_id', 'batch_id', 'consumed_on'),
@@ -483,19 +550,19 @@ class MilkLog(db.Model):
     STATUS_ISOLATED = 'ISOLATED'
     STATUS_FLAGGED = 'FLAGGED'
     STATUS_VERIFIED = 'VERIFIED'
-    
+
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=False)
     amount_liters = db.Column(db.Numeric(10, 2), nullable=False)
-    session = db.Column(db.String(20), nullable=False) 
+    session = db.Column(db.String(20), nullable=False)
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     butterfat_pct = db.Column(db.Numeric(5, 2), nullable=True)
-    
+
     # Critical Commercial Flags
     status = db.Column(db.String(20), nullable=False, default=STATUS_RECORDED)
-    is_saleable = db.Column(db.Boolean, default=True, nullable=False) 
+    is_saleable = db.Column(db.Boolean, default=True, nullable=False)
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
     verified_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
@@ -506,6 +573,44 @@ class MilkLog(db.Model):
             name='ck_milk_logs_status_valid',
         ),
     )
+
+
+class MilkDispositionType:
+    CALF_FEED = 'CALF_FEED'
+
+
+class MilkDisposition(db.Model):
+    __tablename__ = 'milk_dispositions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    disposition_type = db.Column(db.String(30), nullable=False)
+    disposition_date = db.Column(db.Date, nullable=False, index=True)
+    liters = db.Column(db.Numeric(10, 2), nullable=False)
+    calf_id = db.Column(db.Integer, db.ForeignKey('cows.id'), nullable=True, index=True)
+    notes = db.Column(db.Text, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    calf = db.relationship('Cow', foreign_keys=[calf_id], lazy='joined')
+
+    __table_args__ = (
+        db.CheckConstraint('liters > 0', name='ck_milk_dispositions_liters_positive'),
+        db.CheckConstraint(
+            "disposition_type IN ('CALF_FEED')",
+            name='ck_milk_dispositions_type_valid',
+        ),
+        db.CheckConstraint(
+            "disposition_type != 'CALF_FEED' OR calf_id IS NOT NULL",
+            name='ck_milk_dispositions_calf_required',
+        ),
+    )
+
+
+try:
+    from app.models.livestock import AnimalYieldTarget
+except Exception:  # pragma: no cover
+    AnimalYieldTarget = None
 
 
 class MilkDropAlert(db.Model):
