@@ -32,30 +32,18 @@ def create_app(config_class=Config):
     limiter.init_app(app)
     migrate.init_app(app, db)
 
+    # Initialize CORS properly and explicitly allow your frontend
+    CORS(app, supports_credentials=True, origins=[
+        "https://jivu-smart-dairy-system.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173"
+    ])
+
     global celery
     celery = make_celery(app)
 
-    @app.before_request
-    def handle_cors_preflight():
-        if request.method != 'OPTIONS':
-            return None
-        response = app.make_response(('', 200))
-        return response
-
     @app.after_request
-    def add_cors_headers(response):
-        origin = request.headers.get('Origin')
-        if origin and origin in app.config['CORS_ALLOWED_ORIGINS']:
-            response.headers['Access-Control-Allow-Origin'] = origin
-        response.headers['Vary'] = 'Origin'
-        response.headers['Access-Control-Allow-Credentials'] = 'true'
-        response.headers['Access-Control-Allow-Headers'] = request.headers.get(
-            'Access-Control-Request-Headers',
-            'Authorization,Content-Type,Idempotency-Key,X-Tenant-ID,X-Farm-ID',
-        )
-        response.headers['Access-Control-Expose-Headers'] = 'Idempotency-Replayed'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,POST,PATCH,PUT,DELETE,OPTIONS'
-
+    def add_security_headers(response):
         # Baseline hardening for browser responses.
         response.headers.setdefault('X-Content-Type-Options', 'nosniff')
         response.headers.setdefault('X-Frame-Options', 'DENY')
@@ -182,4 +170,3 @@ def create_app(config_class=Config):
         }), 200
 
     return app
-
