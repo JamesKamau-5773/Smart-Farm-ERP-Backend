@@ -15,7 +15,7 @@ import sqlalchemy as sa
 revision = '8c2b4f9d1e40'
 down_revision = '390d029aa1ce'
 branch_labels = None
-depends_on = None
+depends_on = 'd9c2b36d7a4f'
 
 
 def _table_exists(conn, table_name: str) -> bool:
