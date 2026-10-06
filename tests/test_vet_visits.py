@@ -39,6 +39,7 @@ class VetVisitTestCase(BaseTestCase):
                         recommendations='Rest for 3 days',
                         remarks='Monitor gait',
                         observations='Mild swelling',
+                        severity='High',
                         follow_up_required=True,
                         follow_up_date='2026-05-31',
                     )
@@ -49,6 +50,7 @@ class VetVisitTestCase(BaseTestCase):
             visit_data = json.loads(visit_response.data.decode())
             visit_id = visit_data['visit']['id']
             self.assertEqual(visit_data['visit']['follow_up_status'], 'Scheduled')
+            self.assertEqual(visit_data['visit']['severity'], 'High')
 
             pending_response = self.client.get('/api/clinical/vet-visits/follow-ups/pending')
             self.assertEqual(pending_response.status_code, 200)
@@ -116,7 +118,7 @@ class VetVisitTestCase(BaseTestCase):
                         'meds': ['antibiotic'],
                         'recommendations': 'seclude milk for 3 days',
                         'status': 'Closed',
-                        'severity': 'Medium',
+                        'severity': 'Low',
                         'vet': '',
                         'followUp': '2026-07-13',
                         'updatedBy': '',
@@ -129,5 +131,23 @@ class VetVisitTestCase(BaseTestCase):
             payload = json.loads(update_response.data.decode())
             self.assertEqual(payload['visit']['diagnosis'], 'mastitis')
             self.assertEqual(payload['visit']['medications'], ['antibiotic'])
+            self.assertEqual(payload['visit']['severity'], 'Low')
             self.assertEqual(payload['visit']['follow_up_date'], '2026-07-13')
             self.assertEqual(payload['visit']['reason_for_visit'], 'Routine check')
+
+    def test_due_status_requires_follow_up_date(self):
+        self._login('vet')
+
+        response = self.client.post(
+            '/api/clinical/vet-visits',
+            data=json.dumps({
+                'animal_id': self.cow.id,
+                'visit_date': '2026-05-26',
+                'reason_for_visit': 'Lameness check',
+                'follow_up_status': 'Scheduled',
+            }),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('follow_up_date is required', json.loads(response.data.decode())['error'])

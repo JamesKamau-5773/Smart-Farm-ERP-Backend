@@ -184,6 +184,30 @@ class BreedingTestCase(BaseTestCase):
             self.assertIn('expected_calving_date', log_data)
             self.assertEqual(log_data['semen_source_label'], 'Farm Inventory')
 
+    def test_new_insemination_marks_previous_pending_attempt_unsuccessful(self):
+        self._login()
+        with self.client:
+            inv_response = self.client.post(
+                '/api/operations/semen-inventory',
+                json={'bull_name': 'BULL-REPEAT', 'straw_code': 'AI-REPEAT-001', 'breed': 'Friesian', 'stock_level': 3},
+            )
+            semen_id = inv_response.get_json()['id']
+            first_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-20'},
+            )
+            first_id = first_response.get_json()['breeding_log_id']
+
+            second_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-06-20'},
+            )
+
+        self.assertEqual(second_response.status_code, 201)
+        self.assertEqual(second_response.get_json()['status'], 'Pending')
+        self.assertEqual(db.session.get(BreedingLog, first_id).status, 'Failed')
+        self.assertEqual(BreedingLog.query.filter_by(cow_id=self.cow.id, status='Pending').count(), 1)
+
     def test_update_breeding_status(self):
         self._login()
 
@@ -210,6 +234,84 @@ class BreedingTestCase(BaseTestCase):
             self.assertEqual(update_response.status_code, 200)
             update_data = json.loads(update_response.data.decode())
             self.assertEqual(update_data['status'], 'Pregnant')
+
+    def test_update_pending_breeding_log(self):
+        self._login()
+
+        with self.client:
+            inventory_response = self.client.post(
+                '/api/operations/semen-inventory',
+                json={'bull_name': 'BULL-EDIT', 'straw_code': 'AI-EDIT-001', 'breed': 'Friesian', 'stock_level': 3},
+            )
+            semen_id = inventory_response.get_json()['id']
+            create_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-20'},
+            )
+            log_id = create_response.get_json()['breeding_log_id']
+            update_response = self.client.put(
+                f'/api/operations/breeding-logs/{log_id}',
+                json={
+                    'cow_id': self.cow.id,
+                    'semen_id': semen_id,
+                    'provided_by': 'FARM',
+                    'insemination_date': '2026-05-22',
+                    'insemination_time': '09:30',
+                    'technician_name': 'Dr. Edit',
+                    'service_fee': 1500,
+                    'is_repeat_service': True,
+                },
+            )
+            list_response = self.client.get('/api/operations/breeding-logs')
+
+        self.assertEqual(update_response.status_code, 200)
+        updated = update_response.get_json()
+        self.assertEqual(updated['id'], log_id)
+        self.assertEqual(updated['cow_id'], self.cow.id)
+        self.assertEqual(updated['insemination_date'], '2026-05-22')
+        self.assertEqual(updated['insemination_time'], '09:30:00')
+        self.assertEqual(updated['technician_name'], 'Dr. Edit')
+        self.assertEqual(updated['service_fee'], 1500.0)
+        self.assertTrue(updated['is_repeat_service'])
+        self.assertEqual(updated['status'], 'Pending')
+        self.assertEqual(db.session.get(SemenInventory, semen_id).stock_level, 2)
+        listed = list_response.get_json()['items'][0]
+        self.assertEqual(listed['id'], log_id)
+        self.assertEqual(listed['insemination_time'], '09:30:00')
+        self.assertEqual(listed['technician_name'], 'Dr. Edit')
+        self.assertEqual(listed['owner_name'], None)
+        self.assertEqual(listed['service_fee'], 1500.0)
+        self.assertTrue(listed['is_repeat_service'])
+        timeline_event = AnimalTimelineEvent.query.filter_by(
+            tenant_id=self.tenant.id,
+            cow_id=self.cow.id,
+            event_type='breeding',
+        ).first()
+        self.assertEqual(timeline_event.event_data['breeding_log_id'], log_id)
+        self.assertEqual(timeline_event.event_date.date().isoformat(), '2026-05-22')
+
+    def test_update_rejects_non_pending_breeding_log(self):
+        self._login()
+
+        with self.client:
+            inventory_response = self.client.post(
+                '/api/operations/semen-inventory',
+                json={'bull_name': 'BULL-CLOSED', 'straw_code': 'AI-CLOSED-001', 'breed': 'Friesian', 'stock_level': 1},
+            )
+            semen_id = inventory_response.get_json()['id']
+            create_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-20'},
+            )
+            log_id = create_response.get_json()['breeding_log_id']
+            db.session.get(BreedingLog, log_id).status = 'Failed'
+            db.session.commit()
+            response = self.client.put(
+                f'/api/operations/breeding-logs/{log_id}',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-22'},
+            )
+
+        self.assertEqual(response.status_code, 409)
 
     def test_upload_certificate_and_pregnancy_check_milestone(self):
         self._login()

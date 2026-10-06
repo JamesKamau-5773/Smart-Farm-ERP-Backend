@@ -335,6 +335,7 @@ class VetVisit(db.Model):
     recommendations = db.Column(db.Text, nullable=True)
     remarks = db.Column(db.Text, nullable=True)
     observations = db.Column(db.Text, nullable=True)
+    severity = db.Column(db.String(10), nullable=False, default='Medium', server_default='Medium')
     follow_up_required = db.Column(db.Boolean, nullable=False, default=False)
     follow_up_date = db.Column(db.Date, nullable=True)
     follow_up_status = db.Column(db.String(20), nullable=False, default='Not Required')
@@ -342,6 +343,10 @@ class VetVisit(db.Model):
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
+        db.CheckConstraint(
+            "severity IN ('Low', 'Medium', 'High')",
+            name='ck_vet_visits_severity_valid'
+        ),
         db.CheckConstraint(
             "follow_up_status IN ('Not Required', 'Pending', 'Scheduled', 'Completed', 'Overdue', 'Cancelled')",
             name='ck_vet_visits_follow_up_status_valid'
