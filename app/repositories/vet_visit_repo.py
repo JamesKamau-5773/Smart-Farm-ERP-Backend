@@ -8,7 +8,7 @@ from app.models.livestock import VetVisit
 
 class VetVisitRepository:
     @staticmethod
-    def create(*, tenant_id: int, animal_id: int, vet_id: int, visit_date: date, reason_for_visit: str, diagnosis: str = None, medications=None, recommendations: str = None, remarks: str = None, observations: str = None, follow_up_required: bool = False, follow_up_date=None, follow_up_status: str = 'Not Required', follow_up_completed_at=None) -> VetVisit:
+    def create(*, tenant_id: int, animal_id: int, vet_id: int, visit_date: date, reason_for_visit: str, diagnosis: str = None, medications=None, recommendations: str = None, remarks: str = None, observations: str = None, severity: str = 'Medium', follow_up_required: bool = False, follow_up_date=None, follow_up_status: str = 'Not Required', follow_up_completed_at=None) -> VetVisit:
         try:
             visit = VetVisit(
                 tenant_id=tenant_id,
@@ -21,6 +21,7 @@ class VetVisitRepository:
                 recommendations=recommendations,
                 remarks=remarks,
                 observations=observations,
+                severity=severity,
                 follow_up_required=follow_up_required,
                 follow_up_date=follow_up_date,
                 follow_up_status=follow_up_status,

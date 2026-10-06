@@ -401,6 +401,17 @@ def list_insemination_logs():
     return breeding_alias_list()
 
 
+@operations_bp.route('/breeding-logs/<int:log_id>', methods=['PUT'])
+@jwt_required()
+@role_required(Role.FARMER, Role.VET)
+def update_insemination_log(log_id):
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({"error": "Missing or invalid tenant in token."}), 400
+
+    return BreedingService.update_insemination(tenant_id, log_id, request.get_json() or {})
+
+
 @operations_bp.route('/breeding-logs/<int:log_id>/certificate', methods=['POST'])
 @jwt_required()
 @role_required(Role.FARMER, Role.VET)
@@ -1524,7 +1535,16 @@ def breeding_alias_list():
             'sire_pta_scores': row.sire_pta_scores,
             'semen_source_label': 'Farm Inventory' if row.provided_by == 'FARM' else 'Vet Provided',
             'insemination_date': row.insemination_date.isoformat() if row.insemination_date else None,
+            'insemination_time': row.insemination_time.isoformat() if row.insemination_time else None,
             'expected_calving_date': row.expected_calving_date.isoformat() if row.expected_calving_date else None,
+            'certificate_number': row.certificate_number,
+            'technician_name': row.technician_name,
+            'owner_name': row.owner_name,
+            'farm_location': row.farm_location,
+            'service_fee': float(row.service_fee) if row.service_fee is not None else None,
+            'is_repeat_service': row.is_repeat_service,
+            'certificate_image_url': row.certificate_image_url,
+            'heat_observation_id': row.heat_observation.id if row.heat_observation else None,
             'status': row.status,
         }
         for row in paginated.items

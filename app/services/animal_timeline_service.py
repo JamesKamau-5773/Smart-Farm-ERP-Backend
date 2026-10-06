@@ -68,3 +68,42 @@ class AnimalTimelineService:
                 "Failed to mirror event_type=%s for cow_id=%s into animal_events", event_type, cow_id
             )
             return None
+
+    @staticmethod
+    def update_breeding_event(
+        *,
+        tenant_id: int,
+        breeding_log_id: int,
+        cow_id: int,
+        title: str,
+        description: str,
+        event_date,
+        event_data: dict,
+    ) -> AnimalTimelineEvent | None:
+        try:
+            event = next((candidate for candidate in AnimalTimelineEvent.query.filter_by(
+                tenant_id=tenant_id,
+                event_type='breeding',
+            ).all() if (candidate.event_data or {}).get('breeding_log_id') == breeding_log_id), None)
+            if event is None:
+                return AnimalTimelineService.record_event(
+                    tenant_id=tenant_id,
+                    cow_id=cow_id,
+                    event_type='breeding',
+                    title=title,
+                    description=description,
+                    event_date=event_date,
+                    event_data=event_data,
+                )
+
+            event.cow_id = cow_id
+            event.title = title
+            event.description = description
+            event.event_date = datetime.combine(event_date, datetime.min.time(), tzinfo=timezone.utc)
+            event.event_data = event_data
+            db.session.commit()
+            return event
+        except Exception:
+            db.session.rollback()
+            current_app.logger.exception("Failed to update breeding timeline event for log_id=%s", breeding_log_id)
+            return None

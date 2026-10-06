@@ -10,6 +10,12 @@ from app.services.animal_timeline_service import AnimalTimelineService
 
 class VetVisitService:
     VALID_FOLLOW_UP_STATUSES = {'Not Required', 'Pending', 'Scheduled', 'Completed', 'Overdue', 'Cancelled'}
+    VALID_SEVERITIES = {'Low', 'Medium', 'High'}
+
+    @staticmethod
+    def _normalize_severity(value):
+        severity = str(value or 'Medium').strip().title()
+        return severity if severity in VetVisitService.VALID_SEVERITIES else None
 
     @staticmethod
     def _normalize_medications(value):
@@ -38,6 +44,7 @@ class VetVisitService:
             'recommendations': visit.recommendations,
             'remarks': visit.remarks,
             'observations': visit.observations,
+            'severity': visit.severity,
             'follow_up_required': visit.follow_up_required,
             'follow_up_date': visit.follow_up_date.isoformat() if visit.follow_up_date else None,
             'follow_up_status': visit.follow_up_status,
@@ -64,8 +71,14 @@ class VetVisitService:
         if not livestock:
             return jsonify({'error': 'Livestock not found in registry.'}), 404
 
+        severity = VetVisitService._normalize_severity(data.get('severity', 'Medium'))
+        if severity is None:
+            return jsonify({'error': 'severity must be Low, Medium, or High.'}), 400
+
         follow_up_required = bool(data.get('follow_up_required', False))
         follow_up_date_raw = data.get('follow_up_date')
+        if data.get('follow_up_status') == 'Scheduled' and not follow_up_date_raw:
+            return jsonify({'error': 'follow_up_date is required when follow-up is due.'}), 400
         follow_up_date = None
         follow_up_status = 'Not Required'
 
@@ -92,6 +105,7 @@ class VetVisitService:
             recommendations=data.get('recommendations'),
             remarks=data.get('remarks'),
             observations=data.get('observations'),
+            severity=severity,
             follow_up_required=follow_up_required,
             follow_up_date=follow_up_date,
             follow_up_status=follow_up_status,
@@ -166,6 +180,15 @@ class VetVisitService:
         visit = VetVisitRepository.get_by_id_for_tenant(visit_id, tenant_id)
         if not visit:
             return jsonify({'error': 'Vet visit not found for this tenant.'}), 404
+
+        if 'severity' in data:
+            severity = VetVisitService._normalize_severity(data.get('severity'))
+            if severity is None:
+                return jsonify({'error': 'severity must be Low, Medium, or High.'}), 400
+            visit.severity = severity
+
+        if data.get('follow_up_status') == 'Scheduled' and not data.get('follow_up_date', visit.follow_up_date):
+            return jsonify({'error': 'follow_up_date is required when follow-up is due.'}), 400
 
         animal_id = data.get('animal_id') or data.get('cow_id')
         if animal_id not in (None, ''):
