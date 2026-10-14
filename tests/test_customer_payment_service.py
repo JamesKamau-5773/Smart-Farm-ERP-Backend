@@ -82,6 +82,18 @@ class CustomerPaymentServiceTestCase(BaseTestCase):
             Decimal('600.00'),
         )
 
+    def test_cash_payment_reference_is_optional(self):
+        customer, payment = PaymentService.record_customer_payment(
+            tenant_id=self.tenant.id,
+            customer_id=self.customer.id,
+            amount=200,
+            reference_code='',
+            payment_method='Cash',
+        )
+
+        self.assertIsNone(payment.reference_code)
+        self.assertEqual(customer.account_balance, Decimal('400.00'))
+
     def test_duplicate_receipt_reference_cannot_reduce_balance_twice(self):
         PaymentService.record_customer_payment(
             tenant_id=self.tenant.id,

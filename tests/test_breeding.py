@@ -3,6 +3,7 @@ import json
 from datetime import date
 
 from app import db
+from app.models.finance import Transaction, TransactionCategory, TransactionStatus, TransactionType
 from app.models.livestock import AnimalTimelineEvent, BreedingLog, Cow, HeatObservation, SemenInventory
 from app.models.supply import MilkLog, MilkSession
 from app.models.user import Role
@@ -289,6 +290,60 @@ class BreedingTestCase(BaseTestCase):
         ).first()
         self.assertEqual(timeline_event.event_data['breeding_log_id'], log_id)
         self.assertEqual(timeline_event.event_date.date().isoformat(), '2026-05-22')
+
+    def test_service_fee_creates_atomic_expense_and_replays_idempotently(self):
+        self._login()
+
+        headers = {'Idempotency-Key': 'ai-service-1'}
+        with self.client:
+            inventory_response = self.client.post(
+                '/api/operations/semen-inventory',
+                json={'bull_name': 'BULL-FEE', 'straw_code': 'AI-FEE-001', 'breed': 'Friesian', 'stock_level': 2},
+            )
+            semen_id = inventory_response.get_json()['id']
+            create_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-20', 'service_fee': 1500},
+                headers=headers,
+            )
+            self.assertEqual(create_response.status_code, 201)
+            payload = create_response.get_json()
+            self.assertEqual(Transaction.query.count(), 1)
+            transaction = Transaction.query.one()
+            self.assertEqual(transaction.transaction_type, TransactionType.EXPENSE)
+            self.assertEqual(transaction.category, TransactionCategory.AI_SERVICE)
+            self.assertEqual(float(transaction.amount), 1500.0)
+            self.assertEqual(transaction.source_document_id, payload['breeding_log_id'])
+            self.assertEqual(transaction.source_document_type, 'BREEDING_LOG')
+            self.assertEqual(transaction.chart_of_accounts_code, '6105')
+            self.assertEqual(transaction.payment_status, 'PAYABLE')
+
+            replay_response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'insemination_date': '2026-05-20', 'service_fee': 1500},
+                headers=headers,
+            )
+            self.assertEqual(replay_response.status_code, 201)
+            self.assertEqual(Transaction.query.count(), 1)
+            self.assertEqual(replay_response.get_json()['breeding_log_id'], payload['breeding_log_id'])
+
+    def test_service_fee_invalid_provider_rolls_back_breeding_record(self):
+        self._login()
+
+        with self.client:
+            inventory_response = self.client.post(
+                '/api/operations/semen-inventory',
+                json={'bull_name': 'BULL-ROLLBACK', 'straw_code': 'AI-ROLLBACK-001', 'breed': 'Friesian', 'stock_level': 2},
+            )
+            semen_id = inventory_response.get_json()['id']
+            response = self.client.post(
+                '/api/operations/breeding-logs',
+                json={'cow_id': self.cow.id, 'semen_id': semen_id, 'provided_by': 'INVALID', 'insemination_date': '2026-05-20', 'service_fee': 1500},
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(BreedingLog.query.filter_by(tenant_id=self.tenant.id).count(), 0)
+            self.assertEqual(Transaction.query.count(), 0)
 
     def test_update_rejects_non_pending_breeding_log(self):
         self._login()
