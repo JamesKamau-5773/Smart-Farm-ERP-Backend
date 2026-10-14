@@ -6,6 +6,7 @@ from app.services.production_service import ProductionService
 from app.services.breeding_service import BreedingService
 from app.services.finance_service import FinanceService
 from app.services.genetic_projection_service import GeneticProjectionService
+from app.services.breeding_accounting_service import BreedingAccountingService
 from app.repositories.cow_repo import CowRepository
 from app.repositories.breeding_repo import BreedingLogRepository
 from app.models.supply import MilkLog
@@ -389,7 +390,18 @@ def log_insemination():
         return jsonify({"error": "Missing or invalid tenant in token."}), 400
 
     data = request.get_json() or {}
-    return BreedingService.log_insemination(tenant_id, data)
+    user_id = getattr(g, 'actor_id', None)
+    try:
+        return BreedingAccountingService.create_with_expense(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            data=data,
+            ip_address=request.remote_addr,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @operations_bp.route('/breeding-logs', methods=['GET'])

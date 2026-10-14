@@ -8,6 +8,7 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
 from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timezone
 from app import db
 from app.models.finance import Buyer, CostClass, Customer, Delivery, ReceiptAuditLog, SalesLedger, Transaction, TransactionStatus, TransactionType, TransactionCategory
 from app.models.user import Role
@@ -19,16 +20,27 @@ from app.services.receipt_service import ReceiptService
 from app.utils import get_tenant_id_from_context
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
-from datetime import datetime, timezone
 from weasyprint import HTML
 
 
 finance_bp = Blueprint('finance', __name__)
 
 
+def _parse_date_param(param_name: str, default: date | None = None) -> date | None:
+    """Safely parse an optional request date argument."""
+    raw = request.args.get(param_name)
+    if raw in (None, ''):
+        return default
+    try:
+        return datetime.fromisoformat(raw.split('T')[0]).date()
+    except (TypeError, ValueError):
+        raise ValueError(f'{param_name} must be a valid date in YYYY-MM-DD format.')
+
+
 DEFAULT_COST_CLASS_BY_CATEGORY = {
     TransactionCategory.FEED_PURCHASE: CostClass.COGS,
     TransactionCategory.VET_FEES: CostClass.COGS,
+    TransactionCategory.AI_SERVICE: CostClass.COGS,
     TransactionCategory.LABOR_WAGES: CostClass.COGS,
     TransactionCategory.UTILITIES: CostClass.COGS,
     TransactionCategory.INVENTORY_WRITE_OFF: CostClass.COGS,
@@ -103,7 +115,7 @@ def _serialize_transaction(transaction_tuple) -> dict:
     transaction_date = getattr(transaction, 'timestamp', None)
     counterparty_name = customer_name or buyer_name or transaction.counterparty_name
     receipt = transaction.receipt
-    animal_cost_allocation = transaction.animal_cost_allocation
+    animal_cost_allocations = transaction.animal_cost_allocations
     return {
         'id': transaction.id,
         'date': transaction_date.isoformat() if transaction_date else None,
@@ -129,11 +141,12 @@ def _serialize_transaction(transaction_tuple) -> dict:
         'replacement_transaction_id': transaction.correction_replacement.id if transaction.correction_replacement else None,
         'farm_id': transaction.farm_id,
         'amount': float(getattr(transaction, 'amount', 0.0) or 0.0),
-        'animal_cost_allocation': {
-            'cow_id': animal_cost_allocation.cow_id,
-            'cost_type': animal_cost_allocation.cost_type.value,
-            'attribution_method': animal_cost_allocation.attribution_method,
-        } if animal_cost_allocation else None,
+        'animal_cost_allocations': [{
+            'cow_id': allocation.cow_id,
+            'cost_type': allocation.cost_type.value,
+            'amount': float(allocation.amount),
+            'attribution_method': allocation.attribution_method,
+        } for allocation in animal_cost_allocations] if animal_cost_allocations else [],
         'receipt_available': receipt is not None,
         'receipt': {
             'id': receipt.id,
@@ -183,6 +196,19 @@ def get_customer(customer_id):
         return jsonify({'error': 'Customer not found.'}), 404
 
     return jsonify(_serialize_customer(customer)), 200
+
+
+@finance_bp.route('/buyers', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def get_buyers():
+    """Returns active buyers for the current tenant."""
+    tenant_id = get_tenant_id_from_context()
+    if not tenant_id:
+        return jsonify({'error': 'Tenant context is missing.'}), 400
+
+    buyers = db.session.query(Buyer).filter_by(tenant_id=tenant_id, is_active=True).order_by(Buyer.name).all()
+    return jsonify([BuyerService.serialize_buyer(buyer) for buyer in buyers]), 200
 
 
 @finance_bp.route('/customers/<int:customer_id>/payments', methods=['POST'])
@@ -326,7 +352,6 @@ def get_deliveries():
         }
     }), 200
 
-
 @finance_bp.route('/ledger', methods=['GET'])
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND)
@@ -344,10 +369,22 @@ def get_ledger():
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
     farm_id = _current_farm_id()
-    search_query = str(request.args.get('search_query') or '').strip()
+
+    # Updated to capture 'search' from the new frontend search bar, with fallback to 'search_query'
+    search_query = str(request.args.get('search') or request.args.get('search_query') or '').strip()
+
     account_type = str(request.args.get('account_type') or '').strip().lower()
     account_id_raw = request.args.get('account_id')
     legacy_customer_id = request.args.get('customer_id')
+
+    try:
+        start_date = _parse_date_param('start_date')
+        end_date = _parse_date_param('end_date')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    if start_date and end_date and end_date < start_date:
+        return jsonify({'error': 'end_date cannot be earlier than start_date.'}), 400
 
     if legacy_customer_id not in (None, ''):
         if account_type or account_id_raw not in (None, ''):
@@ -421,6 +458,10 @@ def get_ledger():
 
     if farm_id is not None:
         query = query.filter(Transaction.farm_id == farm_id)
+    if start_date is not None:
+        query = query.filter(func.date(Transaction.timestamp) >= start_date)
+    if end_date is not None:
+        query = query.filter(func.date(Transaction.timestamp) <= end_date)
     query = apply_account_scope(query)
 
     # Apply ordering and pagination
@@ -449,13 +490,25 @@ def get_ledger():
             ),
             else_=0,
         )), 0),
+        func.coalesce(func.sum(case(
+            (
+                (Transaction.transaction_type == TransactionType.PAYMENT)
+                & (Transaction.status == TransactionStatus.POSTED.value),
+                Transaction.amount,
+            ),
+            else_=0,
+        )), 0),
         func.count(Transaction.id),
     ).filter(Transaction.tenant_id == tenant_id)
     if farm_id is not None:
         totals_query = totals_query.filter(Transaction.farm_id == farm_id)
+    if start_date is not None:
+        totals_query = totals_query.filter(func.date(Transaction.timestamp) >= start_date)
+    if end_date is not None:
+        totals_query = totals_query.filter(func.date(Transaction.timestamp) <= end_date)
     totals_query = apply_account_scope(totals_query)
     totals = totals_query.one()
-    total_income, total_costs, transaction_count = totals
+    total_income, total_costs, total_amount_paid, transaction_count = totals
 
     customer_balances = db.session.query(
         func.coalesce(func.sum(case((Customer.account_balance > 0, Customer.account_balance), else_=0)), 0),
@@ -485,6 +538,7 @@ def get_ledger():
             "outstanding_receivables": float(outstanding_receivables),
             "customer_credit": float(customer_credit),
             "posted_costs": float(total_costs),
+            "total_amount_paid": float(total_amount_paid),
             "net_profit": float(total_income - total_costs),
             "ledger_records": transaction_count,
             "total_income": float(total_income),
@@ -625,17 +679,23 @@ def create_ledger_entry():
     if transaction_type == TransactionType.REVENUE and not (customer or buyer or counterparty_name):
         return jsonify({'error': 'A customer, buyer, or income_source is required for an income record.'}), 400
 
-    animal_id = data.get('animal_id')
+    animal_ids = data.get('animal_ids')
+    if animal_ids is None:
+        animal_ids = data.get('animal_id')
+        if animal_ids is not None:
+            animal_ids = [animal_ids]
     animal_cost_type = data.get('animal_cost_type')
-    if (animal_id is None) != (animal_cost_type is None):
-        return jsonify({'error': 'animal_id and animal_cost_type must be provided together.'}), 400
-    if animal_id is not None and transaction_type != TransactionType.EXPENSE:
-        return jsonify({'error': 'Only expense records can be allocated to an animal.'}), 400
-    if animal_id is not None:
+    if (animal_ids is None) != (animal_cost_type is None):
+        return jsonify({'error': 'animal_ids and animal_cost_type must be provided together.'}), 400
+    if animal_ids is not None and transaction_type != TransactionType.EXPENSE:
+        return jsonify({'error': 'Only expense records can be allocated to animals.'}), 400
+    if animal_ids is not None:
         try:
-            animal_id = int(animal_id)
+            animal_ids = [int(animal_id) for animal_id in animal_ids]
         except (TypeError, ValueError):
-            return jsonify({'error': 'animal_id must be a valid integer.'}), 400
+            return jsonify({'error': 'animal_ids must contain valid integers.'}), 400
+        if not animal_ids:
+            return jsonify({'error': 'At least one animal must be selected.'}), 400
 
     timestamp = datetime.now(timezone.utc)
     if data.get('date'):
@@ -670,13 +730,14 @@ def create_ledger_entry():
     try:
         db.session.add(transaction)
         db.session.flush()
-        if animal_id is not None:
-            AnimalCostAllocationService().create_for_transaction(
+        if animal_ids is not None:
+            allocations = AnimalCostAllocationService().create_for_transaction(
                 tenant_id=tenant_id,
-                cow_id=animal_id,
+                cow_ids=animal_ids,
                 cost_type=animal_cost_type,
                 transaction=transaction,
             )
+            transaction.animal_cost_allocations = allocations
         if transaction_type == TransactionType.REVENUE:
             ReceiptService.issue(
                 transaction,

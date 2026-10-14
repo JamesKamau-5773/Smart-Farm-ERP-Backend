@@ -76,8 +76,9 @@ class PaymentService:
         payment_method: str | None = None,
         timestamp: datetime | None = None,
     ) -> tuple[Customer, Transaction]:
-        reference_code = str(reference_code or '').strip()
-        if not reference_code:
+        normalized_reference = str(reference_code or '').strip()
+        normalized_method = str(payment_method or '').strip().lower()
+        if not normalized_reference and normalized_method != 'cash':
             raise ValueError('reference_code is required')
 
         customer = Customer.query.filter_by(
@@ -92,7 +93,7 @@ class PaymentService:
             customer_id=customer.id,
             amount=amount,
             category=TransactionCategory.PAYMENT,
-            reference_code=reference_code,
+            reference_code=normalized_reference or None,
             recorded_by=recorded_by,
             description=description or f'Payment from {customer.name}',
             payment_method=payment_method,

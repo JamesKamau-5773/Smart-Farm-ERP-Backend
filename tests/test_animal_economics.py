@@ -37,6 +37,28 @@ class AnimalEconomicsAPITestCase(BaseTestCase):
         self.assertEqual(float(allocation.amount), 1200.0)
         self.assertEqual(Transaction.query.count(), 1)
 
+    def test_ledger_expense_allows_multiple_cows(self):
+        second_cow = Cow(tenant_id=self.tenant.id, tag_number='HF-002', name='Basil', date_of_birth=date.today() - timedelta(days=800))
+        db.session.add(second_cow)
+        db.session.commit()
+
+        response = self.client.post('/api/finance/ledger', headers=self.auth_headers, json={
+            'transaction_type': 'Expense',
+            'category': 'Vet Fees',
+            'amount': 1200,
+            'paid_to': 'Farm Vet',
+            'item_name': 'Vaccination',
+            'quantity': 1,
+            'animal_ids': [self.cow.id, second_cow.id],
+            'animal_cost_type': 'VETERINARY',
+        })
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(AnimalCostAllocation.query.count(), 2)
+        self.assertEqual({allocation.cow_id for allocation in AnimalCostAllocation.query.all()}, {self.cow.id, second_cow.id})
+        self.assertEqual({float(allocation.amount) for allocation in AnimalCostAllocation.query.all()}, {600.0})
+        self.assertEqual(Transaction.query.count(), 1)
+
     def test_report_separates_rearing_cost_and_allocates_milk_revenue(self):
         first_calving = date.today() - timedelta(days=10)
         buyer = Buyer(tenant_id=self.tenant.id, name='Dairy Buyer')

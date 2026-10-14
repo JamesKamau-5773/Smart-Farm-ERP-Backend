@@ -527,3 +527,142 @@ def animal_economics_report(cow_id: int):
     except LookupError:
         return jsonify({'error': 'Animal not found.'}), 404
     return jsonify(report), 200
+# Ensure these are imported at the top of reports.py if not already present:
+# from app.models.finance import Customer, Buyer, Delivery, SalesLedger, Transaction, TransactionType, TransactionStatus
+# from app.utils.decorators import role_required
+# from flask_jwt_extended import jwt_required
+
+@reports_bp.route('/api/reports/buyer-performance', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def get_buyer_performance():
+    tenant_id = get_tenant_id_from_context()
+    if not tenant_id:
+        return jsonify({'error': 'Missing or invalid tenant context.'}), 400
+
+    buyer_id_raw = request.args.get('buyer_id')
+    if not buyer_id_raw:
+        return jsonify({'error': 'buyer_id is required.'}), 400
+
+    try:
+        buyer_id = int(buyer_id_raw)
+        # Permanently resolving the TypeError by satisfying the positional argument requirement
+        start_date = _parse_date_param('start_date', None)
+        end_date = _parse_date_param('end_date', None)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    contact_name = None
+    outstanding_balance = 0.0
+    daily_stats = []
+    payments = []
+
+    # 1. Check Customer Table first (Primary)
+    customer = db.session.query(Customer).filter_by(id=buyer_id, tenant_id=tenant_id).first()
+    if customer:
+        contact_name = customer.name
+        outstanding_balance = float(customer.account_balance or 0.0)
+
+        daily_stats = db.session.query(
+            Delivery.date.label('date'),
+            func.sum(Delivery.liters_delivered).label('liters'),
+            func.sum(Delivery.total_price).label('revenue')
+        ).filter(
+            Delivery.tenant_id == tenant_id,
+            Delivery.customer_id == buyer_id,
+            Delivery.date >= start_date,
+            Delivery.date <= end_date
+        ).group_by(Delivery.date).all()
+
+        payments = db.session.query(
+            func.date(Transaction.timestamp).label('date'),
+            func.sum(Transaction.amount).label('paid')
+        ).filter(
+            Transaction.tenant_id == tenant_id,
+            Transaction.customer_id == buyer_id,
+            Transaction.transaction_type == TransactionType.PAYMENT,
+            Transaction.status == TransactionStatus.POSTED.value,
+            func.date(Transaction.timestamp) >= start_date,
+            func.date(Transaction.timestamp) <= end_date
+        ).group_by(func.date(Transaction.timestamp)).all()
+
+    # 2. Check Buyer Table if not found in Customers (Legacy/Consolidated Support)
+    else:
+        buyer = db.session.query(Buyer).filter_by(id=buyer_id, tenant_id=tenant_id).first()
+        if not buyer:
+            return jsonify({'error': 'Customer/Buyer not found.'}), 404
+
+        contact_name = buyer.name
+        buyer_balance = db.session.query(
+            func.coalesce(func.sum(SalesLedger.total_cost), 0)
+        ).filter(
+            SalesLedger.tenant_id == tenant_id,
+            SalesLedger.buyer_id == buyer_id
+        ).scalar() or 0.0
+        outstanding_balance = float(buyer_balance)
+
+        daily_stats = db.session.query(
+            SalesLedger.date.label('date'),
+            func.sum(SalesLedger.liters_sold).label('liters'),
+            func.sum(SalesLedger.total_cost).label('revenue')
+        ).filter(
+            SalesLedger.tenant_id == tenant_id,
+            SalesLedger.buyer_id == buyer_id,
+            SalesLedger.date >= start_date,
+            SalesLedger.date <= end_date
+        ).group_by(SalesLedger.date).all()
+
+        payments = db.session.query(
+            func.date(Transaction.timestamp).label('date'),
+            func.sum(Transaction.amount).label('paid')
+        ).filter(
+            Transaction.tenant_id == tenant_id,
+            Transaction.buyer_id == buyer_id,
+            Transaction.transaction_type == TransactionType.PAYMENT,
+            Transaction.status == TransactionStatus.POSTED.value,
+            func.date(Transaction.timestamp) >= start_date,
+            func.date(Transaction.timestamp) <= end_date
+        ).group_by(func.date(Transaction.timestamp)).all()
+
+    # 3. Consolidate results by date
+    report_dict = {}
+    for stat in daily_stats:
+        date_str = stat.date.isoformat() if hasattr(stat.date, 'isoformat') else str(stat.date)
+        report_dict[date_str] = {
+            'date': date_str,
+            'milk_delivered_liters': float(stat.liters or 0.0),
+            'revenue_kes': float(stat.revenue or 0.0),
+            'amount_paid_kes': 0.0
+        }
+
+    for pay in payments:
+        date_str = pay.date.isoformat() if hasattr(pay.date, 'isoformat') else str(pay.date)
+        if date_str not in report_dict:
+            report_dict[date_str] = {
+                'date': date_str,
+                'milk_delivered_liters': 0.0,
+                'revenue_kes': 0.0,
+                'amount_paid_kes': 0.0
+            }
+        report_dict[date_str]['amount_paid_kes'] = float(pay.paid or 0.0)
+
+    # 4. Format and calculate totals
+    daily_records = sorted(report_dict.values(), key=lambda x: x['date'], reverse=True)
+
+    total_liters = sum(r['milk_delivered_liters'] for r in daily_records)
+    total_revenue = sum(r['revenue_kes'] for r in daily_records)
+    total_paid = sum(r['amount_paid_kes'] for r in daily_records)
+
+    return jsonify({
+        "buyer": {
+            "id": buyer_id,
+            "name": contact_name
+        },
+        "summary": {
+            "milk_delivered_liters": total_liters,
+            "revenue_kes": total_revenue,
+            "amount_paid_kes": total_paid,
+            "outstanding_balance_kes": outstanding_balance
+        },
+        "daily_records": daily_records
+    }), 200

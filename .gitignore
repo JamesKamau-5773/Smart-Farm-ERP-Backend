@@ -9,6 +9,7 @@ instance/
 *.db
 *.sqlite
 *.sqlite3
+*.sql
 
 # Python bytecode and caches
 __pycache__/

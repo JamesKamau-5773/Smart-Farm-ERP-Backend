@@ -24,6 +24,7 @@ class TransactionCategory(str, enum.Enum):
     OTHER = 'Other'
     FEED_PURCHASE = 'Feed Purchase'
     VET_FEES = 'Vet Fees'
+    AI_SERVICE = 'AI Service'
     LABOR_WAGES = 'Labor / Wages'
     UTILITIES = 'Utilities'
     EQUIPMENT_MAINTENANCE = 'Equipment Maintenance'
@@ -34,6 +35,7 @@ class TransactionCategory(str, enum.Enum):
 
 class PaymentStatus(str, enum.Enum):
     UNPAID = 'UNPAID'
+    PAYABLE = 'PAYABLE'
     PARTIALLY_PAID = 'PARTIALLY_PAID'
     PAID = 'PAID'
 
@@ -202,6 +204,12 @@ class Transaction(db.Model):
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
     recorded_by = db.Column(db.Integer, db.ForeignKey('users.id'))
     reference_code = db.Column(db.String(100), index=True)
+    source_document_id = db.Column(db.Integer, nullable=True, index=True)
+    source_document_type = db.Column(db.String(50), nullable=True, index=True)
+    source_cow_id = db.Column(db.Integer, nullable=True, index=True)
+    source_technician_id = db.Column(db.Integer, nullable=True, index=True)
+    chart_of_accounts_code = db.Column(db.String(30), nullable=True, index=True)
+    payment_status = db.Column(db.String(20), nullable=False, default=PaymentStatus.UNPAID.value)
     status = db.Column(db.String(20), nullable=False, default=TransactionStatus.POSTED.value)
     posted_at = db.Column(db.DateTime(timezone=True), nullable=True)
     posted_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -223,10 +231,10 @@ class Transaction(db.Model):
         backref=db.backref('correction_replacement', uselist=False),
         foreign_keys=[corrected_from_transaction_id],
     )
-    animal_cost_allocation = db.relationship(
+    animal_cost_allocations = db.relationship(
         'AnimalCostAllocation',
         back_populates='transaction',
-        uselist=False,
+        lazy=True,
         cascade='all, delete-orphan',
     )
     receipt = db.relationship('Receipt', back_populates='transaction', uselist=False, lazy=True)
@@ -267,14 +275,14 @@ class AnimalCostAllocation(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
     cow_id = db.Column(db.Integer, db.ForeignKey('cows.id', ondelete='CASCADE'), nullable=False, index=True)
-    transaction_id = db.Column(db.Integer, db.ForeignKey('transactions.id', ondelete='RESTRICT'), nullable=False, unique=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey('transactions.id', ondelete='RESTRICT'), nullable=False)
     cost_type = db.Column(db.Enum(AnimalCostType, native_enum=False), nullable=False)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     occurred_on = db.Column(db.Date, nullable=False)
     attribution_method = db.Column(db.String(20), nullable=False, default='DIRECT')
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
-    transaction = db.relationship('Transaction', back_populates='animal_cost_allocation')
+    transaction = db.relationship('Transaction', back_populates='animal_cost_allocations')
     cow = db.relationship('Cow', lazy=True)
 
     __table_args__ = (
