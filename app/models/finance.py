@@ -52,6 +52,19 @@ class CostClass(str, enum.Enum):
     OPERATING = 'OPERATING'
     CAPITAL = 'CAPITAL'
 
+    @classmethod
+    def _missing_(cls, value):
+        """Accept legacy/UI classification values while persisting canonical classes."""
+        if isinstance(value, str):
+            aliases = {
+                'production_cost': cls.COGS,
+                'operating_cost': cls.OPERATING,
+                'customer_acquisition': cls.CUSTOMER_ACQUISITION,
+                'capital_expenditure': cls.CAPITAL,
+            }
+            return aliases.get(value.strip().lower())
+        return None
+
 
 class AnimalCostType(str, enum.Enum):
     PURCHASE = 'PURCHASE'
