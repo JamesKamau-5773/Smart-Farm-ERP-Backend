@@ -239,7 +239,7 @@ Posted revenue and payment transactions atomically issue one immutable, tenant- 
 
 Expense ledger creation requires `paid_to`. Current frontend clients also require `item_name` and a positive numeric `quantity`; these identify the purchased commodity and amount independently from the supplier and free-text `description`. The nullable backend fields preserve compatibility with older clients and are returned on ledger transaction responses.
 
-Expense requests may include `cost_class`: `COGS`, `CUSTOMER_ACQUISITION`, `OPERATING`, or `CAPITAL`. Older clients receive category-based defaults. `GET /api/reports/dairy-unit-economics` uses posted `COGS` to allocate production cost per sold litre and returns observed contribution as `realized_ltv_kes`/`ltv_kes`; assumption-based lifespan projection is returned separately as `forecast_ltv_kes`. CAC uses only classified customer-acquisition expenses unless explicitly overridden.
+Expense requests may include `cost_class`: `COGS`, `CUSTOMER_ACQUISITION`, `OPERATING`, or `CAPITAL`. The UI aliases `production_cost`, `customer_acquisition`, `operating_cost`, and `capital_expenditure` are normalized to those canonical values before persistence. Older clients that omit the field receive category-based defaults. `GET /api/reports/dairy-unit-economics` uses posted `COGS` to allocate production cost per sold litre and returns observed contribution as `realized_ltv_kes`/`ltv_kes`; assumption-based lifespan projection is returned separately as `forecast_ltv_kes`. CAC uses only classified customer-acquisition expenses unless explicitly overridden.
 
 ### Finance create schemas
 

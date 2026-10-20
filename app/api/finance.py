@@ -614,7 +614,10 @@ def create_ledger_entry():
         try:
             cost_class = CostClass(data['cost_class'])
         except (TypeError, ValueError):
-            return jsonify({'error': 'cost_class must be COGS, CUSTOMER_ACQUISITION, OPERATING, or CAPITAL.'}), 400
+            return jsonify({
+                'error': 'cost_class must be COGS, CUSTOMER_ACQUISITION, OPERATING, CAPITAL, '
+                         'production_cost, operating_cost, customer_acquisition, or capital_expenditure.'
+            }), 400
     if transaction_type == TransactionType.REVENUE and cost_class is not None:
         return jsonify({'error': 'cost_class is only valid for expense records.'}), 400
     if transaction_type == TransactionType.EXPENSE and cost_class is None:
