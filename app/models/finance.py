@@ -211,7 +211,7 @@ class Transaction(db.Model):
     item_name = db.Column(db.String(120), nullable=True)
     quantity = db.Column(db.Numeric(14, 3), nullable=True)
     cost_class = db.Column(db.Enum(CostClass, native_enum=False), nullable=True)
-    description = db.Column(db.String(255))
+    description = db.Column(db.Text)
     counterparty_name = db.Column(db.String(120))
     payment_method = db.Column(db.String(30))
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
