@@ -5,6 +5,7 @@ from app.models.user import Role
 from app.services.account_invitation_service import AccountInvitationService
 from app.services.hr_service import HRService
 from app.services.staffing_recommendation_service import StaffingRecommendationService
+from app.services.page_access import normalize_page_access
 from app.repositories.hr_repo import EmployeeRepository
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
@@ -67,6 +68,40 @@ def invite_staff_account(staff_id):
         return jsonify({'error': 'Missing or invalid staff id.'}), 400
 
     return AccountInvitationService.invite_employee(tenant_id, staff_pk, request.get_json(silent=True) or {})
+
+
+@hr_bp.route('/staff/<staff_id>/page-access', methods=['PATCH'])
+@hr_bp.route('/employees/<staff_id>/page-access', methods=['PATCH'])
+@jwt_required()
+@role_required(Role.FARMER)
+def update_staff_page_access(staff_id):
+    if str((get_jwt() or {}).get('role') or '').upper() != Role.FARMER:
+        return jsonify({'error': 'Only the farm owner can change staff page access.'}), 403
+
+    tenant_id = _get_tenant_id_from_claims()
+    staff_pk = _parse_staff_id(staff_id)
+    if tenant_id is None or staff_pk is None:
+        return jsonify({'error': 'Valid tenant and staff id are required.'}), 400
+
+    employee = EmployeeRepository.get_by_id_for_tenant(staff_pk, tenant_id)
+    if not employee or not employee.user:
+        return jsonify({'error': 'Linked staff account not found.'}), 404
+
+    data = request.get_json(silent=True) or {}
+    if 'page_access' not in data:
+        return jsonify({'error': 'page_access is required.'}), 400
+    try:
+        employee.user.page_access = normalize_page_access(data['page_access'], employee.user.role)
+    except ValueError as error:
+        return jsonify({'error': str(error)}), 400
+
+    from app import db
+    db.session.commit()
+    return jsonify({
+        'employee_id': employee.id,
+        'user_id': employee.user_id,
+        'page_access': employee.user.page_access,
+    }), 200
 
 
 @hr_bp.route('/staff/<staff_id>', methods=['GET'])

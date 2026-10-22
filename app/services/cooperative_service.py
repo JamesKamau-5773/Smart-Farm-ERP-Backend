@@ -5,8 +5,7 @@ import io
 from datetime import timedelta
 from uuid import uuid4
 
-from flask import jsonify, current_app
-from flask_jwt_extended import create_access_token
+from flask import jsonify
 from sqlalchemy.exc import IntegrityError
 
 from app import db
@@ -15,6 +14,7 @@ from app.models.tenant import Tenant
 from app.models.user import Role, User
 from app.services.auth_service import AuthService
 from app.services.account_invitation_service import AccountInvitationService
+from app.services.page_access import normalize_page_access
 from app.utils.jwt_payload import normalize_tenant_type, public_tenant_id
 
 
@@ -148,6 +148,10 @@ class CooperativeService:
         phone_number = AuthService._normalize_phone_number(data.get('phone_number') or data.get('phoneNumber'))
         email = (data.get('email') or '').strip() or None
         role = (data.get('role') or Role.FARMER).strip().upper() or Role.FARMER
+        try:
+            page_access = normalize_page_access(data.get('page_access'), role)
+        except ValueError as error:
+            return jsonify({'error': str(error)}), 400
 
         if not full_name:
             return jsonify({'error': 'full_name is required.'}), 400
@@ -168,6 +172,7 @@ class CooperativeService:
                 name=full_name,
                 email=email,
                 role=role,
+                page_access=page_access,
                 is_active=False,
                 farm_location=(data.get('farm_location') or data.get('farmLocation') or data.get('location') or '').strip() or None,
             )
@@ -175,21 +180,12 @@ class CooperativeService:
             db.session.add(member)
             db.session.commit()
 
-            invite_token = create_access_token(
-                identity=str(member.id),
-                additional_claims={
-                    'purpose': 'member_invite',
-                    'tenant_id': public_tenant_id(tenant.id),
-                    'cooperative_id': public_tenant_id(tenant.id),
-                    'tenant_name': tenant.name,
-                    'cooperative_name': tenant.name,
-                    'role': role,
-                    'member_name': full_name,
-                    'member_phone_number': phone_number,
-                    'farm_location': member.farm_location,
-                },
+            invite_token = AccountInvitationService.create_short_invite_token(
+                member,
+                purpose=AccountInvitationService.LEGACY_MEMBER_INVITE_PURPOSE,
                 expires_delta=timedelta(days=CooperativeService.INVITE_TOKEN_EXPIRY_DAYS),
             )
+            db.session.commit()
         except IntegrityError:
             db.session.rollback()
             return jsonify({'error': 'Could not create member due to duplicate fields.'}), 409
@@ -197,9 +193,7 @@ class CooperativeService:
             db.session.rollback()
             return jsonify({'error': 'Could not create member invite.'}), 500
 
-        frontend_base = current_app.config.get('FRONTEND_BASE_URL', '').rstrip('/')
-        invite_path = f'/claim-account?token={invite_token}'
-        invite_url = f'{frontend_base}{invite_path}' if frontend_base else invite_path
+        invite_url = AccountInvitationService._invite_url(invite_token)
 
         return jsonify({
             'message': 'Member invite created successfully.',
@@ -276,6 +270,7 @@ class CooperativeService:
                         name=full_name,
                         email=email,
                         role=role,
+                        page_access=normalize_page_access(None, role),
                         is_active=False,
                         farm_location=farm_location,
                     )
@@ -283,25 +278,13 @@ class CooperativeService:
                     db.session.add(member)
                     db.session.flush()
 
-                    invite_token = create_access_token(
-                        identity=str(member.id),
-                        additional_claims={
-                            'purpose': 'member_invite',
-                            'tenant_id': public_tenant_id(tenant.id),
-                            'cooperative_id': public_tenant_id(tenant.id),
-                            'tenant_name': tenant.name,
-                            'cooperative_name': tenant.name,
-                            'role': role,
-                            'member_name': full_name,
-                            'member_phone_number': normalized_phone,
-                            'farm_location': farm_location,
-                        },
+                    invite_token = AccountInvitationService.create_short_invite_token(
+                        member,
+                        purpose=AccountInvitationService.LEGACY_MEMBER_INVITE_PURPOSE,
                         expires_delta=timedelta(days=CooperativeService.INVITE_TOKEN_EXPIRY_DAYS),
                     )
 
-                    frontend_base = current_app.config.get('FRONTEND_BASE_URL', '').rstrip('/')
-                    invite_path = f'/claim-account?token={invite_token}'
-                    invite_url = f'{frontend_base}{invite_path}' if frontend_base else invite_path
+                    invite_url = AccountInvitationService._invite_url(invite_token)
 
                     created_members.append({
                         'id': member.id,

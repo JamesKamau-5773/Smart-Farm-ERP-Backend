@@ -3,7 +3,7 @@ from flask import jsonify, current_app
 from flask_jwt_extended import create_access_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
 from uuid import uuid4
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from app import db
 from app.models.farm import Farm
@@ -16,6 +16,7 @@ from app.utils.jwt_payload import (
     normalize_tenant_type,
     parse_public_int_id,
 )
+from app.services.page_access import normalize_page_access
 
 class AuthService:
     @staticmethod
@@ -50,6 +51,7 @@ class AuthService:
             or_(
                 User.username.in_(candidates),
                 User.identifier.in_(identifier_candidates),
+                User.phone_number.in_(candidates),
             )
         ).first()
 
@@ -103,6 +105,7 @@ class AuthService:
         payload = build_auth_payload(
             user_id=user.id,
             name=(user.name or user.username),
+            username=user.username,
             phone_number=phone_number,
             role=user.role,
             requires_password_reset=bool(user.requires_password_reset),
@@ -113,6 +116,7 @@ class AuthService:
             active_farm_pk=active_farm.id,
             active_farm_name=active_farm.name,
             available_farms=available_farms,
+            page_access=normalize_page_access(getattr(user, 'page_access', None), user.role),
         )
 
         additional_claims = dict(payload)
@@ -128,7 +132,12 @@ class AuthService:
     @staticmethod
     def authenticate_user(username, password, farm_id=None):
         lookup_value = AuthService._normalize_phone_number(username) or username
-        user = UserRepository.get_by_username(lookup_value) or UserRepository.get_by_username(username)
+        user = (
+            UserRepository.get_by_username(lookup_value)
+            or UserRepository.get_by_username(username)
+            or User.query.filter(func.lower(User.username) == str(username or '').strip().lower()).first()
+            or AuthService._find_user_by_phone(username)
+        )
 
         # 1. Verify User Exists and Password Matches
         if user and user.check_password(password):

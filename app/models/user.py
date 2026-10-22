@@ -47,6 +47,7 @@ class User(db.Model):
     farm_location = db.Column(db.String(150), nullable=True)
     password_hash = db.Column(db.String(128), nullable=False)
     role = db.Column(db.String(20), default=Role.FARMER)
+    page_access = db.Column(db.JSON, nullable=True)
     is_active = db.Column(db.Boolean, default=True)
     requires_password_reset = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

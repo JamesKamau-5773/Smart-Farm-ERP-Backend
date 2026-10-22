@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
-from sqlalchemy import func
+from sqlalchemy import func, or_, and_
 
 from app import db
 from app.models.finance import Transaction, TransactionCategory, TransactionStatus, TransactionType
@@ -36,9 +36,17 @@ class FinanceService:
             Transaction.status == TransactionStatus.POSTED.value,
         )
 
-        # FIX: Use the TransactionType.REVENUE enum member instead of a hardcoded string.
+        # Milk-sale income entered through a customer payment is still a
+        # payment for receivables, but the selected category makes it part of
+        # the dashboard's transaction revenue total.
         revenue_total = base_query.filter(
-            Transaction.transaction_type == TransactionType.REVENUE
+            or_(
+                Transaction.transaction_type == TransactionType.REVENUE,
+                and_(
+                    Transaction.transaction_type == TransactionType.PAYMENT,
+                    Transaction.income_category == TransactionCategory.MILK_SALE.value,
+                ),
+            )
         ).scalar() or Decimal('0.0')
 
         total_costs = base_query.filter(
