@@ -7,6 +7,7 @@ from app.services.password_reset_service import PasswordResetService
 from app import limiter
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import parse_public_int_id
+from app.services.page_access import normalize_page_access
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -63,9 +64,10 @@ def claim_account():
     data = request.get_json(silent=True) or {}
     token = (data.get('token') or '').strip()
     password = data.get('password') or ''
+    username = data.get('username')
     if not token or not password:
         return jsonify({"error": "token and password are required"}), 400
-    return AccountInvitationService.claim_invite(token, password)
+    return AccountInvitationService.claim_invite(token, password, username=username)
 
 
 @auth_bp.route('/change-password', methods=['POST'])
@@ -113,6 +115,7 @@ def me():
         'farm_name': claims.get('farm_name'),
         'available_farms': claims.get('available_farms', []),
         'permissions': [user.role],
+        'page_access': normalize_page_access(user.page_access, user.role),
     }), 200
 
 

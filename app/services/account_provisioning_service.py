@@ -8,6 +8,7 @@ from app.models.hr import EmployeeOnboardingStatus
 from app.repositories.hr_repo import EmployeeRepository
 from app.services.audit_service import record_audit
 from app.services.staff_account_service import StaffAccountService
+from app.services.page_access import normalize_page_access
 
 
 class AccountProvisioningService:
@@ -29,9 +30,15 @@ class AccountProvisioningService:
             return jsonify({'error': 'Employee already has an active linked account.'}), 409
 
         try:
+            page_access = normalize_page_access(data.get('page_access'), role)
+        except ValueError as error:
+            return jsonify({'error': str(error)}), 400
+
+        try:
             account = employee.user
             if account:
                 account.role = role
+                account.page_access = page_access
                 account.set_password(password)
                 account.is_active = True
                 account.requires_password_reset = True
@@ -44,6 +51,7 @@ class AccountProvisioningService:
                     is_active=True,
                     requires_password_reset=True,
                 )
+                account.page_access = page_access
 
             employee.onboarding_status = EmployeeOnboardingStatus.PASSWORD_RESET_REQUIRED
             employee.onboarding_invite_nonce = None

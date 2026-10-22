@@ -4,6 +4,11 @@ from sqlalchemy import text
 from app import db
 
 
+def enforce_page_access():
+    from app.services.page_access import enforce_page_access as enforce
+    return enforce()
+
+
 def _parse_tenant_pk(tenant_id_value):
     if tenant_id_value is None:
         return None
@@ -175,6 +180,11 @@ def complete_idempotent_request(response):
     record_id = getattr(g, 'idempotency_record_id', None)
     if record_id is not None:
         from app.services.idempotency_service import IdempotencyService
+        if response.status_code >= 500:
+            # A failed endpoint may have left the scoped session in a
+            # PendingRollbackError state. Reset it before persisting the
+            # idempotency failure cleanup in a fresh transaction.
+            db.session.rollback()
         IdempotencyService.complete(record_id, response)
         response.headers['Idempotency-Replayed'] = 'false'
     return response

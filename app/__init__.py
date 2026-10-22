@@ -56,11 +56,13 @@ def create_app(config_class=Config):
     from app.middleware import (
         begin_idempotent_request,
         complete_idempotent_request,
+        enforce_page_access,
         enforce_required_password_reset,
         set_tenant_context,
     )
     app.before_request(set_tenant_context)
     app.before_request(enforce_required_password_reset)
+    app.before_request(enforce_page_access)
     app.before_request(begin_idempotent_request)
     app.after_request(complete_idempotent_request)
 
@@ -72,6 +74,7 @@ def create_app(config_class=Config):
     # We import model classes directly from their modules to avoid circular dependencies.
     from app.models.user import User
     from app.models.user import RevokedToken
+    from app.models.account_invitation import AccountInvitation
     from app.models.finance import Buyer, Customer, Delivery, Receipt, SalesLedger, Transaction
     from app.models.supply import MilkDisposition, MilkLog # Inferred from finance API
     # The following modules are also imported for model discovery by Alembic.

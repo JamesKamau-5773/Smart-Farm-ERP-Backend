@@ -39,6 +39,7 @@ def parse_public_int_id(value: str, prefix: str) -> int:
 def build_auth_payload(*,
     user_id: int,
     name: str,
+    username: str,
     phone_number: str,
     role: str,
     requires_password_reset: bool,
@@ -49,6 +50,7 @@ def build_auth_payload(*,
     active_farm_pk: int,
     active_farm_name: str,
     available_farms: List[Tuple[int, str]],
+    page_access: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     tenant_type = normalize_tenant_type(tenant_type)
 
@@ -58,6 +60,7 @@ def build_auth_payload(*,
     return {
         "sub": str(user_id),
         "name": name,
+        "username": username,
         "phone_number": phone_number,
         "role": role,
         "requires_password_reset": requires_password_reset,
@@ -70,4 +73,5 @@ def build_auth_payload(*,
         "farm_id": public_farm_id(active_farm_pk),
         "farm_name": active_farm_name,
         "available_farms": farms_payload,
+        "page_access": page_access,
     }

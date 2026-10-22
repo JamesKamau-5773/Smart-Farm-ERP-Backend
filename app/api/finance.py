@@ -125,7 +125,8 @@ def _serialize_transaction(transaction_tuple) -> dict:
         'cost_class': transaction.cost_class.value if transaction.cost_class is not None else None,
         'description': getattr(transaction, 'description', None) or 'Payment',
         'transaction_type': getattr(transaction, 'transaction_type', None) or 'CREDIT',
-        'category': getattr(transaction, 'category', None),
+        'category': getattr(transaction, 'income_category', None) or getattr(transaction, 'category', None),
+        'transaction_category': getattr(transaction, 'category', None),
         'reference_code': getattr(transaction, 'reference_code', None),
         'customer_id': transaction.customer_id,
         'customer_name': customer_name,
@@ -221,6 +222,19 @@ def record_customer_payment(customer_id):
         return jsonify({'error': 'Tenant context is missing.'}), 400
 
     data = request.get_json() or {}
+    income_category = None
+    if data.get('category') not in (None, ''):
+        try:
+            income_category = TransactionCategory(data['category'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Invalid income category.'}), 400
+        if income_category not in {
+            TransactionCategory.MILK_SALE,
+            TransactionCategory.LIVESTOCK_SALE,
+            TransactionCategory.OTHER_INCOME,
+            TransactionCategory.OTHER,
+        }:
+            return jsonify({'error': 'Customer payment income category must be a revenue category.'}), 400
     payment_timestamp = datetime.now(timezone.utc)
     if data.get('date'):
         try:
@@ -233,6 +247,7 @@ def record_customer_payment(customer_id):
             tenant_id=tenant_id,
             customer_id=customer_id,
             amount=data.get('amount'),
+            income_category=income_category,
             reference_code=data.get('reference_code'),
             recorded_by=get_jwt_identity(),
             description=data.get('note'),
@@ -474,6 +489,11 @@ def get_ledger():
 
     recognized_income = case(
         (Transaction.transaction_type.in_((TransactionType.REVENUE, TransactionType.DEBIT)), Transaction.amount),
+        (
+            (Transaction.transaction_type == TransactionType.PAYMENT)
+            & (Transaction.income_category == TransactionCategory.MILK_SALE.value),
+            Transaction.amount,
+        ),
         (Transaction.transaction_type == TransactionType.CREDIT, -Transaction.amount),
         else_=0,
     )

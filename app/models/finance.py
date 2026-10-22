@@ -207,6 +207,10 @@ class Transaction(db.Model):
     buyer_id = db.Column(db.Integer, db.ForeignKey('buyers.id'), nullable=True, index=True)
     transaction_type = db.Column(db.Enum(TransactionType, native_enum=False), nullable=False)
     category = db.Column(db.Enum(TransactionCategory, native_enum=False), nullable=False)
+    # Optional display/category context for money received against a customer
+    # balance. The accounting category remains PAYMENT while the ledger can
+    # show the income purpose selected in the Log Income form.
+    income_category = db.Column(db.String(30), nullable=True)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
     item_name = db.Column(db.String(120), nullable=True)
     quantity = db.Column(db.Numeric(14, 3), nullable=True)
