@@ -32,12 +32,17 @@ def create_app(config_class=Config):
     limiter.init_app(app)
     migrate.init_app(app, db)
 
-    # Initialize CORS properly and explicitly allow your frontend
-    CORS(app, supports_credentials=True, origins=[
+    # Use the configured allowlist and include the production frontend origins.
+    # www.maziwasmart.co.ke is the origin used by the current login page.
+    cors_origins = set(app.config.get('CORS_ALLOWED_ORIGINS', ()))
+    cors_origins.update({
+        "https://www.maziwasmart.co.ke",
+        "https://maziwasmart.co.ke",
         "https://jivu-smart-dairy-system.vercel.app",
         "http://localhost:3000",
-        "http://localhost:5173"
-    ])
+        "http://localhost:5173",
+    })
+    CORS(app, supports_credentials=True, origins=sorted(cors_origins))
 
     global celery
     celery = make_celery(app)
