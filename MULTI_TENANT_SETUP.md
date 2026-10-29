@@ -80,10 +80,10 @@ def tenant_based_key_func():
 ```
 
 **Benefits:**
-- ✅ Tenant A's API usage doesn't throttle Tenant B
-- ✅ Each tenant has independent rate limit buckets
-- ✅ Unauthenticated routes still protected by IP-based limits
-- ✅ Prevents resource exhaustion across multi-tenant cluster
+- Tenant A's API usage doesn't throttle Tenant B
+- Each tenant has independent rate limit buckets
+- Unauthenticated routes still protected by IP-based limits
+- Prevents resource exhaustion across multi-tenant cluster
 
 **Integration in `app/__init__.py`:**
 ```python
@@ -229,22 +229,22 @@ class Config:
 ## Security Guarantees
 
 ### Row-Level Security
-- ✅ Database enforces tenant_id-based row filtering
-- ✅ Prevents SQL injection from exposing cross-tenant data
-- ✅ Cannot be bypassed by application logic errors
-- ✅ All queries automatically filtered by PostgreSQL engine
+- Database enforces tenant_id-based row filtering
+- Prevents SQL injection from exposing cross-tenant data
+- Cannot be bypassed by application logic errors
+- All queries automatically filtered by PostgreSQL engine
 
 ### Rate Limiting
-- ✅ Per-tenant rate limit buckets (tenant_id-based key)
-- ✅ Independent throttle limits prevent noisy neighbor issues
-- ✅ Redis-backed for distributed cluster support
-- ✅ Applied to all routes via Flask-Limiter middleware
+- Per-tenant rate limit buckets (tenant_id-based key)
+- Independent throttle limits prevent noisy neighbor issues
+- Redis-backed for distributed cluster support
+- Applied to all routes via Flask-Limiter middleware
 
 ### Tenant Isolation
-- ✅ JWT token contains tenant_id and role claims
-- ✅ Middleware validates and propagates to database session
-- ✅ Celery tasks run within Flask app context preserving tenant context
-- ✅ Background jobs can access full database with tenant enforcement
+- JWT token contains tenant_id and role claims
+- Middleware validates and propagates to database session
+- Celery tasks run within Flask app context preserving tenant context
+- Background jobs can access full database with tenant enforcement
 
 ## Testing Multi-Tenant Isolation
 

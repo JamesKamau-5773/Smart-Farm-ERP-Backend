@@ -359,7 +359,7 @@ async function exportToFeedFormulation(yieldTargetId) {
 │ Target Protein: 16.5%                         │
 │ Batch Size: 500 kg                            │
 │                                               │
-│ ☐ Auto-apply to next batches                 │
+│ Auto-apply to next batches                 │
 │                                               │
 │ Summary:                                      │
 │ • Maize Germ: 35%                            │
