@@ -378,25 +378,25 @@ db.session.query(AnimalYieldTarget).join(Cow, ...).filter(...)
 
 ## SOLID Principles Checklist
 
-✅ **Single Responsibility:** Each class has one reason to change
+**Single Responsibility:** Each class has one reason to change
   - Repository: Data access
   - Service: Business logic
   - API: HTTP handling
 
-✅ **Open/Closed:** Open for extension, closed for modification
+**Open/Closed:** Open for extension, closed for modification
   - New validation rules don't break existing code
   - New endpoints don't modify old endpoints
 
-✅ **Liskov Substitution:** Services can be substituted
+**Liskov Substitution:** Services can be substituted
   - HerdFeedingPlanService methods have consistent contracts
   - Both `calculate_*` methods return same structure
 
-✅ **Interface Segregation:** Specific, focused contracts
+**Interface Segregation:** Specific, focused contracts
   - YieldTargetService for targets
   - HerdFeedingPlanService for plans
   - Separate concerns
 
-✅ **Dependency Inversion:** Depend on abstractions
+**Dependency Inversion:** Depend on abstractions
   - Services depend on repositories (abstraction)
   - API depends on services (abstraction)
   - Not on concrete implementations

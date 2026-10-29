@@ -153,6 +153,7 @@ def enforce_required_password_reset():
     allowed_endpoints = {
         'auth.login',
         'auth.register',
+        'auth.bootstrap_status',
         'auth.claim_account',
         'auth.me',
         'auth.complete_password_reset',

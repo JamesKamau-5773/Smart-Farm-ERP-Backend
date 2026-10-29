@@ -8,7 +8,7 @@ from sqlalchemy import func, or_
 from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
-from app.models.user import RevokedToken, User
+from app.models.user import RevokedToken, Role, User
 from datetime import datetime, timezone
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import (
@@ -19,6 +19,13 @@ from app.utils.jwt_payload import (
 from app.services.page_access import normalize_page_access
 
 class AuthService:
+    @staticmethod
+    def bootstrap_available():
+        """Return whether the initial super-admin bootstrap can be attempted."""
+        if not (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip():
+            return False
+        return User.query.filter_by(role=Role.SUPER_ADMIN).first() is None
+
     @staticmethod
     def _normalize_phone_number(value):
         raw = (value or '').strip()
@@ -237,8 +244,8 @@ class AuthService:
 
         if requested_role == 'SUPER_ADMIN':
             expected_bootstrap_key = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
-            if not expected_bootstrap_key:
-                return jsonify({"error": "SUPER_ADMIN bootstrap is not enabled."}), 403
+            if not AuthService.bootstrap_available():
+                return jsonify({"error": "SUPER_ADMIN bootstrap is unavailable."}), 403
             if not bootstrap_key or bootstrap_key != expected_bootstrap_key:
                 return jsonify({"error": "Invalid bootstrap key for SUPER_ADMIN registration."}), 403
             role = 'SUPER_ADMIN'
@@ -275,8 +282,10 @@ class AuthService:
             return jsonify({"error": "phone_number is already in use"}), 409
 
         tenant_name = (data.get('tenant_name') or '').strip() or f"{farm_name} Tenant"
-        display_name = (data.get('name') or '').strip() or username
-        tenant_type_raw = data.get('tenant_type')
+        display_name = (data.get('name') or data.get('full_name') or '').strip() or username
+        # A platform super-admin is housed in a standard tenant; never accept a
+        # client-selected tenant type for the bootstrap account.
+        tenant_type_raw = 'single' if role == 'SUPER_ADMIN' else data.get('tenant_type')
 
         try:
             tenant_type = normalize_tenant_type(tenant_type_raw)

@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_jwt_extended import JWTManager
@@ -128,18 +128,6 @@ def create_app(config_class=Config):
     # Register Global Error Handlers
     from app.utils.errors import register_error_handlers
     register_error_handlers(app)
-
-    from app.utils.db_init import ensure_super_admin_account
-    app.extensions.setdefault('super_admin_bootstrapped', False)
-
-    @app.before_request
-    def ensure_bootstrapped_super_admin():
-        if request.endpoint == 'whatsapp.verify_webhook':
-            return None
-        if app.extensions.get('super_admin_bootstrapped'):
-            return None
-        ensure_super_admin_account()
-        app.extensions['super_admin_bootstrapped'] = True
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')

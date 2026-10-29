@@ -42,6 +42,11 @@ def register():
     return AuthService.register_workspace(data)
 
 
+@auth_bp.route('/bootstrap-status', methods=['GET'])
+def bootstrap_status():
+    return jsonify({"bootstrap_available": AuthService.bootstrap_available()}), 200
+
+
 @auth_bp.route('/switch-farm', methods=['POST'])
 @jwt_required()
 def switch_farm():
