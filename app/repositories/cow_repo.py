@@ -35,6 +35,15 @@ class CowRepository:
         return CowRepository.get_by_livestock_id(cow_id, tenant_id=tenant_id)
 
     @staticmethod
+    def list_hardlocked(tenant_id: int, search: str = '') -> list:
+        """Cows whose milk is on hold, newest first, optionally matching a name or tag."""
+        query = Cow.query.filter(Cow.is_hardlocked.is_(True), Cow.tenant_id == tenant_id)
+        if search:
+            like = f'%{search}%'
+            query = query.filter((Cow.name.ilike(like)) | (Cow.tag_number.ilike(like)))
+        return query.order_by(Cow.id.desc()).all()
+
+    @staticmethod
     def get_by_tag(tag_number: str, tenant_id: int | None = None) -> Cow:
         resolved_tenant_id = _resolve_tenant_id(tenant_id)
         query = Cow.query.filter_by(tag_number=tag_number)

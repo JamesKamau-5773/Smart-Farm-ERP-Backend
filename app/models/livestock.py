@@ -49,6 +49,12 @@ class Cow(db.Model):
 
     # Operational State
     is_hardlocked = db.Column(db.Boolean, default=False)
+    # Why the milk is on hold when it was placed by hand (not by a treatment's withdrawal period).
+    hold_reason = db.Column(db.String(120), nullable=True)
+    hold_notes = db.Column(db.Text, nullable=True)
+    hold_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    hold_set_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    hold_set_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     # Defaults to Heifer (not Lactating) so newly registered animals that omit an
     # explicit status don't silently masquerade as milking cows in status-derived
     # views (herd counts, feeding-group planning) until someone reviews them.
@@ -319,6 +325,33 @@ def set_medical_record_tenant(mapper, connection, target):
     cow = db.session.get(Cow, target.cow_id) if target.cow_id is not None else None
     if cow is not None:
         target.tenant_id = cow.tenant_id
+
+
+class MilkTestResult:
+    PASS = 'PASS'
+    FAIL = 'FAIL'
+
+    ALL = {PASS, FAIL}
+
+
+class MilkTest(db.Model):
+    """A residue (e.g. antibiotic) or quality test on one cow's milk."""
+    __tablename__ = 'milk_tests'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
+    cow_id = db.Column(db.Integer, db.ForeignKey('cows.id', ondelete='CASCADE'), nullable=False, index=True)
+    tested_at = db.Column(db.DateTime(timezone=True), nullable=False)
+    test_type = db.Column(db.String(60), nullable=False)
+    result = db.Column(db.String(10), nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+    recorded_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        db.CheckConstraint("result IN ('PASS', 'FAIL')", name='ck_milk_tests_result_valid'),
+        db.Index('ix_milk_tests_tenant_cow_tested_at', 'tenant_id', 'cow_id', 'tested_at'),
+    )
 
 
 class VetVisit(db.Model):

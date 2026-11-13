@@ -1,4 +1,4 @@
-"""Auditable corrections for historical ledger classification errors."""
+"""Auditable corrections to posted ledger entries: the original is voided, never edited or deleted."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from decimal import Decimal
 
 from app import db
 from app.models.finance import (
-    CostClass,
     Customer,
     Transaction,
     TransactionAuditLog,
@@ -15,38 +14,23 @@ from app.models.finance import (
     TransactionStatus,
     TransactionType,
 )
+from app.repositories.ledger_repo import TransactionAuditLogRepository, TransactionRepository
+from app.services.ledger_correction_policy import Correction, LedgerCorrectionPolicy
+from app.services.transaction_attachment_service import TransactionAttachmentService
 from app.services.payment_service import PaymentService
 from app.services.receipt_service import ReceiptService
 
 
 class LedgerCorrectionService:
-    """Reclassifies erroneous customer revenue as payment without deleting history."""
-
-    _EXPENSE_CATEGORIES = {
-        TransactionCategory.FEED_PURCHASE,
-        TransactionCategory.VET_FEES,
-        TransactionCategory.LABOR_WAGES,
-        TransactionCategory.UTILITIES,
-        TransactionCategory.EQUIPMENT_MAINTENANCE,
-        TransactionCategory.TRANSPORT,
-        TransactionCategory.OPENING_BALANCE,
-        TransactionCategory.INVENTORY_WRITE_OFF,
-        TransactionCategory.OTHER,
-    }
-    _DEFAULT_COST_CLASS_BY_CATEGORY = {
-        TransactionCategory.FEED_PURCHASE: CostClass.COGS,
-        TransactionCategory.VET_FEES: CostClass.COGS,
-        TransactionCategory.LABOR_WAGES: CostClass.COGS,
-        TransactionCategory.UTILITIES: CostClass.COGS,
-        TransactionCategory.INVENTORY_WRITE_OFF: CostClass.COGS,
-        TransactionCategory.EQUIPMENT_MAINTENANCE: CostClass.OPERATING,
-        TransactionCategory.TRANSPORT: CostClass.OPERATING,
-        TransactionCategory.OPENING_BALANCE: CostClass.OPERATING,
-        TransactionCategory.OTHER: CostClass.OPERATING,
-    }
+    """Corrects posted ledger entries without deleting history: the original is voided and a linked replacement posted."""
 
     @classmethod
-    def void_and_replace_expense(
+    def void_and_replace_expense(cls, **kwargs) -> tuple[Transaction, Transaction]:
+        """Kept for existing callers; corrections now cover income too."""
+        return cls.void_and_replace(**kwargs)
+
+    @classmethod
+    def void_and_replace(
         cls,
         *,
         tenant_id: int,
@@ -55,65 +39,63 @@ class LedgerCorrectionService:
         corrected_by: int | None,
         category: str | None = None,
         cost_class: str | None = None,
+        amount=None,
         ip_address: str | None = None,
     ) -> tuple[Transaction, Transaction]:
-        """Voids one posted expense and creates its linked classification replacement."""
-        reason = str(void_reason or '').strip()
-        if not reason:
-            raise ValueError('void_reason is required.')
-
-        original = Transaction.query.filter_by(
-            id=transaction_id,
-            tenant_id=tenant_id,
-        ).with_for_update().first()
-        if original is None:
-            raise ValueError('Transaction not found.')
-        if original.transaction_type != TransactionType.EXPENSE:
-            raise ValueError('Only expense transactions can be corrected by this workflow.')
-        if original.status != TransactionStatus.POSTED.value:
-            raise ValueError('Only posted transactions can be voided and replaced.')
-        if original.correction_replacement is not None:
-            raise ValueError('This transaction has already been corrected.')
-
-        try:
-            replacement_category = TransactionCategory(category) if category else original.category
-        except ValueError as exc:
-            raise ValueError('Invalid replacement category.') from exc
-        if replacement_category not in cls._EXPENSE_CATEGORIES:
-            raise ValueError('Replacement category must be valid for an expense transaction.')
-        try:
-            replacement_cost_class = CostClass(cost_class) if cost_class else cls._DEFAULT_COST_CLASS_BY_CATEGORY[replacement_category]
-        except ValueError as exc:
-            raise ValueError('Invalid replacement cost_class.') from exc
-
+        """Voids one posted income or expense entry and posts its corrected replacement. The caller commits."""
+        original = TransactionRepository.get_for_tenant(transaction_id, tenant_id, for_update=True)
+        correction = LedgerCorrectionPolicy.decide(
+            original, void_reason=void_reason, category=category, cost_class=cost_class, amount=amount,
+        )
         now = datetime.now(timezone.utc)
         original.status = TransactionStatus.VOIDED.value
         original.voided_at = now
         original.voided_by = corrected_by
-        original.void_reason = reason[:255]
-        replacement = Transaction(
+        original.void_reason = correction.reason
+        replacement = TransactionRepository.stage(cls._replacement(original, correction, corrected_by=corrected_by, now=now))
+        TransactionAttachmentService.stage_copies(original, replacement)
+        if original.transaction_type == TransactionType.REVENUE:
+            cls._reissue_receipt(original, replacement, corrected_by=corrected_by, ip_address=ip_address)
+        cls._stage_audit(original, replacement, corrected_by=corrected_by, ip_address=ip_address)
+        return original, replacement
+
+    @staticmethod
+    def _replacement(original: Transaction, correction: Correction, *, corrected_by, now) -> Transaction:
+        return Transaction(
             tenant_id=original.tenant_id,
             farm_id=original.farm_id,
-            transaction_type=TransactionType.EXPENSE,
-            category=replacement_category,
-            amount=original.amount,
+            transaction_type=original.transaction_type,
+            category=correction.category,
+            income_category=original.income_category,
+            amount=correction.amount,
             item_name=original.item_name,
             quantity=original.quantity,
-            cost_class=replacement_cost_class,
+            cost_class=correction.cost_class,
             description=original.description,
             counterparty_name=original.counterparty_name,
             payment_method=original.payment_method,
             timestamp=original.timestamp,
+            source_document_type=original.source_document_type,
+            source_document_id=original.source_document_id,
             recorded_by=corrected_by,
             status=TransactionStatus.POSTED.value,
             posted_at=now,
             posted_by=corrected_by,
             corrected_from_transaction_id=original.id,
         )
-        db.session.add(replacement)
-        db.session.flush()
-        db.session.add(TransactionAuditLog(
-            tenant_id=tenant_id,
+
+    @staticmethod
+    def _reissue_receipt(original: Transaction, replacement: Transaction, *, corrected_by, ip_address) -> None:
+        """The customer-facing receipt must match the corrected amount."""
+        if original.receipt is not None:
+            ReceiptService.void(original.receipt, reason=f'Ledger correction: {original.void_reason}',
+                                voided_by=corrected_by, ip_address=ip_address)
+        ReceiptService.issue(replacement, issued_by=corrected_by, farm_id=original.farm_id, ip_address=ip_address)
+
+    @staticmethod
+    def _stage_audit(original: Transaction, replacement: Transaction, *, corrected_by, ip_address) -> None:
+        TransactionAuditLogRepository.stage(TransactionAuditLog(
+            tenant_id=original.tenant_id,
             transaction_id=original.id,
             action='VOIDED_AND_REPLACED',
             performed_by=corrected_by,
@@ -124,18 +106,19 @@ class LedgerCorrectionService:
                 'previous_category': original.category.value,
                 'replacement_category': replacement.category.value,
                 'previous_cost_class': original.cost_class.value if original.cost_class else None,
-                'replacement_cost_class': replacement.cost_class.value,
+                'replacement_cost_class': replacement.cost_class.value if replacement.cost_class else None,
+                'previous_amount': str(original.amount),
+                'replacement_amount': str(replacement.amount),
             },
         ))
-        db.session.add(TransactionAuditLog(
-            tenant_id=tenant_id,
+        TransactionAuditLogRepository.stage(TransactionAuditLog(
+            tenant_id=original.tenant_id,
             transaction_id=replacement.id,
             action='CREATED_AS_CORRECTION',
             performed_by=corrected_by,
             ip_address=ip_address,
             details={'corrected_from_transaction_id': original.id},
         ))
-        return original, replacement
 
     @staticmethod
     def reclassify_customer_revenue_as_payment(

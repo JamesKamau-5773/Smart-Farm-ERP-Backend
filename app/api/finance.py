@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 
 from flask import Blueprint, current_app, g, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
@@ -13,10 +14,14 @@ from app import db
 from app.models.finance import Buyer, CostClass, Customer, Delivery, ReceiptAuditLog, SalesLedger, Transaction, TransactionStatus, TransactionType, TransactionCategory
 from app.models.user import Role
 from app.services.payment_service import PaymentService
+from app.services import ledger_category_policy
 from app.services.ledger_correction_service import LedgerCorrectionService
 from app.services.buyer_service import BuyerService
 from app.services.animal_cost_allocation_service import AnimalCostAllocationService
 from app.services.receipt_service import ReceiptService
+from app.services.transaction_attachment_serializer import TransactionAttachmentSerializer
+from app.services.transaction_attachment_service import TransactionAttachmentService
+from app.utils.error_envelope import register_error_envelope
 from app.utils import get_tenant_id_from_context
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
@@ -37,18 +42,7 @@ def _parse_date_param(param_name: str, default: date | None = None) -> date | No
         raise ValueError(f'{param_name} must be a valid date in YYYY-MM-DD format.')
 
 
-DEFAULT_COST_CLASS_BY_CATEGORY = {
-    TransactionCategory.FEED_PURCHASE: CostClass.COGS,
-    TransactionCategory.VET_FEES: CostClass.COGS,
-    TransactionCategory.AI_SERVICE: CostClass.COGS,
-    TransactionCategory.LABOR_WAGES: CostClass.COGS,
-    TransactionCategory.UTILITIES: CostClass.COGS,
-    TransactionCategory.INVENTORY_WRITE_OFF: CostClass.COGS,
-    TransactionCategory.EQUIPMENT_MAINTENANCE: CostClass.OPERATING,
-    TransactionCategory.TRANSPORT: CostClass.OPERATING,
-    TransactionCategory.OPENING_BALANCE: CostClass.OPERATING,
-    TransactionCategory.OTHER: CostClass.OPERATING,
-}
+register_error_envelope(finance_bp)
 
 
 def _current_farm_id():
@@ -148,11 +142,13 @@ def _serialize_transaction(transaction_tuple) -> dict:
             'amount': float(allocation.amount),
             'attribution_method': allocation.attribution_method,
         } for allocation in animal_cost_allocations] if animal_cost_allocations else [],
+        'attachments': [TransactionAttachmentSerializer.serialize(attachment) for attachment in transaction.attachments],
         'receipt_available': receipt is not None,
         'receipt': {
             'id': receipt.id,
             'receipt_number': receipt.receipt_number,
             'issued_at': receipt.issued_at.isoformat(),
+            'status': getattr(receipt.status, 'value', receipt.status),
         } if receipt else None,
     }
 
@@ -608,26 +604,7 @@ def create_ledger_entry():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid transaction category.'}), 400
 
-    allowed_categories = {
-        TransactionType.REVENUE: {
-            TransactionCategory.MILK_SALE,
-            TransactionCategory.LIVESTOCK_SALE,
-            TransactionCategory.OTHER_INCOME,
-            TransactionCategory.OTHER,
-        },
-        TransactionType.EXPENSE: {
-            TransactionCategory.FEED_PURCHASE,
-            TransactionCategory.VET_FEES,
-            TransactionCategory.LABOR_WAGES,
-            TransactionCategory.UTILITIES,
-            TransactionCategory.EQUIPMENT_MAINTENANCE,
-            TransactionCategory.TRANSPORT,
-            TransactionCategory.OPENING_BALANCE,
-            TransactionCategory.INVENTORY_WRITE_OFF,
-            TransactionCategory.OTHER,
-        },
-    }
-    if category not in allowed_categories[transaction_type]:
+    if category not in ledger_category_policy.categories_for(transaction_type):
         return jsonify({'error': f'{category.value} is not valid for {transaction_type.value} records.'}), 400
 
     cost_class = None
@@ -642,7 +619,7 @@ def create_ledger_entry():
     if transaction_type == TransactionType.REVENUE and cost_class is not None:
         return jsonify({'error': 'cost_class is only valid for expense records.'}), 400
     if transaction_type == TransactionType.EXPENSE and cost_class is None:
-        cost_class = DEFAULT_COST_CLASS_BY_CATEGORY[category]
+        cost_class = ledger_category_policy.default_cost_class(category)
 
     try:
         amount = Decimal(str(data.get('amount')))
@@ -781,10 +758,11 @@ def create_ledger_entry():
 
 
 @finance_bp.route('/transactions/<int:transaction_id>/void-and-replace', methods=['POST'])
+@finance_bp.route('/transactions/<int:transaction_id>/corrections', methods=['POST'])
 @jwt_required()
 @role_required(Role.FARMER)
 def void_and_replace_expense_transaction(transaction_id):
-    """Correct an expense classification without mutating or deleting the posted record."""
+    """Correct an income or expense entry (category, cost class, amount) without deleting the posted record."""
     tenant_id = get_tenant_id_from_context()
     if not tenant_id:
         return jsonify({'error': 'Tenant context is missing.'}), 400
@@ -796,13 +774,14 @@ def void_and_replace_expense_transaction(transaction_id):
     if not isinstance(replacement_data, dict):
         return jsonify({'error': 'replacement must be an object.'}), 400
     try:
-        original, replacement = LedgerCorrectionService.void_and_replace_expense(
+        original, replacement = LedgerCorrectionService.void_and_replace(
             tenant_id=tenant_id,
             transaction_id=transaction_id,
             void_reason=data.get('void_reason'),
             corrected_by=int(get_jwt_identity()),
             category=replacement_data.get('category'),
             cost_class=replacement_data.get('cost_class'),
+            amount=replacement_data.get('amount'),
             ip_address=request.remote_addr,
         )
         db.session.commit()
@@ -818,6 +797,35 @@ def void_and_replace_expense_transaction(transaction_id):
         'voided_transaction': _serialize_transaction(original),
         'replacement_transaction': _serialize_transaction(replacement),
     }), 201
+
+
+@finance_bp.route('/categories', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def ledger_categories():
+    """Categories a ledger entry may use, and each expense category's default cost class."""
+    return jsonify(ledger_category_policy.catalogue()), 200
+
+
+@finance_bp.route('/transactions/<int:transaction_id>/attachments', methods=['POST'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def upload_transaction_attachment(transaction_id):
+    attachment = TransactionAttachmentService.upload(
+        get_tenant_id_from_context(), transaction_id, request.files.get('file'), uploaded_by=int(get_jwt_identity()),
+    )
+    return jsonify(TransactionAttachmentSerializer.serialize(attachment)), 201
+
+
+@finance_bp.route('/transactions/<int:transaction_id>/attachments/<int:attachment_id>', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def download_transaction_attachment(transaction_id, attachment_id):
+    attachment, path = TransactionAttachmentService.open(get_tenant_id_from_context(), transaction_id, attachment_id)
+    response = send_file(path, mimetype=attachment.content_type, download_name=attachment.original_filename or os.path.basename(path))
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 
 @finance_bp.route('/transactions/<int:transaction_id>/receipt', methods=['POST'])

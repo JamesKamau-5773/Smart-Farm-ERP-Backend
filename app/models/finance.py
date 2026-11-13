@@ -265,6 +265,23 @@ class Transaction(db.Model):
     )
 
 
+class TransactionAttachment(db.Model):
+    """A receipt photo or document kept with a ledger entry. Served only through the tenant-scoped API."""
+    __tablename__ = 'transaction_attachments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='RESTRICT'), nullable=False, index=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey('transactions.id', ondelete='RESTRICT'), nullable=False, index=True)
+    stored_path = db.Column(db.String(255), nullable=False)
+    content_type = db.Column(db.String(50), nullable=False)
+    size_bytes = db.Column(db.Integer, nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    uploaded_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    transaction = db.relationship('Transaction', backref=db.backref('attachments', lazy=True, order_by='TransactionAttachment.id'))
+
+
 class TransactionAuditLog(db.Model):
     """Append-only audit trail for ledger state transitions."""
     __tablename__ = 'transaction_audit_logs'
