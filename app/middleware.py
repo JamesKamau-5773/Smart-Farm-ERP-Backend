@@ -108,6 +108,43 @@ def set_tenant_context():
             print(f"Error setting tenant context: {e}")
 
 
+def enforce_demo_read_only():
+    """The single enforcement point for demo sessions (see app.services.demo_access_policy).
+
+    Runs right after the tenant context is set, before any other gate or
+    endpoint, so a refused request has no side effects at all.
+    """
+    actor_id = getattr(g, 'actor_id', None)
+    if actor_id is None:
+        return None
+
+    from app.services.demo_account import DemoAccount
+    from app.services.demo_access_policy import denial_for
+
+    if not DemoAccount.is_demo_actor(actor_id):
+        return None
+
+    denial = denial_for(
+        method=request.method,
+        endpoint=request.endpoint,
+        path=request.path,
+        google_intent=_google_oauth_intent(),
+    )
+    if denial is None:
+        return None
+    return jsonify(denial.body()), denial.status
+
+
+def _google_oauth_intent():
+    if not (request.endpoint or '').startswith('auth_google.'):
+        return None
+    from flask import session
+    from app.api.auth_google import OAUTH_CONTEXT_KEY
+
+    pending = session.get(OAUTH_CONTEXT_KEY) or {}
+    return request.args.get('intent') or pending.get('intent')
+
+
 def begin_idempotent_request():
     g.idempotency_record_id = None
     if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'} or not request.is_json:

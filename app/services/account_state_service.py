@@ -38,7 +38,12 @@ class AccountStateService:
 
     @staticmethod
     def describe(user: User, auth_method: str) -> dict:
+        from app.services.demo_account import DemoAccount
+
         return {
             'auth_state': AccountStateService.auth_state(user, auth_method),
             'account_flags': AccountStateService.account_flags(user),
+            # is_demo / read_only: the frontend renders the demo banner and hides
+            # write controls from these; the server enforces read-only regardless.
+            **DemoAccount.describe(user),
         }

@@ -14,6 +14,7 @@ from app.models.user import User
 class AuthMethod:
     PASSWORD = 'password'
     GOOGLE = 'google'
+    DEMO = 'demo'
 
 
 class SessionService:

@@ -29,13 +29,13 @@ class LoginIdentifierResolver:
         if not value:
             return []
         if '@' in value:
-            user = UserRepository.get_by_email_ci(value)
+            user = _signable(UserRepository.get_by_email_ci(value))
             return [user] if user else []
 
         found = []
         if _PHONE_LIKE.match(value):
             found.append(LoginIdentifierResolver.resolve_phone(value))
-        found.append(UserRepository.get_by_username(value) or UserRepository.get_by_username_ci(value))
+        found.append(_signable(UserRepository.get_by_username(value) or UserRepository.get_by_username_ci(value)))
 
         unique = []
         for user in found:
@@ -50,8 +50,14 @@ class LoginIdentifierResolver:
             return None
         user = UserRepository.get_by_phone(e164)
         if user:
-            return user
+            return _signable(user)
         # Accounts whose phone was never copied into phone_number.
         digits = to_wa_id(e164)
         national = '0' + digits[3:] if digits.startswith('254') else None
-        return UserRepository.find_by_legacy_phone({value, digits, national})
+        return _signable(UserRepository.find_by_legacy_phone({value, digits, national}))
+
+
+def _signable(user: Optional[User]) -> Optional[User]:
+    """Demo accounts are reachable only through POST /api/auth/demo, never by
+    login, recovery or any other identifier lookup."""
+    return None if user is None or user.is_demo else user

@@ -1,4 +1,4 @@
-"""Operator commands: ``flask auth audit-phones``."""
+"""Operator commands: ``flask auth audit-phones``, ``flask demo seed``."""
 from __future__ import annotations
 
 import click
@@ -31,5 +31,24 @@ def audit_phones(show_all):
             click.echo(f'  [CHANGE] user={user_id} phone_number -> {value}')
 
 
+demo_cli = AppGroup('demo', help='Public demo workspace ("Silato Farm").')
+
+
+@demo_cli.command('seed')
+def seed_demo():
+    """Create or rebuild the demo workspace with data dated relative to today.
+
+    Idempotent: replaces the demo tenant's data, never duplicates it. Runs
+    whether or not DEMO_ENABLED is set, so the data can be prepared first.
+    """
+    from app.services.demo_seed_service import DemoSeedService
+
+    summary = DemoSeedService.seed()
+    click.echo(f'Demo workspace ready (tenant {summary.tenant_id}).')
+    for table, count in sorted(summary.counts.items()):
+        click.echo(f'  {table}: {count}')
+
+
 def register_cli(app) -> None:
     app.cli.add_command(auth_cli)
+    app.cli.add_command(demo_cli)

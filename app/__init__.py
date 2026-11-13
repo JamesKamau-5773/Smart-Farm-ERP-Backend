@@ -61,12 +61,14 @@ def create_app(config_class=Config):
     from app.middleware import (
         begin_idempotent_request,
         complete_idempotent_request,
+        enforce_demo_read_only,
         enforce_page_access,
         enforce_phone_verification,
         enforce_required_password_reset,
         set_tenant_context,
     )
     app.before_request(set_tenant_context)
+    app.before_request(enforce_demo_read_only)
     app.before_request(enforce_required_password_reset)
     app.before_request(enforce_phone_verification)
     app.before_request(enforce_page_access)
@@ -117,6 +119,7 @@ def create_app(config_class=Config):
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
     from app.api.auth_google import auth_google_bp
+    from app.api.auth_demo import auth_demo_bp
     from app.api.auth_recovery import auth_recovery_bp
     from app.api.auth_verification import auth_verification_bp
     from app.api.operations import operations_bp, operations_alias_bp
@@ -151,6 +154,7 @@ def create_app(config_class=Config):
     app.register_blueprint(auth_verification_bp, url_prefix='/api/auth')
     app.register_blueprint(auth_recovery_bp, url_prefix='/api/auth')
     app.register_blueprint(auth_google_bp, url_prefix='/api/auth')
+    app.register_blueprint(auth_demo_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')
     app.register_blueprint(operations_bp, url_prefix='/api/operations')
     app.register_blueprint(operations_alias_bp)

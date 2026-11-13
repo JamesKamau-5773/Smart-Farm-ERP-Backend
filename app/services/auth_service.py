@@ -1,6 +1,6 @@
 from __future__ import annotations
 from flask import jsonify, current_app
-from flask_jwt_extended import create_access_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
+from flask_jwt_extended import create_access_token, decode_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
 from uuid import uuid4
 
@@ -118,7 +118,7 @@ class AuthService:
         return farms[0]
 
     @staticmethod
-    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD):
+    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD, expires_delta=None):
         tenant_type = normalize_tenant_type(getattr(tenant, "tenant_type", None))
         available_farms = [(f.id, f.name) for f in farms]
         phone_number = AuthService._resolve_phone_number(user)
@@ -144,14 +144,52 @@ class AuthService:
         additional_claims.pop("sub", None)
         additional_claims.update(SessionService.session_claims(user, auth_method))
 
+        # expires_delta=None means the configured JWT_ACCESS_TOKEN_EXPIRES.
         access_token = create_access_token(
             identity=str(user.id),
             additional_claims=additional_claims,
+            expires_delta=expires_delta,
         )
 
         # Response-only (not in the token): read live from the database.
         payload.update(AccountStateService.describe(user, auth_method))
         return access_token, payload
+
+    @staticmethod
+    def start_session(user, *, farm_id=None, auth_method=AuthMethod.PASSWORD, expires_delta=None):
+        """Issue a session for an already-authenticated user: the access token in
+        the JSON body and in the httpOnly cookie. Every sign-in route ends here."""
+        if not user.is_active:
+            return _error("ACCOUNT_DISABLED", "Account is disabled. Contact Farm Administrator.", 403)
+
+        tenant, farms = AuthService._ensure_default_tenant_and_farm(user)
+        try:
+            active_farm = AuthService._pick_active_farm(tenant=tenant, farms=farms, requested_farm_id=farm_id)
+        except ValueError as e:
+            return _error("INVALID_FARM", str(e), 400)
+
+        try:
+            access_token, payload = AuthService._issue_token_and_payload(
+                user=user,
+                tenant=tenant,
+                farms=farms,
+                active_farm=active_farm,
+                auth_method=auth_method,
+                expires_delta=expires_delta,
+            )
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 500
+
+        expires_at = datetime.fromtimestamp(decode_token(access_token)['exp'], tz=timezone.utc)
+        response = jsonify({
+            "access_token": access_token,
+            "session_expires_at": expires_at.isoformat().replace('+00:00', 'Z'),
+            **payload,
+        })
+
+        # A shortened session also gets a cookie that expires with it.
+        set_access_cookies(response, access_token, max_age=int(expires_delta.total_seconds()) if expires_delta else None)
+        return response, 200
 
     @staticmethod
     def authenticate_user(identifier, password, farm_id=None):
@@ -160,36 +198,8 @@ class AuthService:
             AuthService._equalize_failed_login_timing(password)
         user = next((candidate for candidate in candidates if candidate.check_password(password)), None)
 
-        # 1. Verify User Exists and Password Matches
         if user:
-
-            # 2. Check if account is locked/inactive
-            if not user.is_active:
-                return _error("ACCOUNT_DISABLED", "Account is disabled. Contact Farm Administrator.", 403)
-
-            tenant, farms = AuthService._ensure_default_tenant_and_farm(user)
-            try:
-                active_farm = AuthService._pick_active_farm(tenant=tenant, farms=farms, requested_farm_id=farm_id)
-            except ValueError as e:
-                return _error("INVALID_FARM", str(e), 400)
-
-            try:
-                access_token, payload = AuthService._issue_token_and_payload(
-                    user=user,
-                    tenant=tenant,
-                    farms=farms,
-                    active_farm=active_farm,
-                )
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 500
-
-            response = jsonify({
-                "access_token": access_token,
-                **payload,
-            })
-
-            set_access_cookies(response, access_token)
-            return response, 200
+            return AuthService.start_session(user, farm_id=farm_id)
 
         return _error("INVALID_CREDENTIALS", "Invalid username or password", 401)
 
