@@ -1,0 +1,33 @@
+# Secrets and local environments never go into the image; pass them at runtime.
+.env
+.env.*
+!.env.example
+.envrc
+.venv/
+venv/
+
+# Local data: uploads, SQLite files and database dumps (these contain farm data).
+instance/
+*.db
+*.sqlite
+*.sqlite3
+*.sql
+
+# Caches, tooling and VCS
+.git/
+.githooks/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Stray untracked 37 MB PostScript file in the repo root, not used by the app.
+sa
+
+# Docker files themselves
+Dockerfile
+docker-compose*.yml
+.dockerignore

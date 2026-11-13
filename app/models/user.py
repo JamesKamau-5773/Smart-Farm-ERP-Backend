@@ -58,6 +58,9 @@ class User(db.Model):
     has_password = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
     # Embedded in every access token; incrementing it revokes all live sessions.
     token_version = db.Column(db.Integer, nullable=False, default=0, server_default='0')
+    # Accounts belonging to the public demo workspace: no usable password, never
+    # resolvable by the login or recovery flows, read-only when signed in.
+    is_demo = db.Column(db.Boolean, nullable=False, default=False, server_default=db.false())
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
