@@ -1,11 +1,13 @@
-from flask import Blueprint, request, jsonify, g
+from flask import Blueprint, current_app, g, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt
 from app.services.feed_frequency_helper import FeedFrequencyHelper
 from app.services.yield_target_service import YieldTargetService
 from app.services.herd_feeding_plan_service import HerdFeedingPlanService
 from app.utils.jwt_payload import parse_public_int_id
+from app.utils.error_envelope import register_error_envelope
 
 feed_bp = Blueprint('feed', __name__)
+register_error_envelope(feed_bp)
 
 
 def _get_tenant_id_from_claims():
@@ -76,8 +78,9 @@ def calculate_schedule():
         
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "Failed to calculate schedule", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to calculate schedule")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to calculate schedule"}), 500
 
 
 # Yield Target Management Endpoints
@@ -109,8 +112,9 @@ def set_yield_target(cow_id):
         return jsonify(result), 201 if result.get('action') == 'created' else 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "Failed to set yield target.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to set yield target.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to set yield target."}), 500
 
 
 @feed_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['GET'])
@@ -127,8 +131,9 @@ def get_yield_target(cow_id):
         if not target:
             return jsonify({"error": f"No yield target found for cow {cow_id}."}), 404
         return jsonify(target), 200
-    except Exception as exc:
-        return jsonify({"error": "Failed to retrieve yield target.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to retrieve yield target.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to retrieve yield target."}), 500
 
 
 @feed_bp.route('/api/v1/herd/yield-targets', methods=['GET'])
@@ -146,8 +151,9 @@ def list_yield_targets():
             "count": len(targets),
             "targets": targets,
         }), 200
-    except Exception as exc:
-        return jsonify({"error": "Failed to retrieve yield targets.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to retrieve yield targets.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to retrieve yield targets."}), 500
 
 
 @feed_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['PATCH'])
@@ -172,8 +178,9 @@ def update_yield_target(cow_id):
         return jsonify(result), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "Failed to update yield target.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to update yield target.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to update yield target."}), 500
 
 
 @feed_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['DELETE'])
@@ -190,8 +197,9 @@ def deactivate_yield_target(cow_id):
         return jsonify(result), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404
-    except Exception as exc:
-        return jsonify({"error": "Failed to deactivate yield target.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to deactivate yield target.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to deactivate yield target."}), 500
 
 
 # Herd Feeding Plan Endpoints
@@ -213,8 +221,9 @@ def calculate_herd_plan_from_targets():
         return jsonify(plan), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "Failed to calculate herd feeding plan.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to calculate herd feeding plan.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to calculate herd feeding plan."}), 500
 
 
 @feed_bp.route('/api/v1/herd/feeding-plan/custom', methods=['POST'])
@@ -239,5 +248,6 @@ def calculate_herd_plan_custom():
         return jsonify(plan), 200
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": "Failed to calculate herd feeding plan.", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Failed to calculate herd feeding plan.")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Failed to calculate herd feeding plan."}), 500

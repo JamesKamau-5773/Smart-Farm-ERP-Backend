@@ -1,9 +1,6 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify
 from flask_jwt_extended import jwt_required
-from datetime import datetime
-from sqlalchemy.exc import IntegrityError
 
-from app import db
 from app.models.livestock import Cow
 from app.models.user import Role
 from app.utils import get_tenant_id_from_context
@@ -63,89 +60,3 @@ def get_herd_list():
     serialized_cows = [_serialize_cow(cow) for cow in cows]
 
     return jsonify(serialized_cows), 200
-
-@herd_bp.route('/<int:cow_id>', methods=['PATCH'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND)
-def update_cow(cow_id):
-    """
-    Updates an existing cow record.
-    Handles the mapping of 'current_status' from frontend to 'status' in the database.
-    """
-    data = request.get_json()
-    tenant_id = get_tenant_id_from_context()
-    if tenant_id is None:
-        return jsonify({'error': 'Missing or invalid tenant context.'}), 400
-
-    cow = db.session.query(Cow).filter_by(id=cow_id, tenant_id=tenant_id).first()
-    if not cow:
-        return jsonify({'error': 'Cow not found.'}), 404
-
-    try:
-        # Update fields if they are present in the request payload
-        if 'tag_number' in data:
-            cow.tag_number = data['tag_number']
-        if 'name' in data:
-            cow.name = data['name']
-        if 'breed_status' in data:
-            cow.breed_status = data['breed_status']
-        if 'date_of_birth' in data and data['date_of_birth']:
-            cow.date_of_birth = datetime.strptime(data['date_of_birth'], '%Y-%m-%d').date()
-
-        # Map frontend's 'current_status' to backend's 'status' column
-        if 'current_status' in data:
-            cow.status = data['current_status']
-
-        if 'sire_name' in data:
-            cow.sire_name = data['sire_name']
-        if 'dam_id' in data:
-            # Ensure dam_id is set to None if an empty string is passed (for optional FKs)
-            cow.dam_id = data['dam_id'] if data['dam_id'] != '' else None
-
-        if 'is_hardlocked' in data:
-            cow.is_hardlocked = data['is_hardlocked']
-        if 'is_active' in data:
-            cow.is_active = data['is_active']
-        if 'last_calving_date' in data and data['last_calving_date']:
-            cow.last_calving_date = datetime.strptime(data['last_calving_date'], '%Y-%m-%d').date()
-        if 'pregnancy_status' in data:
-            cow.pregnancy_status = data['pregnancy_status']
-        if 'due_date' in data and data['due_date']:
-            cow.due_date = datetime.strptime(data['due_date'], '%Y-%m-%d').date()
-
-        db.session.commit()
-        return jsonify(_serialize_cow(cow)), 200
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify({'error': 'A cow with this tag number already exists for your tenant.'}), 409
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
-
-@herd_bp.route('/<int:cow_id>', methods=['DELETE'])
-@jwt_required()
-@role_required(Role.FARMER)
-def delete_cow(cow_id):
-    """
-    Deletes a cow record.
-    This is a hard delete. It will fail if the cow has dependent records
-    like milk logs or medical records. In that case, the user should
-    change the cow's status to 'Culled' or 'Sold' instead.
-    """
-    tenant_id = get_tenant_id_from_context()
-    if tenant_id is None:
-        return jsonify({'error': 'Missing or invalid tenant context.'}), 400
-
-    cow = db.session.query(Cow).filter_by(id=cow_id, tenant_id=tenant_id).first()
-    if not cow:
-        return jsonify({'error': 'Cow not found.'}), 404
-
-    try:
-        db.session.delete(cow)
-        db.session.commit()
-        return jsonify({'message': f'Cow with tag "{cow.tag_number}" deleted successfully.'}), 200
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify({
-            'error': 'Cannot delete this cow because it has associated records (e.g., milk logs, medical history). Consider changing its status to "Culled" or "Sold" instead.'
-        }), 409

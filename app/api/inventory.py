@@ -1,17 +1,22 @@
-from flask import Blueprint, jsonify, g, request
+from flask import Blueprint, current_app, g, jsonify, request
 from flask_jwt_extended import get_jwt_identity, jwt_required
 from typing import Optional, Tuple
 from sqlalchemy import desc, or_
 
 from app.models.user import Role
 from app.models.supply import FeedRecipe, RecipeIngredient, InventoryItem
-from app.repositories.supply_repo import InventoryRepository
+from app.repositories.supply_repo import InventoryItemInUseError, InventoryRepository
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
+from app.services.ingredient_data_quality_service import IngredientDataQualityService
+from app.services.inventory_audit_service import InventoryAuditService, item_snapshot
+from app.services.inventory_movement_service import LOSS_REASONS, Delivery, InventoryMovementService, Issue
 from app.services.inventory_standards_service import InventoryStandardsService
 from app.utils.decorators import require_tenant_context, role_required
 from app.utils import get_tenant_id_from_context
+from app.utils.error_envelope import register_error_envelope
 
 inventory_bp = Blueprint('inventory', __name__)
+register_error_envelope(inventory_bp)
 
 
 def _parse_movement_payload(raw_type: Optional[str]) -> Tuple[str, str]:
@@ -24,9 +29,9 @@ def _parse_movement_payload(raw_type: Optional[str]) -> Tuple[str, str]:
     """
     raw = (raw_type or '').strip().upper()
 
-    # Shrinkage & Loss
-    if raw in {'SPOILAGE', 'SPILL', 'EXPIRED', 'DAMAGE', 'SHRINKAGE'}:
-        return 'OUT', 'SHRINKAGE'
+    # Losses keep their own reason so reports can tell spoilage from spills.
+    if raw in LOSS_REASONS:
+        return 'OUT', raw
 
     # Standard Consumption
     if raw in {'ISSUE', 'DEDUCT', 'CONSUMPTION', 'CONSUME', 'OUTBOUND', 'USAGE', 'WITHDRAWAL'}:
@@ -88,6 +93,39 @@ def _get_mix_share_defaults_by_mixer(tenant_id: int):
     return defaults_by_mixer
 
 
+def _nutrient_fields(data: dict) -> dict:
+    return {
+        'protein_grams_per_kg': data.get('protein_grams_per_kg', data.get('proteinGramsPerKg')),
+        'energy_mj_per_kg': data.get('energy_mj_per_kg', data.get('energyMjPerKg')),
+        'fiber_grams_per_kg': data.get('fiber_grams_per_kg', data.get('fiberGramsPerKg')),
+    }
+
+
+def _nutrient_range_error(data: dict):
+    try:
+        IngredientDataQualityService.validate_nutrient_ranges(_nutrient_fields(data))
+    except ValueError as exc:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
+    return None
+
+
+def _direct_stock_edit_error(item, data: dict):
+    """Stock may only change through recorded movements, never by editing the item."""
+    raw = data.get('current_qty', data.get('currentStock'))
+    if raw in (None, ''):
+        return None
+    try:
+        unchanged = abs(float(raw) - float(item.current_qty)) < 0.005
+    except (TypeError, ValueError):
+        unchanged = False
+    if unchanged:
+        return None
+    return jsonify({
+        'code': 'STOCK_CHANGE_REQUIRES_MOVEMENT',
+        'error': 'Stock levels change only through Restock, Use or Stock Count, so every change is recorded.',
+    }), 400
+
+
 def _serialize_item(item, *, mix_share_defaults_by_mixer=None, active_recipe_type=None):
     if mix_share_defaults_by_mixer is None:
         mix_share_defaults_by_mixer = {}
@@ -116,6 +154,8 @@ def _serialize_item(item, *, mix_share_defaults_by_mixer=None, active_recipe_typ
         'id': item.id,
         'name': item.name,
         'sku': getattr(item, 'sku', None),
+        'data_warnings': IngredientDataQualityService.warnings_for(item),
+        'is_active': bool(getattr(item, 'is_active', True)),
         'category': item.category,
         'unit': item.unit,
         'reorderLevel': float(item.minimum_threshold),
@@ -215,23 +255,11 @@ def _serialize_movement(movement):
         'timestamp': movement.transaction_date.isoformat() if movement.transaction_date else None,
         'logged_by': movement.logged_by,
         'notes': movement.notes,
+        'supplier_name': movement.inventory_batch.supplier_name if movement.inventory_batch else None,
         'unit_cost': float(movement.unit_cost),
         'total_transaction_value': float(movement.total_transaction_value),
     }
 
-
-def _link_inventory_loss_to_finance(movement, item):
-    """Creates an Expense transaction in the main ledger for inventory write-offs."""
-    from app.services.finance_service import FinanceService
-    from app.models.finance import TransactionType, TransactionCategory
-
-    loss_value = float(movement.quantity) * float(item.cost_per_kg)
-    if loss_value > 0:
-        desc = f"Inventory write-off for {item.name}: {movement.notes or movement.reason_code}"
-        FinanceService.record_transaction(
-            t_type=TransactionType.EXPENSE, category=TransactionCategory.INVENTORY_WRITE_OFF,
-            amount=loss_value, user_id=int(get_jwt_identity()), ip_address=request.remote_addr, desc=desc
-        )
 
 
 @inventory_bp.route('/api/v1/inventory/deduct', methods=['POST'])
@@ -269,8 +297,9 @@ def deduct_inventory():
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 404 if "not found" in str(exc).lower() else 400
-    except Exception as exc:
-        return jsonify({"error": "Transaction failed", "details": str(exc)}), 500
+    except Exception:
+        current_app.logger.exception("Transaction failed")
+        return jsonify({"code": "INTERNAL_ERROR", "error": "Transaction failed"}), 500
 
     return jsonify({
         "status": "success",
@@ -291,6 +320,8 @@ def list_inventory_items():
         return jsonify({"error": "Missing or invalid tenant context."}), 400
 
     query = InventoryItem.query.filter_by(tenant_id=tenant_id)
+    if (request.args.get('include_archived') or '').strip().lower() not in {'1', 'true', 'yes'}:
+        query = query.filter(InventoryItem.is_active.is_(True))
 
     mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
     requested_recipe_type = FeedMixerPolicyService.normalize_recipe_type(
@@ -379,6 +410,9 @@ def create_inventory_item():
     unit = (data.get('unit') or '').strip()
     if not name or not category or not unit:
         return jsonify({'error': 'name, category, and unit are required.'}), 400
+    range_error = _nutrient_range_error(data)
+    if range_error:
+        return range_error
     try:
         policy_payload = _parse_inventory_item_policy_payload(data)
         standards_payload = InventoryStandardsService.apply_defaults(
@@ -419,10 +453,11 @@ def create_inventory_item():
             inclusion_percentage_dairy_meal=policy_payload['inclusion_percentage_dairy_meal'],
             inclusion_percentage_main_meal=policy_payload['inclusion_percentage_main_meal'],
         )
+        InventoryAuditService.item_created(item)
         mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
         return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 201
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 409
+        return jsonify({'code': 'CONFLICT', 'error': str(exc)}), 409
 
 
 @inventory_bp.route('/api/inventory/items/<int:item_id>', methods=['PATCH'])
@@ -445,6 +480,10 @@ def update_inventory_item(item_id):
             name_for_defaults = current_item.name
         if category_for_defaults is None:
             category_for_defaults = current_item.category
+
+    range_error = _nutrient_range_error(data)
+    if range_error:
+        return range_error
 
     standards_payload = InventoryStandardsService.apply_defaults(
         tenant_id=tenant_id,
@@ -485,6 +524,14 @@ def update_inventory_item(item_id):
         fallback_category=category_for_defaults,
     )
 
+    existing_item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+    if not existing_item:
+        return jsonify({'code': 'NOT_FOUND', 'error': 'Inventory item not found.'}), 404
+    before = item_snapshot(existing_item)
+    stock_error = _direct_stock_edit_error(existing_item, data)
+    if stock_error:
+        return stock_error
+
     item = InventoryRepository.update_item(
         item_id=item_id,
         tenant_id=tenant_id,
@@ -492,7 +539,6 @@ def update_inventory_item(item_id):
         sku=(data.get('sku') or '').strip() if 'sku' in data else None,
         category=(data.get('category') or '').strip() if 'category' in data else None,
         unit=(data.get('unit') or '').strip() if 'unit' in data else None,
-        current_qty=data.get('current_qty', data.get('currentStock')) if ('current_qty' in data or 'currentStock' in data) else None,
         minimum_threshold=data.get('minimum_threshold', data.get('reorderLevel')) if ('minimum_threshold' in data or 'reorderLevel' in data) else None,
         energy_mj_per_kg=resolved_defaults['energy_mj_per_kg'] if should_update_nutrition else None,
         protein_grams_per_kg=resolved_defaults['protein_grams_per_kg'] if should_update_nutrition else None,
@@ -504,7 +550,8 @@ def update_inventory_item(item_id):
         inclusion_percentage_main_meal=policy_payload['inclusion_percentage_main_meal'] if ('inclusion_percentage_main_meal' in data or 'inclusionPercentageMainMeal' in data) else None,
     )
     if not item:
-        return jsonify({'error': 'Inventory item not found.'}), 404
+        return jsonify({'code': 'NOT_FOUND', 'error': 'Inventory item not found.'}), 404
+    InventoryAuditService.item_updated(item, before)
     mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
     return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 200
 
@@ -517,10 +564,75 @@ def delete_inventory_item(item_id):
     tenant_id = get_tenant_id_from_context()
     if tenant_id is None:
         return jsonify({"error": "Missing or invalid tenant context."}), 400
-    item = InventoryRepository.delete_item(item_id=item_id, tenant_id=tenant_id)
+    existing_item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+    before = item_snapshot(existing_item) if existing_item else None
+    try:
+        item = InventoryRepository.delete_item(item_id=item_id, tenant_id=tenant_id)
+    except InventoryItemInUseError as error:
+        return jsonify({
+            'code': 'ITEM_IN_USE',
+            'error': (
+                f'{error.item.name} is used by saved feed mixes, batches or stock history, so it cannot be deleted. '
+                'Archive it instead: it keeps its history but is hidden and cannot be added to new mixes.'
+            ),
+            'can_archive': True,
+        }), 409
+    if item:
+        InventoryAuditService.item_deleted(item_id, before)
     if not item:
         return jsonify({'error': 'Inventory item not found.'}), 404
     return jsonify({'message': 'Inventory item deleted successfully.', 'deleted': _serialize_item(item, mix_share_defaults_by_mixer={})}), 200
+
+
+@inventory_bp.route('/api/inventory/items/<int:item_id>/data-fixes', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER)
+def apply_inventory_data_fix(item_id):
+    """Applies the server-computed correction for one of the item's data warnings."""
+    tenant_id = get_tenant_id_from_context()
+    if tenant_id is None:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': 'Missing or invalid tenant context.'}), 400
+    item = InventoryRepository.get_item(item_id, tenant_id=tenant_id)
+    if not item:
+        return jsonify({'code': 'NOT_FOUND', 'error': 'Inventory item not found.'}), 404
+    try:
+        correction = IngredientDataQualityService.correction_for(item, (request.get_json(silent=True) or {}).get('code'))
+    except ValueError as exc:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
+    before = item_snapshot(item)
+    item = InventoryRepository.update_item(item_id=item_id, tenant_id=tenant_id, **correction)
+    InventoryAuditService.item_updated(item, before)
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 200
+
+
+@inventory_bp.route('/api/inventory/items/<int:item_id>/archive', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER)
+def archive_inventory_item(item_id):
+    return _set_item_active(item_id, False)
+
+
+@inventory_bp.route('/api/inventory/items/<int:item_id>/restore', methods=['POST'])
+@jwt_required()
+@require_tenant_context
+@role_required(Role.FARMER)
+def restore_inventory_item(item_id):
+    return _set_item_active(item_id, True)
+
+
+def _set_item_active(item_id: int, is_active: bool):
+    tenant_id = get_tenant_id_from_context()
+    if tenant_id is None:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': 'Missing or invalid tenant context.'}), 400
+    item = InventoryRepository.set_item_active(item_id, tenant_id, is_active)
+    if not item:
+        return jsonify({'code': 'NOT_FOUND', 'error': 'Inventory item not found.'}), 404
+    InventoryAuditService.item_archive_changed(item)
+    mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
+    return jsonify(_serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer)), 200
 
 
 @inventory_bp.route('/api/inventory/movements', methods=['GET'])
@@ -564,28 +676,33 @@ def create_inventory_movement():
     if not item_id or quantity is None:
         return jsonify({'error': 'item_id, transaction_type (or movement_type), and quantity are required.'}), 400
 
+    actor_id = int(get_jwt_identity())
     try:
-        item, movement, is_low_stock = InventoryRepository.record_transaction(
-            item_id=item_id,
-            transaction_type=movement_type,
-            quantity=quantity,
-            reason_code=reason_code,
-            unit_cost=data.get('unit_cost'),
-            inventory_batch_id=data.get('inventory_batch_id'),
-            logged_by=int(get_jwt_identity()),
-            notes=data.get('notes'),
-            tenant_id=tenant_id,
-        )
+        if movement_type == 'IN':
+            recorded = InventoryMovementService.receive(tenant_id, Delivery(
+                item_id=item_id,
+                quantity=quantity,
+                unit_cost=data.get('unit_cost'),
+                supplier_name=data.get('supplier_name'),
+                record_expense=bool(data.get('record_expense')),
+                notes=data.get('notes'),
+                reason_code=reason_code,
+            ), actor_id=actor_id)
+        else:
+            recorded = InventoryMovementService.issue(tenant_id, Issue(
+                item_id=item_id, quantity=quantity, reason_code=reason_code, notes=data.get('notes'),
+            ), actor_id=actor_id)
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-
-    # IDEAL LOCATION: This financial link should be inside the repository transaction
-    # to ensure atomicity. It is here to demonstrate the complete concept.
-    if reason_code == 'SHRINKAGE':
-        _link_inventory_loss_to_finance(movement, item)
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
 
     mix_share_defaults_by_mixer = _get_mix_share_defaults_by_mixer(tenant_id)
-    return jsonify({'movement': _serialize_movement(movement), 'updatedItem': _serialize_item(item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer), 'lowStock': is_low_stock}), 201
+    return jsonify({
+        'movement': _serialize_movement(recorded.movement),
+        'updatedItem': _serialize_item(recorded.item, mix_share_defaults_by_mixer=mix_share_defaults_by_mixer),
+        'lowStock': recorded.is_low_stock,
+        'ledgerEntryId': recorded.ledger_entry.id if recorded.ledger_entry else None,
+        'supplierLotId': recorded.lot.id if recorded.lot else None,
+    }), 201
 
 
 @inventory_bp.route('/api/inventory/items/<int:item_id>/audit', methods=['POST'])
@@ -621,13 +738,24 @@ def process_stock_audit(item_id):
 
     tx_type, reason, qty_to_record, notes = ('IN', 'AUDIT_GAIN', discrepancy, "Physical stock reconciliation - gain detected.") if discrepancy > 0 else ('OUT', 'AUDIT_LOSS', abs(discrepancy), "Physical stock reconciliation - loss detected.")
 
+    actor_id = int(get_jwt_identity())
     try:
-        item, movement, _ = InventoryRepository.record_transaction(item_id=item.id, transaction_type=tx_type, quantity=qty_to_record, reason_code=reason, notes=notes, logged_by=int(get_jwt_identity()), tenant_id=tenant_id)
-        if reason == 'AUDIT_LOSS':
-            _link_inventory_loss_to_finance(movement, item)
-        return jsonify({"status": "reconciled", "adjustment": discrepancy, "new_balance": float(item.current_qty), "movement": _serialize_movement(movement)}), 200
+        if tx_type == 'IN':
+            recorded = InventoryMovementService.receive(tenant_id, Delivery(
+                item_id=item.id, quantity=qty_to_record, notes=notes, reason_code=reason,
+            ), actor_id=actor_id)
+        else:
+            recorded = InventoryMovementService.issue(tenant_id, Issue(
+                item_id=item.id, quantity=qty_to_record, reason_code=reason, notes=notes,
+            ), actor_id=actor_id)
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
+    return jsonify({
+        "status": "reconciled",
+        "adjustment": discrepancy,
+        "new_balance": float(recorded.item.current_qty),
+        "movement": _serialize_movement(recorded.movement),
+    }), 200
 
 
 @inventory_bp.route('/api/v1/nutrition/ingredient-standards', methods=['GET'])

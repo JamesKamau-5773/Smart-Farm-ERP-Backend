@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 
-from flask import Blueprint, g, request, jsonify, render_template, send_file
+from flask import Blueprint, current_app, g, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -333,12 +333,13 @@ def update_customer(customer_id):
     try:
         db.session.commit()
         return jsonify(_serialize_customer(customer)), 200
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
-    except Exception as e:
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 
 @finance_bp.route('/deliveries', methods=['GET'])
@@ -963,9 +964,10 @@ def create_customer():
     except IntegrityError:
         db.session.rollback()
         return jsonify({'error': 'A customer with this phone number already exists.'}), 409
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 @finance_bp.route('/deliveries', methods=['POST'])
 @jwt_required()
@@ -1056,12 +1058,13 @@ def create_delivery():
     try:
         db.session.commit()
         return jsonify(_serialize_delivery(delivery)), 201
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
-    except Exception as e:
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 
 @finance_bp.route('/deliveries/<int:delivery_id>', methods=['PATCH'])
@@ -1152,9 +1155,9 @@ def update_delivery(delivery_id):
     except (TypeError, ArithmeticError):
         db.session.rollback()
         return jsonify({'error': 'Invalid numeric values for delivery details.'}), 400
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'An unexpected error occurred during update.'}), 500
@@ -1209,9 +1212,9 @@ def delete_delivery(delivery_id):
     except FileNotFoundError as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 404
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error during reversal.', 'details': str(e)}), 409
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error during reversal.'}), 409
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'An unexpected error occurred during deletion.'}), 500

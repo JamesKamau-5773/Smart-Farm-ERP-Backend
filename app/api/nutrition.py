@@ -1,6 +1,6 @@
 from __future__ import annotations
 import math
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
 from app.models.user import Role
@@ -10,11 +10,16 @@ from app.services.feed_mixer_policy_service import FeedMixerPolicyService
 from app.services.group_feeding_plan_service import GroupFeedingPlanService
 from app.services.feeding_group_recipe_policy_service import FeedingGroupRecipePolicyService
 from app.services.recipe_formulation_service import RecipeFormulationService, FormulationInfeasibleError
+from app.services.batch_sizing_service import DEFAULT_DAYS, BatchSizingService
+from app.services.feed_planning_audit_service import FeedPlanningAuditService
+from app.services.feeding_instruction_service import FeedingInstructionService
+from app.services.ingredient_data_quality_service import IngredientDataQualityService
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
 from app.models.supply import FeedRecipe, RecipeIngredient, Ingredient, FarmMeasurementUnit, InventoryItem
 from app.repositories.supply_repo import InventoryRepository
 from app import db
+from app.utils.error_envelope import register_error_envelope
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
@@ -89,6 +94,7 @@ GET /api/v1/nutrition/analytics/active-batch-roi-trend-weekly?saleable_only=true
 
 nutrition_bp = Blueprint('nutrition', __name__, url_prefix='/api/v1/nutrition')
 nutrition_alias_bp = Blueprint('nutrition_alias', __name__)
+register_error_envelope(nutrition_bp, nutrition_alias_bp)
 
 
 def _get_tenant_id_from_claims():
@@ -230,7 +236,10 @@ def process_and_save_batch():
         user_id = None
 
     data = request.get_json() or {}
-    return NutritionService.process_and_save_batch(tenant_id=tenant_id, user_id=user_id, data=data)
+    response, status = NutritionService.process_and_save_batch(tenant_id=tenant_id, user_id=user_id, data=data)
+    if status in (200, 201):
+        FeedPlanningAuditService.batch_mixed(response.get_json() or {})
+    return response, status
 
 
 @nutrition_bp.route('/batches/<int:batch_id>/consumption-status', methods=['GET'])
@@ -259,12 +268,15 @@ def record_batch_consumption_event(batch_id):
         user_id = None
 
     data = request.get_json() or {}
-    return NutritionService.record_consumption_event(
+    response, status = NutritionService.record_consumption_event(
         tenant_id=tenant_id,
         batch_id=batch_id,
         user_id=user_id,
         data=data,
     )
+    if status in (200, 201):
+        FeedPlanningAuditService.feeding_recorded(batch_id, response.get_json() or {})
+    return response, status
 
 
 @nutrition_bp.route('/analytics/feed-cost-efficiency', methods=['GET'])
@@ -427,6 +439,7 @@ def create_recipe():
                 return jsonify({'error': f'Inventory item {inventory_item_id} not found for this tenant.'}), 404
             db.session.add(RecipeIngredient(tenant_id=tenant_id, recipe_id=recipe.id, inventory_item_id=ingredient['inventory_item_id'], inclusion_percentage=ingredient['inclusion_percentage']))
         db.session.commit()
+        FeedPlanningAuditService.recipe_saved(recipe.id, {'name': recipe.recipe_name, 'source': 'create'})
         return jsonify({'id': recipe.id, 'name': recipe.recipe_name}), 201
     except ValueError as exc:
         db.session.rollback()
@@ -481,6 +494,7 @@ def update_recipe(recipe_id):
         return jsonify({'error': str(exc)}), 400
     for field, value in measurement_settings.items():
         setattr(recipe, field, value)
+    FeedPlanningAuditService.stage_recipe_update(recipe)
     db.session.commit()
     return jsonify({
         'id': recipe.id,
@@ -512,7 +526,8 @@ def delete_recipe(recipe_id):
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
     recipe = FeedRecipe.query.filter_by(id=recipe_id, tenant_id=tenant_id).first()
     if not recipe:
-        return jsonify({'error': 'Recipe not found.'}), 404
+        return jsonify({'code': 'NOT_FOUND', 'error': 'Recipe not found.'}), 404
+    FeedPlanningAuditService.stage_recipe_delete(recipe)
     db.session.delete(recipe)
     db.session.commit()
     return jsonify({'message': 'Recipe deleted successfully.'}), 200
@@ -649,15 +664,10 @@ def set_cow_yield_target(cow_id):
         return jsonify(result), 201
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to set yield target.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to set yield target.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to set yield target.'}), 500
 
-
-@nutrition_alias_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['POST'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND)
-def set_cow_yield_target_alias(cow_id):
-    return set_cow_yield_target(cow_id)
 
 
 @nutrition_bp.route('/animals/<int:cow_id>/yield-target', methods=['GET'])
@@ -690,15 +700,10 @@ def get_cow_yield_target(cow_id):
         if result is None:
             return jsonify({'error': 'Yield target not found for this cow.'}), 404
         return jsonify(result), 200
-    except Exception as e:
-        return jsonify({'error': 'Failed to retrieve yield target.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to retrieve yield target.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to retrieve yield target.'}), 500
 
-
-@nutrition_alias_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def get_cow_yield_target_alias(cow_id):
-    return get_cow_yield_target(cow_id)
 
 
 @nutrition_bp.route('/herd/yield-targets', methods=['GET'])
@@ -733,15 +738,10 @@ def list_herd_yield_targets():
             'total_cows': len(targets),
             'targets': targets
         }), 200
-    except Exception as e:
-        return jsonify({'error': 'Failed to retrieve herd targets.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to retrieve herd targets.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to retrieve herd targets.'}), 500
 
-
-@nutrition_alias_bp.route('/api/v1/herd/yield-targets', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def list_herd_yield_targets_alias():
-    return list_herd_yield_targets()
 
 
 @nutrition_bp.route('/herd/feeding-plan', methods=['GET'])
@@ -806,8 +806,9 @@ def calculate_herd_feeding_plan():
         return jsonify(plan), 200
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to calculate feeding plan.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to calculate feeding plan.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to calculate feeding plan.'}), 500
 
 
 @nutrition_alias_bp.route('/api/v1/herd/feeding-plan', methods=['GET'])
@@ -937,6 +938,12 @@ def formulate_recipe_with_protein_target():
             payload['maximum_achievable_protein_percent'] = round(float(e.maximum_achievable_protein_percent), 4)
         if getattr(e, 'limiting_ingredients', None):
             payload['limiting_ingredients'] = e.limiting_ingredients
+        suspects = IngredientDataQualityService.suspect_ingredients_for_ids(
+            tenant_id, [int(ing['ingredient_id']) for ing in ingredients]
+        )
+        if suspects:
+            # Bad nutrient data is the more likely cause than the feeds themselves.
+            payload['suspect_ingredients'] = suspects
         if getattr(e, 'max_feasible_mix', None):
             payload['max_feasible_mix'] = e.max_feasible_mix
             payload['hint'] = (
@@ -960,8 +967,9 @@ def formulate_recipe_with_protein_target():
         return jsonify(payload), 422
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to formulate recipe.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to formulate recipe.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to formulate recipe.'}), 500
 
 
 @nutrition_bp.route('/recipes/calculate-nutrition', methods=['POST'])
@@ -1016,8 +1024,9 @@ def calculate_recipe_nutrition():
         return jsonify(nutrition), 200
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to calculate nutrition.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to calculate nutrition.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to calculate nutrition.'}), 500
 
 
 @nutrition_bp.route('/recipes/auto-save', methods=['POST'])
@@ -1092,6 +1101,7 @@ def auto_save_recipe():
             recipe_type=recipe_type,
             ingredient_ids=ingredient_ids,
         )
+        measurement_settings = _parse_recipe_measurement_settings(data, recipe_type=recipe_type)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
 
@@ -1107,11 +1117,18 @@ def auto_save_recipe():
             measurement_settings=measurement_settings,
             user_id=user_id,
         )
+        FeedPlanningAuditService.recipe_saved(result['recipe_id'], {
+            'name': result.get('recipe_name'),
+            'feeding_group': result.get('feeding_group'),
+            'target_protein_percent': result.get('target_protein_percent'),
+            'source': 'auto_save',
+        })
         return jsonify(result), 201
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to save recipe.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to save recipe.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to save recipe.'}), 500
 
 
 @nutrition_bp.route('/feed-formulation/suggested-mix', methods=['GET'])
@@ -1187,8 +1204,9 @@ def get_suggested_feed_mix():
 
     except ValueError as e:
         return jsonify({'error': str(e), 'message': 'No yield targets found. Please set up yield targets in Milk Lab first.'}), 400
-    except Exception as e:
-        return jsonify({'error': 'Failed to get suggested mix.', 'details': str(e)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to get suggested mix.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to get suggested mix.'}), 500
 
 
 @nutrition_bp.route('/feeding-groups/profiles', methods=['GET'])
@@ -1201,8 +1219,9 @@ def list_feeding_group_profiles():
 
     try:
         return jsonify(GroupFeedingPlanService.get_profiles(tenant_id=tenant_id)), 200
-    except Exception as exc:
-        return jsonify({'error': 'Failed to fetch feeding group profiles.', 'details': str(exc)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to fetch feeding group profiles.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to fetch feeding group profiles.'}), 500
 
 
 @nutrition_bp.route('/feeding-groups/profiles/<string:feeding_group>', methods=['PUT'])
@@ -1220,11 +1239,45 @@ def upsert_feeding_group_profile(feeding_group):
             feeding_group=feeding_group,
             payload=data,
         )
+        FeedPlanningAuditService.feeding_profile_saved(result['id'], result['feeding_group'], {
+            key: result[key] for key in ('avg_body_weight_kg', 'dmi_percent_bw', 'target_protein_percent', 'feeding_times_per_day')
+        })
         return jsonify(result), 200
     except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        return jsonify({'error': 'Failed to save feeding group profile.', 'details': str(exc)}), 500
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
+    except Exception:
+        current_app.logger.exception('Failed to save feeding group profile.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to save feeding group profile.'}), 500
+
+
+@nutrition_bp.route('/batches/suggested-size', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def suggested_batch_size():
+    """Batch size covering N days of herd demand for a mix type, minus what is still in store."""
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': 'Missing or invalid tenant in token.'}), 400
+    try:
+        suggestion = BatchSizingService.suggest(
+            tenant_id,
+            recipe_type=request.args.get('recipe_type'),
+            days=request.args.get('days', DEFAULT_DAYS),
+        )
+    except ValueError as exc:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': str(exc)}), 400
+    return jsonify(suggestion), 200
+
+
+@nutrition_bp.route('/feeding/today', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def todays_feeding_instructions():
+    """Cost-free feeding instructions per group, for staff with the 'feeding' page."""
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'code': 'VALIDATION_ERROR', 'error': 'Missing or invalid tenant in token.'}), 400
+    return jsonify(FeedingInstructionService.today(tenant_id)), 200
 
 
 @nutrition_bp.route('/herd/feeding-plan/by-group', methods=['GET'])
@@ -1238,8 +1291,9 @@ def calculate_herd_feeding_plan_by_group():
     try:
         plan = GroupFeedingPlanService.calculate_plan_by_group(tenant_id=tenant_id)
         return jsonify(plan), 200
-    except Exception as exc:
-        return jsonify({'error': 'Failed to calculate group feeding plan.', 'details': str(exc)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to calculate group feeding plan.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to calculate group feeding plan.'}), 500
 
 
 @nutrition_bp.route('/feed-formulation/suggested-mix/by-group', methods=['GET'])
@@ -1296,36 +1350,13 @@ def get_suggested_mix_by_group():
         }), 200
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
-    except Exception as exc:
-        return jsonify({'error': 'Failed to get suggested mix by feeding group.', 'details': str(exc)}), 500
+    except Exception:
+        current_app.logger.exception('Failed to get suggested mix by feeding group.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'Failed to get suggested mix by feeding group.'}), 500
 
 
-@nutrition_alias_bp.route('/api/v1/nutrition/feeding-groups/profiles', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def list_feeding_group_profiles_alias():
-    return list_feeding_group_profiles()
 
 
-@nutrition_alias_bp.route('/api/v1/nutrition/feeding-groups/profiles/<string:feeding_group>', methods=['PUT'])
-@jwt_required()
-@role_required(Role.FARMER)
-def upsert_feeding_group_profile_alias(feeding_group):
-    return upsert_feeding_group_profile(feeding_group)
-
-
-@nutrition_alias_bp.route('/api/v1/nutrition/herd/feeding-plan/by-group', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def calculate_herd_feeding_plan_by_group_alias():
-    return calculate_herd_feeding_plan_by_group()
-
-
-@nutrition_alias_bp.route('/api/v1/nutrition/feed-formulation/suggested-mix/by-group', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def get_suggested_mix_by_group_alias():
-    return get_suggested_mix_by_group()
 
 
 @nutrition_alias_bp.route('/api/v1/recipes/formulate', methods=['POST'])
@@ -1348,12 +1379,6 @@ def calculate_recipe_nutrition_alias():
 def auto_save_recipe_alias():
     return auto_save_recipe()
 
-
-@nutrition_alias_bp.route('/api/v1/nutrition/batches/<int:batch_id>/consumption-status', methods=['GET'])
-@jwt_required()
-@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
-def get_batch_consumption_status_alias(batch_id):
-    return get_batch_consumption_status(batch_id)
 
 
 @nutrition_alias_bp.route('/api/v1/feed-formulation/suggested-mix', methods=['GET'])
@@ -1406,6 +1431,7 @@ def list_mixer_ingredients(recipe_type):
             'inclusion_percentage_main_meal': float(defaults.get(FeedMixerPolicyService.MAIN_MEAL, 0)),
             'default_inclusion_percentage': float(defaults.get(normalized_recipe_type, 0)),
             'inclusion_percentage': float(defaults.get(normalized_recipe_type, 0)),
+            'data_warnings': IngredientDataQualityService.warnings_for(row),
         })
 
     return jsonify({
@@ -1428,10 +1454,3 @@ def list_mixer_ingredients_query():
         return jsonify({'error': 'recipe_type (or mixer_type/mixerType) is required.'}), 400
 
     return list_mixer_ingredients(recipe_type)
-
-
-@nutrition_alias_bp.route('/api/v1/animals/<int:cow_id>/yield-target', methods=['DELETE'])
-@jwt_required()
-@role_required(Role.FARMER)
-def delete_cow_yield_target_alias(cow_id):
-    return delete_cow_yield_target(cow_id)

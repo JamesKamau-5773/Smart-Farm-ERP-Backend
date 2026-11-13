@@ -6,7 +6,9 @@ PAGE_ACCESS = {
     'dashboard': 'Command Center', 'production': 'Production and milk usage',
     'tasks': 'Daily routine and task view', 'herd': 'Cow register and animal records',
     'breeding': 'Breeding and genetics', 'medical': 'Medical records and veterinary care',
-    'feed': 'Feed planning and milk lab', 'customers': 'Customer and buyer management',
+    'feed': 'Feed planning and milk lab',
+    'feeding': 'Daily feeding: feeding instructions and recording feed given',
+    'customers': 'Customer and buyer management',
     'finance': 'Ledger and financial reports', 'inventory': 'Inventory',
     'reports': 'Farm and milk reports', 'safety': 'Safety dashboard',
     'staff': 'Staff registry', 'payroll': 'Payroll', 'member_admin': 'Member onboarding',
@@ -16,12 +18,28 @@ ROLE_DEFAULT_PAGE_ACCESS = {
     'FARMER': list(PAGE_ACCESS),
     'ADMIN': list(PAGE_ACCESS),
     'SUPER_ADMIN': list(PAGE_ACCESS),
-    'FARM_HAND': ['production', 'tasks', 'herd', 'feed'],
+    'FARM_HAND': ['production', 'tasks', 'herd', 'feeding'],
     'VETERINARY_DOCTOR': ['herd', 'breeding', 'medical'],
     'FARM_SUPERVISOR': ['production', 'tasks', 'herd', 'breeding', 'medical', 'feed', 'reports', 'safety'],
     'FARM_MANAGER': ['dashboard', 'production', 'tasks', 'herd', 'breeding', 'medical', 'feed', 'customers', 'reports', 'safety'],
     'FARM_ADMIN': list(PAGE_ACCESS),
 }
+
+
+# A broader page includes the narrower one: feed planners can also run daily feeding.
+PAGE_IMPLIES = {
+    'feed': {'feeding'},
+}
+
+# Daily-feeding operations that do not expose costs, prices or recipe formulation.
+_DAILY_FEEDING_PATH_PREFIXES = ('/api/v1/nutrition/feeding/',)
+_DAILY_FEEDING_BATCH_SUFFIXES = ('/consumption-events', '/consumption-status')
+
+
+def grants(page_access, page_key) -> bool:
+    """Whether a list of granted page keys allows access to page_key."""
+    granted = set(page_access or [])
+    return page_key in granted or any(page_key in PAGE_IMPLIES.get(key, ()) for key in granted)
 
 
 def normalize_page_access(value, role=None):
@@ -38,6 +56,10 @@ def normalize_page_access(value, role=None):
 
 def page_key_for_path(path: str):
     path = path or ''
+    if path.startswith(_DAILY_FEEDING_PATH_PREFIXES):
+        return 'feeding'
+    if path.startswith('/api/v1/nutrition/batches/') and path.endswith(_DAILY_FEEDING_BATCH_SUFFIXES):
+        return 'feeding'
     if path.startswith(('/api/breeding/', '/api/breeding')):
         return 'breeding'
     if path.startswith('/api/herd/genetic-progress'):
@@ -116,6 +138,6 @@ def enforce_page_access():
     from app.models.user import User
     user = db.session.get(User, int(actor_id))
     page_access = normalize_page_access(getattr(user, 'page_access', None), getattr(user, 'role', None)) if user else []
-    if user and page_key not in page_access:
+    if user and not grants(page_access, page_key):
         return jsonify({'error': 'This page is not included in your farm access.'}), 403
     return None

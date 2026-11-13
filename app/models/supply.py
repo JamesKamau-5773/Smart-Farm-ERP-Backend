@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app import db
+from app.utils.farm_time import farm_today
 from sqlalchemy import Computed, ForeignKeyConstraint, event, inspect
 
 class ItemCategory:
@@ -30,6 +31,8 @@ class InventoryItem(db.Model):
     mixer_role = db.Column(db.String(50), nullable=False, default='roughage')
     inclusion_percentage_dairy_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     inclusion_percentage_main_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    # Archived items keep their history but are hidden from lists and new mixes.
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     transactions = db.relationship(
@@ -362,7 +365,7 @@ class FeedBatch(db.Model):
     total_cost = db.Column(db.Numeric(14, 4), nullable=False)
     cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
     status = db.Column(db.String(50), nullable=False, default='ACTIVE')
-    mixed_on = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
+    mixed_on = db.Column(db.Date, nullable=False, default=farm_today)
     depleted_on = db.Column(db.Date, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-from datetime import date
-
 from app import db
 from app.models.livestock import Cow, CowStatus
 from app.models.supply import FeedRecipe, FeedingGroupProfile
 from app.services.cow_status_service import CowStatusService
+from app.utils.farm_time import farm_today
 
 
 class GroupFeedingPlanService:
     """Plan herd feed requirements by biological feeding cohorts."""
+
+    @staticmethod
+    def _quantity_label(quantity_basis: str, *, has_recipe: bool) -> str:
+        if quantity_basis == 'concentrate':
+            return 'Concentrate'
+        if not has_recipe:
+            # Without an assigned mix this is the whole-diet intake, not an amount of any one mix.
+            return 'Total daily feed need (dry matter, all feeds)'
+        return 'Total ration (dry matter)'
 
     FEEDING_GROUPS = (
         'lactating',
@@ -182,6 +190,7 @@ class GroupFeedingPlanService:
         db.session.commit()
 
         return {
+            'id': row.id,
             'feeding_group': row.feeding_group,
             'avg_body_weight_kg': float(row.avg_body_weight_kg),
             'dmi_percent_bw': float(row.dmi_percent_bw),
@@ -285,7 +294,7 @@ class GroupFeedingPlanService:
                 'target_protein_percent': round(target_protein_percent, 2),
                 'feeding_times_per_day': feeding_times_per_day,
                 'quantity_basis': quantity_basis,
-                'quantity_label': 'Concentrate' if quantity_basis == 'concentrate' else 'Total ration (dry matter)',
+                'quantity_label': GroupFeedingPlanService._quantity_label(quantity_basis, has_recipe=recipe is not None),
                 'total_ration_kg_per_head_day': round(total_ration_per_head_kg, 2),
                 'daily_kg_per_head': round(daily_feed_per_head_kg, 2),
                 'kg_per_head_per_feeding': round(kg_per_head_per_feeding, 2),
@@ -301,7 +310,7 @@ class GroupFeedingPlanService:
             })
 
         return {
-            'generated_on': date.today().isoformat(),
+            'generated_on': farm_today().isoformat(),
             'tenant_id': tenant_id,
             'groups': group_rows,
             'totals': {

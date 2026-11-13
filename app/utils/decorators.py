@@ -43,14 +43,14 @@ def role_required(*required_roles):
             if not effective_roles.intersection(required_role_set):
                 # A farm owner may explicitly grant a page to a staff account;
                 # honor that grant for the API routes belonging to that page.
-                from app.services.page_access import normalize_page_access, page_key_for_path
+                from app.services.page_access import grants, normalize_page_access, page_key_for_path
                 from app import db
                 from app.models.user import User
                 page_key = page_key_for_path(request.path)
                 actor_id = get_jwt_identity()
                 user = db.session.get(User, int(actor_id)) if actor_id is not None else None
                 granted_pages = normalize_page_access(user.page_access, user.role) if user else []
-                if page_key and page_key in granted_pages:
+                if page_key and grants(granted_pages, page_key):
                     return fn(*args, **kwargs)
                 return jsonify({"error": "Unauthorized. Authorization required."}), 403
             return fn(*args, **kwargs)

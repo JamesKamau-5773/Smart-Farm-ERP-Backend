@@ -56,6 +56,9 @@ class Config:
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
 
+    # Calendar dates for farm records (mixing, feeding) use the farm's local day.
+    FARM_TIMEZONE = os.environ.get('FARM_TIMEZONE', 'Africa/Nairobi')
+
     # Authentication hardening
     FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173')
     # HMAC key for one-time codes and tokens; kept out of the database.

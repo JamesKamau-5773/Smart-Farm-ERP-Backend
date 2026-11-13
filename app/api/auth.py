@@ -7,6 +7,7 @@ from app.services.password_reset_service import PasswordResetService
 from app import limiter
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import parse_public_int_id
+from app.utils.farm_time import farm_timezone_name
 from app.services.page_access import normalize_page_access
 from app.services.account_state_service import AccountStateService
 from app.services.session_service import SessionService
@@ -132,6 +133,7 @@ def me():
         'available_farms': claims.get('available_farms', []),
         'permissions': [user.role],
         'page_access': normalize_page_access(user.page_access, user.role),
+        'farm_timezone': farm_timezone_name(),
         **AccountStateService.describe(user, SessionService.auth_method_from_claims(claims)),
     }), 200
 
