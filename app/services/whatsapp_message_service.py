@@ -68,6 +68,11 @@ def send_message(to: str, message: dict) -> None:
     outbound send never turns an already-processed inbound webhook into a
     500 (Meta would otherwise retry and reprocess the same command).
     """
+    if current_app.config.get('WHATSAPP_DRY_RUN') and message:
+        # Local development: log instead of calling Meta.
+        current_app.logger.warning(f"[WHATSAPP_DRY_RUN] to={to} message={message}")
+        return
+
     access_token = current_app.config.get('WHATSAPP_ACCESS_TOKEN')
     phone_number_id = current_app.config.get('WHATSAPP_PHONE_NUMBER_ID')
     if not access_token or not phone_number_id or not message:

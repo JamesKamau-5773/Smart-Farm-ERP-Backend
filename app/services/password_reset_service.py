@@ -10,6 +10,9 @@ from app.models.hr import EmployeeOnboardingStatus
 from app.models.user import RevokedToken
 from app.services.audit_service import record_audit
 from app.services.auth_service import AuthService
+from app.services.session_service import SessionService
+from app.utils.auth_errors import WeakPasswordError
+from app.utils.password_policy import PasswordPolicy
 
 
 class PasswordResetService:
@@ -22,13 +25,16 @@ class PasswordResetService:
         confirm_password = data.get('confirm_password') or data.get('confirmPassword') or ''
         if password != confirm_password:
             return jsonify({'error': 'password and confirm_password must match.'}), 400
-        if len(password) < 8:
-            return jsonify({'error': 'password must be at least 8 characters.'}), 400
+        violations = PasswordPolicy.violations(password, personal_values=PasswordPolicy.personal_values_for(user))
+        if violations:
+            return WeakPasswordError(violations).to_response()
         if user.check_password(password):
             return jsonify({'error': 'New password must differ from the temporary password.'}), 400
 
         user.set_password(password)
         user.requires_password_reset = False
+        # The temporary password may have been shared; end every other session.
+        SessionService.revoke_all_sessions(user)
         if user.employee_profile:
             user.employee_profile.onboarding_status = EmployeeOnboardingStatus.ACTIVE
 
@@ -57,6 +63,7 @@ class PasswordResetService:
             tenant=tenant,
             farms=farms,
             active_farm=active_farm,
+            auth_method=SessionService.auth_method_from_claims(claims),
         )
         response = jsonify({
             'message': 'Password configured successfully.',

@@ -9,6 +9,8 @@ from app.repositories.hr_repo import EmployeeRepository
 from app.services.audit_service import record_audit
 from app.services.staff_account_service import StaffAccountService
 from app.services.page_access import normalize_page_access
+from app.utils.auth_errors import WeakPasswordError
+from app.utils.password_policy import PasswordPolicy
 
 
 class AccountProvisioningService:
@@ -19,8 +21,9 @@ class AccountProvisioningService:
             return jsonify({'error': 'Employee not found for this tenant.'}), 404
 
         password = data.get('password') or ''
-        if len(password) < 8:
-            return jsonify({'error': 'password must be at least 8 characters.'}), 400
+        violations = PasswordPolicy.violations(password)
+        if violations:
+            return WeakPasswordError(violations).to_response()
         try:
             role = StaffAccountService.validate_role(data.get('role'))
         except ValueError as error:

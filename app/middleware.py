@@ -61,6 +61,7 @@ def set_tenant_context():
     is not applied, and access is determined by the default RLS behavior.
     """
     g.actor_id = None
+    g.auth_method = None
     g.tenant_id = None
     g.cooperative_id = None
     g.farm_id = None
@@ -87,6 +88,7 @@ def set_tenant_context():
     farm_id = claims.get("farm_id")
 
     g.actor_id = identity
+    g.auth_method = claims.get("amr")
     g.tenant_id = tenant_id
     g.cooperative_id = tenant_id
     g.farm_id = farm_id
@@ -160,7 +162,7 @@ def enforce_required_password_reset():
         'auth.logout',
         'auth.status',
     }
-    if request.endpoint in allowed_endpoints:
+    if request.endpoint in allowed_endpoints or (request.endpoint or '').startswith('auth_recovery.'):
         return None
 
     from app.models.user import User
@@ -173,6 +175,43 @@ def enforce_required_password_reset():
         return jsonify({
             'code': 'PASSWORD_RESET_REQUIRED',
             'error': 'Password configuration is required before accessing this resource.',
+        }), 403
+    return None
+
+
+PHONE_VERIFICATION_ALLOWED_ENDPOINTS = {
+    'auth.me',
+    'auth.update_me',
+    'auth.logout',
+    'auth.status',
+    'auth_verification.start_phone_verification',
+    'auth_verification.phone_verification_status',
+}
+
+
+def enforce_phone_verification():
+    """Sessions started through Google stay restricted until the account has a
+    verified phone. Checked against live state so verification takes effect
+    without a new login."""
+    actor_id = getattr(g, 'actor_id', None)
+    if actor_id is None or request.method == 'OPTIONS':
+        return None
+    if request.endpoint in PHONE_VERIFICATION_ALLOWED_ENDPOINTS:
+        return None
+    if (request.endpoint or '').startswith(('auth_recovery.', 'auth_google.')):
+        return None
+
+    from app.models.user import User
+    from app.services.account_state_service import AccountStateService
+
+    try:
+        user = db.session.get(User, int(actor_id))
+    except (TypeError, ValueError):
+        user = None
+    if user and AccountStateService.requires_phone_verification(user, getattr(g, 'auth_method', None)):
+        return jsonify({
+            'code': 'PHONE_VERIFICATION_REQUIRED',
+            'error': 'Verify your phone number before accessing this resource.',
         }), 403
     return None
 

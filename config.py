@@ -50,6 +50,30 @@ class Config:
     JWT_CSRF_IN_COOKIES = True
     BOOTSTRAP_SUPER_ADMIN_KEY = os.environ.get('BOOTSTRAP_SUPER_ADMIN_KEY', '')
 
+    # Flask session cookie: only carries Authlib's OAuth state/nonce during the
+    # Google redirect, which is a top-level navigation, so Lax is sufficient.
+    SESSION_COOKIE_SECURE = JWT_COOKIE_SECURE
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+
+    # Authentication hardening
+    FRONTEND_BASE_URL = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173')
+    # HMAC key for one-time codes and tokens; kept out of the database.
+    AUTH_CODE_PEPPER = _required_secret('AUTH_CODE_PEPPER', 'dev-auth-code-pepper-not-for-production-use')
+    AUTH_CHALLENGE_TTL_SECONDS = int(os.environ.get('AUTH_CHALLENGE_TTL_SECONDS', 600))
+    AUTH_CHALLENGE_MAX_ATTEMPTS = int(os.environ.get('AUTH_CHALLENGE_MAX_ATTEMPTS', 5))
+
+    # Google sign-in (OAuth 2.0 / OpenID Connect via Authlib)
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+    GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+    # Must exactly match an authorised redirect URI in Google Cloud Console.
+    GOOGLE_REDIRECT_URI = os.environ.get('GOOGLE_REDIRECT_URI')
+
+    # Transactional email (Resend)
+    RESEND_API_KEY = os.environ.get('RESEND_API_KEY')
+    EMAIL_FROM = os.environ.get('EMAIL_FROM')
+    AUTH_EMAIL_ASYNC = os.environ.get('AUTH_EMAIL_ASYNC', str(APP_ENV == 'production')) == 'True'
+
     # CORS: Whitelist of allowed origins for better security
     _DEFAULT_CORS_ORIGINS = ','.join((
         'http://localhost:5173',
@@ -74,6 +98,14 @@ class Config:
 
     # Uploaded file storage (certificates, animal photos, etc.)
     UPLOAD_ROOT = os.environ.get('UPLOAD_ROOT', os.path.join(_BACKEND_ROOT, 'instance', 'uploads'))
+
+    # Public demo account ("Try the live demo"). Off unless explicitly enabled;
+    # when off, POST /api/auth/demo returns 404.
+    DEMO_ENABLED = os.environ.get('DEMO_ENABLED', 'False') == 'True'
+    # Demo sessions are short and cannot be refreshed (there are no refresh tokens).
+    DEMO_SESSION_MINUTES = int(os.environ.get('DEMO_SESSION_MINUTES', 45))
+    # Per-IP limits on starting a demo session (flask-limiter syntax, ';' separated).
+    DEMO_LOGIN_RATE_LIMIT = os.environ.get('DEMO_LOGIN_RATE_LIMIT', '5 per minute;20 per hour')
 
     # Rate Limiting
     RATELIMIT_STORAGE_URI = os.environ.get('REDIS_URL','redis://localhost:6379/0')
@@ -102,6 +134,10 @@ class Config:
     WHATSAPP_VERIFY_TOKEN = os.environ.get('WHATSAPP_VERIFY_TOKEN')
     WHATSAPP_ACCESS_TOKEN = os.environ.get('WHATSAPP_ACCESS_TOKEN')
     WHATSAPP_PHONE_NUMBER_ID = os.environ.get('WHATSAPP_PHONE_NUMBER_ID')
+    # Public E.164 number users send reverse-OTP codes to (e.g. +254700000000).
+    WHATSAPP_BUSINESS_NUMBER = os.environ.get('WHATSAPP_BUSINESS_NUMBER')
+    # Development only: log outbound WhatsApp messages instead of sending them.
+    WHATSAPP_DRY_RUN = APP_ENV != 'production' and os.environ.get('WHATSAPP_DRY_RUN', 'False') == 'True'
 
 
 class TestConfig(Config):
@@ -115,5 +151,8 @@ class TestConfig(Config):
     RATELIMIT_STORAGE_URI = 'memory://'
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False
+    AUTH_CODE_PEPPER = 'test-auth-code-pepper-that-is-at-least-thirty-two-characters'
+    AUTH_EMAIL_ASYNC = False
+    FRONTEND_BASE_URL = 'https://app.example.test'
     # Isolated from the real instance/uploads tree so test runs never write/delete real files.
     UPLOAD_ROOT = os.environ.get('TEST_UPLOAD_ROOT', tempfile.mkdtemp(prefix='jivu_test_uploads_'))
