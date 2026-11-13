@@ -545,6 +545,14 @@ class MilkSession:
     EVENING = "Evening"
     MIDDAY = "Midday"
 
+    ALL = (MORNING, MIDDAY, EVENING)
+
+    @classmethod
+    def normalize(cls, value) -> str | None:
+        """The canonical session for ``value`` (case-insensitive), or None if it isn't one."""
+        cleaned = str(value or '').strip().lower()
+        return next((session for session in cls.ALL if session.lower() == cleaned), None)
+
 class MilkLog(db.Model):
     """Tracks daily yield and flags anomalies or hardlocked milk."""
     __tablename__ = 'milk_logs'
@@ -554,6 +562,10 @@ class MilkLog(db.Model):
     STATUS_FLAGGED = 'FLAGGED'
     STATUS_VERIFIED = 'VERIFIED'
     STATUSES = (STATUS_VERIFIED, STATUS_RECORDED, STATUS_FLAGGED, STATUS_ISOLATED)
+
+    SOURCE_APP = 'app'
+    SOURCE_WHATSAPP = 'whatsapp'
+    SOURCE_IMPORT = 'import'
 
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
@@ -570,11 +582,17 @@ class MilkLog(db.Model):
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
     verified_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # How the entry reached us; sent as ``recorded_via`` so a row without a named milker still says where it came from.
+    source = db.Column(db.String(20), nullable=False, default=SOURCE_APP, server_default=SOURCE_APP)
 
     __table_args__ = (
         db.CheckConstraint(
             "status IN ('RECORDED', 'ISOLATED', 'FLAGGED', 'VERIFIED')",
             name='ck_milk_logs_status_valid',
+        ),
+        db.CheckConstraint(
+            "source IN ('app', 'whatsapp', 'import')",
+            name='ck_milk_logs_source_valid',
         ),
         # milk_logs has no farm_id; production is tenant-scoped. See app.utils.farm_time.local_date_sql.
         db.Index(

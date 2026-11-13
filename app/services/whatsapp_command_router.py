@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app import db
 from app.models.messaging import ChatFlow, ChatStep
-from app.models.supply import MilkSession
+from app.models.supply import MilkLog, MilkSession
 from app.models.user import Role, User
 from app.repositories.chat_session_repo import ChatSessionRepository
 from app.repositories.cow_repo import CowRepository
@@ -177,6 +177,7 @@ def _handle_awaiting_confirm(session, user, command_id: str, message: dict) -> d
 
     response = ProductionService.log_daily_yield(
         cow_id=cow_id, amount=amount, session=milk_session, user_id=user.id, tenant_id=session.tenant_id,
+        source=MilkLog.SOURCE_WHATSAPP,
     )
     body, status_code = response
     ChatSessionRepository.reset(session)

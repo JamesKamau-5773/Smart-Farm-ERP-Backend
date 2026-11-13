@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from app.models.supply import MilkLog, MilkSession
 from app.repositories.supply_repo import MilkRepository
 from app.repositories.cow_repo import CowRepository
 from flask import jsonify
@@ -9,9 +10,20 @@ class ProductionService:
     ANOMALY_THRESHOLD_PERCENT = 0.15 
 
     @staticmethod
-    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int, milking_date=None):
+    def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int, milking_date=None,
+                        source: str = MilkLog.SOURCE_APP):
         """Processes the milking entry, applies intelligence, and securely logs it."""
         livestock_id = cow_id
+
+        # Sessions are stored and returned as Morning / Midday / Evening only.
+        canonical_session = MilkSession.normalize(session)
+        if canonical_session is None:
+            return jsonify({
+                "code": "VALIDATION_ERROR",
+                "error": "session must be Morning, Midday or Evening.",
+                "fields": {"session": "invalid"},
+            }), 400
+        session = canonical_session
         
         # 1. Validate Livestock and retrieve current Hardlock state
         livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
@@ -20,6 +32,22 @@ class ProductionService:
         
         if not livestock.is_active or livestock.current_status == 'Dry':
             return jsonify({"error": f"Livestock {livestock.tag_number} is currently flagged as {livestock.current_status} and should not be milked."}), 400
+
+        # 1b. One record per cow, milking session and day. Retries of the same submission are
+        # replayed by the idempotency middleware before reaching here, so this only stops a
+        # genuine second entry (e.g. two people recording the same milking).
+        target_date = milking_date or farm_today()
+        existing = MilkRepository.find_session_log(livestock_id, session, target_date, tenant_id)
+        if existing:
+            cow_label = livestock.name or livestock.tag_number
+            return jsonify({
+                "error": (
+                    f"{cow_label}'s {str(session).strip().lower()} milk for {target_date.isoformat()} is already recorded "
+                    f"({float(existing.amount_liters):g} L). Edit that record instead of adding another."
+                ),
+                "code": "DUPLICATE_MILK_ENTRY",
+                "existing_log_id": existing.id,
+            }), 409
 
         # 2. Safety First: Inherit the Farmer's Hardlock decision
         # If the livestock is locked for medical reasons, this specific milk log is flagged as NOT saleable.
@@ -49,7 +77,8 @@ class ProductionService:
             tenant_id=tenant_id,
             is_saleable=is_saleable,
             is_anomaly=is_anomaly,
-            milking_date=milking_date
+            milking_date=milking_date,
+            source=source,
         )
 
         # 4b. Raise a manager-review alert so the drop actually surfaces in the review queue.
@@ -76,6 +105,7 @@ class ProductionService:
             "saleable": is_saleable,
             "anomaly_detected": is_anomaly,
             "recorded_by": log.recorded_by,
+            "recorded_via": log.source,
         }
         
         # Add actionable warnings to the response payload if necessary

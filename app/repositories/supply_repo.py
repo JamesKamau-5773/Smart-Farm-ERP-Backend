@@ -203,6 +203,24 @@ class MilkRepository:
         return float(avg_yield or 0.0)
 
     @staticmethod
+    def find_session_log(cow_id: int, session: str, milking_date, tenant_id: int) -> Optional[MilkLog]:
+        """Returns an existing log for this cow, milking session and day, if one was already recorded.
+
+        The day is the farm-local date of the stored timestamp, exactly as responses
+        report it, so it matches the date the farmer saw when the entry was saved.
+        """
+        window_start = datetime.combine(milking_date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
+        window_end = datetime.combine(milking_date + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc)
+        candidates = MilkLog.query.filter(
+            MilkLog.tenant_id == tenant_id,
+            MilkLog.cow_id == cow_id,
+            func.lower(func.trim(MilkLog.session)) == str(session).strip().lower(),
+            MilkLog.timestamp >= window_start,
+            MilkLog.timestamp < window_end,
+        ).all()
+        return next((log for log in candidates if log.timestamp and to_farm_date(log.timestamp) == milking_date), None)
+
+    @staticmethod
     def create_log(
         cow_id: int,
         amount: float,
@@ -211,7 +229,8 @@ class MilkRepository:
         tenant_id: int,
         is_saleable: bool,
         is_anomaly: bool,
-        milking_date=None
+        milking_date=None,
+        source: str = MilkLog.SOURCE_APP,
     ) -> MilkLog:
         """Creates a new milk log entry and sets its initial status."""
         now = datetime.now(timezone.utc)
@@ -220,7 +239,7 @@ class MilkRepository:
         log = MilkLog(
             cow_id=cow_id, amount_liters=Decimal(str(amount)), session=session,
             recorded_by=recorded_by, tenant_id=tenant_id, is_saleable=is_saleable,
-            anomaly_flag=is_anomaly, timestamp=timestamp
+            anomaly_flag=is_anomaly, timestamp=timestamp, source=source,
         )
 
         log.status = MilkLog.STATUS_FLAGGED if is_anomaly else \

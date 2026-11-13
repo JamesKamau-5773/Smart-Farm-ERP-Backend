@@ -234,7 +234,7 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `PATCH /api/finance/buyers/<buyer_id>`
 - `POST /api/finance/buyers/<buyer_id>/invoice/generate`
 - `POST /api/finance/invoices/<invoice_id>/send`
-- `GET /api/finance/statements/<token>`
+- `GET /statements/<token>`: disabled (BR-016). Always `404 { "code": "STATEMENT_LINK_INVALID" }` until opaque statement links exist.
 - `POST /api/finance/billing/stk-push`
 - `POST /api/finance/mpesa/callback`
 
@@ -370,6 +370,21 @@ Yield edit request (`PATCH /api/production/yield/<log_id>`):
 	"milkingDate": "2026-07-03T16:30:00+00:00"
 }
 ```
+
+Sessions are `Morning`, `Midday` or `Evening` only. Input is matched case-insensitively and stored and
+returned in that spelling; anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "session": "invalid" } }`
+on `POST` and `PATCH`.
+
+Yield list (`GET /api/production/yield`):
+
+- Filters: `status` (`VERIFIED` | `RECORDED` | `FLAGGED` | `ISOLATED`, or legacy `anomaly`), `session`, `search`,
+  `date_from`, `date_to`. The same filters apply to `GET /api/production/summary` and
+  `GET /api/production/group-totals`.
+- `summary`: `total_records`, `verified_count`, `recorded_count`, `flagged_count`, `isolated_count`, `total_volume`.
+  Aliases: `verifiedEntries` = verified; `pending_count` / `pendingEntries` = recorded, not yet verified;
+  `flaggedEntries`; `totalVolume`.
+- Each row always has `session`, `milkingDate`, `status` and `recorded_via` (`app` | `whatsapp` | `import`).
+  `milker_name` is null when the recording user has no name on file.
 
 Yield detail response (`GET /api/production/yield/<log_id>`) includes:
 

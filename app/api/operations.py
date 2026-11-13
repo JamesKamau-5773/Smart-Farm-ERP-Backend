@@ -9,7 +9,7 @@ from app.services.genetic_projection_service import GeneticProjectionService
 from app.services.breeding_accounting_service import BreedingAccountingService
 from app.repositories.cow_repo import CowRepository
 from app.repositories.breeding_repo import BreedingLogRepository
-from app.models.supply import MilkLog
+from app.models.supply import MilkLog, MilkSession
 from app.models.supply import MilkDropAlert
 from app.models.finance import Transaction, TransactionCategory, TransactionType
 from app import db
@@ -150,13 +150,15 @@ def _serialize_milk_session(log, cow_tag=None, cow_name=None, milker_name=None):
         'log_id': log.id,
         'cow_id': log.cow_id,
         'amount': float(log.amount_liters),
-        'session': log.session,
+        'session': MilkSession.normalize(log.session) or log.session,
         'cow_tag': cow_tag,
         'cow_name': cow_name,
         'milkingDate': milking_date,
         'status': _milk_log_status(log),
         'milker': log.recorded_by,
         'milker_name': milker_name,
+        # Lets the app say "WhatsApp" when the milker has no name on file.
+        'recorded_via': getattr(log, 'source', None) or MilkLog.SOURCE_APP,
         'recorded_by': log.recorded_by,
         'timestamp': log.timestamp.isoformat() if log.timestamp else None,
         'is_saleable': log.is_saleable,
@@ -247,16 +249,17 @@ def _augment_yield_response(response_data, status_code, tenant_id):
     """
     # If the service layer returned a Response object, we need to extract its data.
     if isinstance(response_data, Response):
-        # For non-success responses, just return the original response.
+        # For non-success responses, return the original response with its status code.
+        # (Returning the Response alone makes Flask send 200, so errors looked like success.)
         if status_code >= 300:
-            return response_data
+            return response_data, status_code
 
         # For success responses, get the json data to augment it.
         try:
             data = response_data.get_json()
         except Exception:
             # If it's not a JSON response, we can't augment it.
-            return response_data
+            return response_data, status_code
     else:
         data = response_data
 
@@ -1143,41 +1146,33 @@ def production_yield_legacy(log_id=None):
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
     if request.method == 'GET' and log_id is None:
-        base_query = MilkLog.query.filter_by(tenant_id=tenant_id)
-        status_filter = request.args.get('status')
-        if status_filter == 'anomaly':
-            base_query = base_query.filter(MilkLog.anomaly_flag.is_(True))
-
-        all_rows = base_query.all()
-        status_counts = {
-            'recorded': 0,
-            'isolated': 0,
-            'flagged': 0,
-        }
+        scope = FarmScope.from_request()
+        filters = ProductionFilters.from_args(request.args)
+        status_expr = milk_status_sql()
+        counts_query = apply_production_filters(
+            db.session.query(status_expr, func.count(MilkLog.id), func.coalesce(func.sum(MilkLog.amount_liters), 0)),
+            scope, filters,
+        ).group_by(status_expr)
+        status_counts = {status: 0 for status in MilkLog.STATUSES}
         total_volume = 0.0
-        for row in all_rows:
-            total_volume += float(row.amount_liters or 0)
-            status = _milk_log_status(row)
-            if status == 'FLAGGED':
-                status_counts['flagged'] += 1
-            elif status == 'ISOLATED':
-                status_counts['isolated'] += 1
-            else:
-                status_counts['recorded'] += 1
+        for status, count, volume in counts_query.all():
+            status_counts[status] = count
+            total_volume += float(volume or 0)
+        total_records = sum(status_counts.values())
 
         summary = {
-            'total_records': len(all_rows),
-            'recorded_count': status_counts['recorded'],
-            'isolated_count': status_counts['isolated'],
-            'flagged_count': status_counts['flagged'],
+            'total_records': total_records,
+            'verified_count': status_counts[MilkLog.STATUS_VERIFIED],
+            'recorded_count': status_counts[MilkLog.STATUS_RECORDED],
+            'flagged_count': status_counts[MilkLog.STATUS_FLAGGED],
+            'isolated_count': status_counts[MilkLog.STATUS_ISOLATED],
             'total_volume': total_volume,
-            # Frontend compatibility aliases.
-            'verified_count': status_counts['recorded'],
-            'pending_count': status_counts['isolated'],
+            # Older aliases. "Pending" means recorded but not yet verified.
+            'pending_count': status_counts[MilkLog.STATUS_RECORDED],
             'totalVolume': total_volume,
-            'verifiedEntries': status_counts['recorded'],
-            'pendingEntries': status_counts['isolated'],
-            'flaggedEntries': status_counts['flagged'],
+            'verifiedEntries': status_counts[MilkLog.STATUS_VERIFIED],
+            'pendingEntries': status_counts[MilkLog.STATUS_RECORDED],
+            'flaggedEntries': status_counts[MilkLog.STATUS_FLAGGED],
         }
 
         paginated_query = db.session.query(
@@ -1189,10 +1184,8 @@ def production_yield_legacy(log_id=None):
             Cow, Cow.id == MilkLog.cow_id
         ).outerjoin(
             User, User.id == MilkLog.recorded_by
-        ).filter(MilkLog.tenant_id == tenant_id)
-
-        if status_filter == 'anomaly':
-            paginated_query = paginated_query.filter(MilkLog.anomaly_flag.is_(True))
+        )
+        paginated_query = apply_production_filters(paginated_query, scope, filters)
 
         paginated_query = paginated_query.order_by(MilkLog.timestamp.desc())
         paginated = _paginate_query(paginated_query)
@@ -1263,7 +1256,14 @@ def production_yield_legacy(log_id=None):
                 return jsonify({'error': 'Amount must be a valid number.'}), 400
             log.amount_liters = amount_float
         if data.get('session'):
-            log.session = data['session']
+            new_session = MilkSession.normalize(data['session'])
+            if new_session is None:
+                return jsonify({
+                    'code': 'VALIDATION_ERROR',
+                    'error': 'session must be Morning, Midday or Evening.',
+                    'fields': {'session': 'invalid'},
+                }), 400
+            log.session = new_session
         milking_date, date_error = _parse_milking_date(data)
         if date_error:
             return date_error

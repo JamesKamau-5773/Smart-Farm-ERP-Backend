@@ -462,10 +462,11 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(payload['summary']['isolated_count'], 0)
             self.assertEqual(payload['summary']['flagged_count'], 1)
             self.assertAlmostEqual(payload['summary']['total_volume'], 14.0)
-            self.assertEqual(payload['summary']['verified_count'], 1)
-            self.assertEqual(payload['summary']['pending_count'], 0)
-            self.assertEqual(payload['summary']['verifiedEntries'], 1)
-            self.assertEqual(payload['summary']['pendingEntries'], 0)
+            # BR-019: verified means verified; pending means recorded but not yet verified.
+            self.assertEqual(payload['summary']['verified_count'], 0)
+            self.assertEqual(payload['summary']['pending_count'], 1)
+            self.assertEqual(payload['summary']['verifiedEntries'], 0)
+            self.assertEqual(payload['summary']['pendingEntries'], 1)
             self.assertEqual(payload['summary']['flaggedEntries'], 1)
             self.assertAlmostEqual(payload['summary']['totalVolume'], 14.0)
 
@@ -805,3 +806,97 @@ class OperationsTestCase(BaseTestCase):
             self.assertEqual(response.mimetype, 'application/pdf')
             self.assertIn('attachment', response.headers.get('Content-Disposition', ''))
             self.assertTrue(response.data.startswith(b'%PDF'))
+
+
+class DuplicateMilkEntryTestCase(BaseTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.farmer = self.create_user(username='dupfarmer', password='password', role=Role.FARMER)
+        self.cow = Cow(tag_number='DUP001', name='Neema', date_of_birth=date(2022, 1, 1))
+        db.session.add(self.cow)
+        db.session.commit()
+        self.client.post('/api/auth/login', json={'username': 'dupfarmer', 'password': 'password'})
+
+    def _post(self, **overrides):
+        payload = {'cow_id': self.cow.tag_number, 'amount': 6.5, 'session': 'morning', 'milking_date': '2026-10-30'}
+        payload.update(overrides)
+        return self.client.post('/api/production/yield', json=payload)
+
+    def test_rejects_a_second_entry_for_the_same_cow_session_and_day(self):
+        self.assertEqual(self._post().status_code, 201)
+
+        duplicate = self._post(amount=7.0, session='Morning')
+
+        self.assertEqual(duplicate.status_code, 409)
+        body = duplicate.get_json()
+        self.assertEqual(body['code'], 'DUPLICATE_MILK_ENTRY')
+        self.assertIn('already recorded', body['error'])
+        self.assertEqual(MilkLog.query.count(), 1)
+
+    def test_allows_other_sessions_days_and_cows(self):
+        other_cow = Cow(tag_number='DUP002', name='Baraka', date_of_birth=date(2022, 1, 1))
+        db.session.add(other_cow)
+        db.session.commit()
+
+        self.assertEqual(self._post().status_code, 201)
+        self.assertEqual(self._post(session='evening').status_code, 201)
+        self.assertEqual(self._post(milking_date='2026-10-31').status_code, 201)
+        self.assertEqual(self._post(cow_id=other_cow.tag_number).status_code, 201)
+        self.assertEqual(MilkLog.query.count(), 4)
+
+    def test_idempotent_retry_is_replayed_not_rejected(self):
+        headers = {'Idempotency-Key': 'offline:dup-retry'}
+        payload = {'cow_id': self.cow.tag_number, 'amount': 6.5, 'session': 'morning', 'milking_date': '2026-10-30'}
+
+        first = self.client.post('/api/production/yield', json=payload, headers=headers)
+        retry = self.client.post('/api/production/yield', json=payload, headers=headers)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(retry.status_code, 201)
+        self.assertEqual(retry.headers.get('Idempotency-Replayed'), 'true')
+        self.assertEqual(MilkLog.query.count(), 1)
+
+    def test_service_errors_keep_their_status_code(self):
+        self.cow.current_status = 'Dry'
+        db.session.commit()
+
+        response = self._post()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('should not be milked', response.get_json()['error'])
+        self.assertEqual(MilkLog.query.count(), 0)
+
+
+class CowStatusFromLactationTestCase(BaseTestCase):
+
+    def setUp(self):
+        super().setUp()
+        self.cow = Cow(tag_number='LAC001', date_of_birth=date(2021, 1, 1))
+        db.session.add(self.cow)
+        db.session.commit()
+
+    def _add_cycle(self, **fields):
+        cycle = LactationCycle(cow_id=self.cow.id, cycle_number=1, actual_calving_date=date(2026, 1, 15), **fields)
+        db.session.add(cycle)
+        db.session.commit()
+
+    def test_cow_in_an_active_cycle_is_lactating(self):
+        from app.services.cow_status_service import CowStatusService
+        self._add_cycle(is_active=True)
+        self.assertEqual(CowStatusService.compute_current_status(self.cow), 'Lactating')
+
+    def test_cow_whose_drying_date_has_passed_is_dry(self):
+        from app.services.cow_status_service import CowStatusService
+        self._add_cycle(is_active=True, drying_date=date.today() - timedelta(days=1))
+        self.assertEqual(CowStatusService.compute_current_status(self.cow), 'Dry')
+
+    def test_planned_future_drying_date_keeps_her_lactating(self):
+        from app.services.cow_status_service import CowStatusService
+        self._add_cycle(is_active=True, drying_date=date.today() + timedelta(days=30))
+        self.assertEqual(CowStatusService.compute_current_status(self.cow), 'Lactating')
+
+    def test_closed_cycle_is_dry(self):
+        from app.services.cow_status_service import CowStatusService
+        self._add_cycle(is_active=False)
+        self.assertEqual(CowStatusService.compute_current_status(self.cow), 'Dry')
