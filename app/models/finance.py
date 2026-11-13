@@ -262,6 +262,11 @@ class Transaction(db.Model):
             "(transaction_type = 'PAYMENT') = (category IN ('PAYMENT', 'BUYER_PAYMENT'))",
             name='ck_transactions_payment_classification',
         ),
+        # Period totals filter and group on the farm-local date (app.utils.farm_time.local_date_sql).
+        db.Index(
+            'ix_transactions_tenant_farm_local_date',
+            'tenant_id', 'farm_id', db.text("(CAST(timezone('Africa/Nairobi', \"timestamp\") AS DATE))"),
+        ),
     )
 
 

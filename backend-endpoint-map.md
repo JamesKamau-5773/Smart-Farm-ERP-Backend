@@ -143,7 +143,8 @@ The browser payload `{ id, name, breed, dob, hasCalved }` is accepted because `i
 - `POST /api/production/yield`
 - `GET /api/production/yield/<log_id>`
 - `DELETE /api/production/yield/<log_id>`
-- `GET /api/production/summary`
+- `GET /api/production/summary` (with `period=week|month|year`: period totals, see `docs/contracts/period-totals.md`)
+- `GET /api/production/group-totals`
 - `GET /api/breeding`
 - `POST /api/breeding`
 - `PATCH /api/breeding/<log_id>`
@@ -218,7 +219,9 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `GET /api/finance/customers`
 - `POST /api/finance/customers`
 - `GET /api/finance/customers/<customer_id>`
-- `GET /api/finance/ledger`
+- `GET /api/finance/ledger` (filters: `type`, `category`, `search`, `date_from`, `date_to`; each item carries `bucket`)
+- `GET /api/ledger/summary` (also `/api/finance/ledger/summary`)
+- `GET /api/ledger/group-totals` (also `/api/finance/ledger/group-totals`)
 - `POST /api/finance/ledger`
 - `POST /api/finance/transactions/<transaction_id>/receipt`
 - `GET /api/finance/receipts/<receipt_id>`

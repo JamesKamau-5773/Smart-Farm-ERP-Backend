@@ -553,6 +553,7 @@ class MilkLog(db.Model):
     STATUS_ISOLATED = 'ISOLATED'
     STATUS_FLAGGED = 'FLAGGED'
     STATUS_VERIFIED = 'VERIFIED'
+    STATUSES = (STATUS_VERIFIED, STATUS_RECORDED, STATUS_FLAGGED, STATUS_ISOLATED)
 
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
@@ -574,6 +575,11 @@ class MilkLog(db.Model):
         db.CheckConstraint(
             "status IN ('RECORDED', 'ISOLATED', 'FLAGGED', 'VERIFIED')",
             name='ck_milk_logs_status_valid',
+        ),
+        # milk_logs has no farm_id; production is tenant-scoped. See app.utils.farm_time.local_date_sql.
+        db.Index(
+            'ix_milk_logs_tenant_local_date',
+            'tenant_id', db.text("(CAST(timezone('Africa/Nairobi', \"timestamp\") AS DATE))"),
         ),
     )
 

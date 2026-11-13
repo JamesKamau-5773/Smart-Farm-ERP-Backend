@@ -4,6 +4,7 @@ from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from app import db
+from app.utils.farm_time import farm_timestamp_for, to_farm_date
 from app.models.supply import InventoryItem, InventoryTransaction, MilkLog, MilkDropAlert
 from app.services.inventory_costing_service import InventoryCostingService
 from sqlalchemy import func
@@ -214,8 +215,8 @@ class MilkRepository:
     ) -> MilkLog:
         """Creates a new milk log entry and sets its initial status."""
         now = datetime.now(timezone.utc)
-        # Preserve the current time-of-day but honor an explicitly submitted milking date.
-        timestamp = datetime.combine(milking_date, now.timetz()) if milking_date else now
+        # Preserve the farm's current time-of-day but honor an explicitly submitted milking date.
+        timestamp = farm_timestamp_for(milking_date, now) if milking_date else now
         log = MilkLog(
             cow_id=cow_id, amount_liters=Decimal(str(amount)), session=session,
             recorded_by=recorded_by, tenant_id=tenant_id, is_saleable=is_saleable,

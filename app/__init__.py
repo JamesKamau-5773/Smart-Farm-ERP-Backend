@@ -124,6 +124,7 @@ def create_app(config_class=Config):
     from app.api.export import export_bp
     from app.api.inventory import inventory_bp
     from app.api.finance import finance_bp
+    from app.api.period_totals import period_totals_bp
     from app.api.webhooks import webhooks_bp
     from app.api.whatsapp_webhook import whatsapp_bp
     from app.api.hr import hr_bp
@@ -173,6 +174,7 @@ def create_app(config_class=Config):
     app.register_blueprint(veterinary_bp)
     app.register_blueprint(genetics_bp, url_prefix='/api/v1/genetics')
     app.register_blueprint(reports_bp)
+    app.register_blueprint(period_totals_bp)
     app.register_blueprint(uploads_bp)
     app.register_blueprint(milk_dispositions_bp)
     app.register_blueprint(onboarding_bp, url_prefix='/api/onboarding')

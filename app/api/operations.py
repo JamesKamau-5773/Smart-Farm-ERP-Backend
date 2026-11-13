@@ -26,6 +26,12 @@ from app.models.genetics import GeneticProfile, GeneticTraitDefinition, GeneticT
 from app.models.livestock import AnimalTimelineEvent, LactationCycle, Cow
 from app.services.cow_status_service import CowStatusService
 from app.repositories.milk_disposition_repo import MilkInventoryRepository
+from app.api.period_totals import production_period_summary
+from app.repositories.production_query import apply_production_filters, milk_status_sql
+from app.schemas.production_filters import ProductionFilters
+from app.services.period_resolver import bucket_keys
+from app.services.request_scope import FarmScope
+from app.utils.farm_time import farm_timestamp_for, to_farm_date
 
 operations_bp = Blueprint('operations', __name__)
 operations_alias_bp = Blueprint('operations_alias', __name__)
@@ -132,8 +138,13 @@ def _user_can_verify_yield():
     return role in {Role.FARM_ADMIN, Role.FARM_MANAGER, Role.ADMIN, Role.SUPER_ADMIN, Role.FARMER}
 
 
+def _milking_date(log):
+    local_date = to_farm_date(log.timestamp)
+    return local_date.isoformat() if local_date else None
+
+
 def _serialize_milk_session(log, cow_tag=None, cow_name=None, milker_name=None):
-    milking_date = log.timestamp.date().isoformat() if log.timestamp else None
+    milking_date = _milking_date(log)
     return {
         'id': log.id,
         'log_id': log.id,
@@ -152,6 +163,8 @@ def _serialize_milk_session(log, cow_tag=None, cow_name=None, milker_name=None):
         'anomaly_detected': log.anomaly_flag,
         'verified_by': log.verified_by,
         'verified_at': log.verified_at.isoformat() if log.verified_at else None,
+        # Farm-local calendar buckets, so clients group without date maths.
+        'bucket': bucket_keys(to_farm_date(log.timestamp)),
     }
 
 
@@ -1230,7 +1243,7 @@ def production_yield_legacy(log_id=None):
             'breed': cow.breed_status if cow else None,
             'amount': float(log.amount_liters),
             'session': log.session,
-            'milkingDate': log.timestamp.date().isoformat() if log.timestamp else None,
+            'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
             'average': average,
             'peak': peak,
@@ -1255,15 +1268,14 @@ def production_yield_legacy(log_id=None):
         if date_error:
             return date_error
         if milking_date:
-            current_time = log.timestamp.timetz() if log.timestamp else datetime.now(timezone.utc).timetz()
-            log.timestamp = datetime.combine(milking_date, current_time)
+            log.timestamp = farm_timestamp_for(milking_date, log.timestamp or datetime.now(timezone.utc))
         db.session.commit()
         return jsonify({
             'id': log.id,
             'cow_id': log.cow_id,
             'amount': float(log.amount_liters),
             'session': log.session,
-            'milkingDate': log.timestamp.date().isoformat() if log.timestamp else None,
+            'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
         }), 200
     if request.method == 'DELETE':
@@ -1328,6 +1340,8 @@ def verify_production_yield(log_id):
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def production_summary_alias():
+    if 'period' in request.args:
+        return production_period_summary()
     tenant_id = _get_tenant_id_from_claims()
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400

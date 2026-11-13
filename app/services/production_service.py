@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from app.repositories.supply_repo import MilkRepository
 from app.repositories.cow_repo import CowRepository
 from flask import jsonify
+from app.utils.farm_time import farm_timestamp_for, farm_today, to_farm_date
 
 class ProductionService:
     # Set the anomaly threshold (e.g., a drop > 15% triggers a warning)
@@ -27,7 +28,7 @@ class ProductionService:
         # 3. Anomaly Detection (The 7-Day Rolling Average), anchored to the submitted milking date
         # so backdated entries are compared against the average leading up to that date, not today.
         now = datetime.now(timezone.utc)
-        reference_dt = datetime.combine(milking_date, now.timetz()) if milking_date else now
+        reference_dt = farm_timestamp_for(milking_date, now) if milking_date else now
         historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7, tenant_id=tenant_id, as_of=reference_dt)
         is_anomaly = False
         warning_msg = None
@@ -56,7 +57,7 @@ class ProductionService:
             MilkRepository.create_drop_alert(
                 cow_id=livestock_id,
                 tenant_id=tenant_id,
-                alert_date=log.timestamp.date(),
+                alert_date=to_farm_date(log.timestamp),
                 missing_milk_liters=historical_average - amount,
                 reason=warning_msg
             )
@@ -70,7 +71,7 @@ class ProductionService:
             "cow_name": livestock.name,
             "amount": float(log.amount_liters),
             "session": log.session,
-            "milkingDate": log.timestamp.date().isoformat() if log.timestamp else None,
+            "milkingDate": to_farm_date(log.timestamp).isoformat() if log.timestamp else None,
             "status": log.status,
             "saleable": is_saleable,
             "anomaly_detected": is_anomaly,
