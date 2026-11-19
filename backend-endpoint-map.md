@@ -384,7 +384,18 @@ Yield list (`GET /api/production/yield`):
   Aliases: `verifiedEntries` = verified; `pending_count` / `pendingEntries` = recorded, not yet verified;
   `flaggedEntries`; `totalVolume`.
 - Each row always has `session`, `milkingDate`, `status` and `recorded_via` (`app` | `whatsapp` | `import`).
-  `milker_name` is null when the recording user has no name on file.
+- People: `milker_id` / `milker_name` is the employee who milked, when one was named; with no
+  `milker_id`, `milker_name` is the person who entered the record. `recorded_by_name` is who entered it.
+  `POST` and `PATCH` take an optional `milker_id` (an employee id on this farm; `null` on `PATCH` clears
+  it); anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "milker_id": "invalid" } }`.
+- Against the cow's average (BR-025): `avg_litres` is the cow's average per record over the 7 days
+  before this one, across all sessions (the milk-drop rule's baseline); `vs_avg_litres` is this record's
+  litres minus it (1 dp). Both null when the cow has no record in that window. `significant_drop` is the
+  drop rule's verdict when the record was entered (more than 15% below that average), the same verdict
+  that set `FLAGGED` and raised the milk-drop alert.
+
+Calf feedings (`GET /api/production/milk-dispositions?date=&calf_id=`): `items`, `count` and
+`total_liters` (sum of `liters` for the same filters, 1 dp).
 
 Yield detail response (`GET /api/production/yield/<log_id>`) includes:
 

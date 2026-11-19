@@ -8,7 +8,9 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 - **Livestock Management**: Register and track individual cows.
 - **Clinical Records**: Log veterinary visits and manage milk withdrawal periods with a `hardlock` feature.
 - **Financial Management**: Record transactions, calculate daily unit production costs, and integrate with M-Pesa for billing.
-- **Operational Logging**: Track daily milk production for each cow.
+- **Operational Logging**: Track daily milk production for each cow: who milked and who entered each record,
+  how it arrived (app, WhatsApp, import), and its change against the cow's 7-day average, using the same
+  rule that raises milk-drop alerts. Calf feedings are logged against the day's milk, with litre totals.
 - **Global Audit Trail**: Immutable logs for critical actions like financial transactions and security-sensitive changes.
 - **Centralized Error Handling**: Graceful and consistent error responses across the API.
 - **Database Backups**: Automated point-in-time backups for the PostgreSQL database using `pg_dump`.
@@ -142,6 +144,9 @@ Apply the database schema to your database:
 flask db upgrade heads
 ```
 
+Run this again after pulling changes that add a migration. If the code is newer than the database,
+requests fail with errors such as `column milk_logs.milker_employee_id does not exist`.
+
 ### 6. Run the Application
 
 Start the Flask development server:
@@ -225,6 +230,10 @@ A high-level overview of the available API endpoints:
 
 - `POST /api/operations/cows`: Add a new cow.
 - `POST /api/operations/cows/<id>/milk`: Record milk production.
+- `GET|POST /api/production/yield`, `GET|PATCH|DELETE /api/production/yield/<id>`: Milk records. Rows carry
+  `milker_name`, `recorded_by_name`, `recorded_via`, `vs_avg_litres` and `significant_drop`; `POST` and `PATCH`
+  take an optional `milker_id` (an employee).
+- `GET|POST /api/production/milk-dispositions`: Calf feedings, with `count` and `total_liters`.
 
 - `POST /api/clinical/cows/<id>/medical`: Log a vet visit (VET only).
 - `PUT /api/clinical/cows/<id>/hardlock`: Lock/unlock a cow's milk for sale (FARMER only).
