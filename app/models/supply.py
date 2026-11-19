@@ -584,6 +584,11 @@ class MilkLog(db.Model):
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
     # How the entry reached us; sent as ``recorded_via`` so a row without a named milker still says where it came from.
     source = db.Column(db.String(20), nullable=False, default=SOURCE_APP, server_default=SOURCE_APP)
+    # Who milked the cow, when someone other than the person entering it did (BR-019).
+    # Staff are employees, and many milkers have no app login, so this is not a user.
+    milker_employee_id = db.Column(
+        db.Integer, db.ForeignKey('employees.id', ondelete='SET NULL'), nullable=True, index=True,
+    )
 
     __table_args__ = (
         db.CheckConstraint(

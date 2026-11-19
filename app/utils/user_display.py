@@ -20,7 +20,11 @@ ROLE_LABELS = {
 
 def display_name(user_id: Optional[int]) -> Optional[str]:
     """The name to show for a user id, or None when there is no such user."""
-    user = UserRepository.get_by_id(user_id) if user_id else None
+    return name_for_user(UserRepository.get_by_id(user_id) if user_id else None)
+
+
+def name_for_user(user) -> Optional[str]:
+    """The name to show for an already-loaded user, or None when there is no user."""
     if not user:
         return None
     if user.name and user.name.strip():

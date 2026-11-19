@@ -231,6 +231,7 @@ class MilkRepository:
         is_anomaly: bool,
         milking_date=None,
         source: str = MilkLog.SOURCE_APP,
+        milker_employee_id: Optional[int] = None,
     ) -> MilkLog:
         """Creates a new milk log entry and sets its initial status."""
         now = datetime.now(timezone.utc)
@@ -240,6 +241,7 @@ class MilkRepository:
             cow_id=cow_id, amount_liters=Decimal(str(amount)), session=session,
             recorded_by=recorded_by, tenant_id=tenant_id, is_saleable=is_saleable,
             anomaly_flag=is_anomaly, timestamp=timestamp, source=source,
+            milker_employee_id=milker_employee_id,
         )
 
         log.status = MilkLog.STATUS_FLAGGED if is_anomaly else \

@@ -7,11 +7,14 @@ from app.utils.farm_time import farm_timestamp_for, farm_today, to_farm_date
 
 class ProductionService:
     # Set the anomaly threshold (e.g., a drop > 15% triggers a warning)
-    ANOMALY_THRESHOLD_PERCENT = 0.15 
+    ANOMALY_THRESHOLD_PERCENT = 0.15
+    # The drop rule compares a record with the cow's average over this many days before it,
+    # across all sessions. Milk lists send the same baseline as ``vs_avg_litres`` (BR-025).
+    ANOMALY_WINDOW_DAYS = 7
 
     @staticmethod
     def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int, milking_date=None,
-                        source: str = MilkLog.SOURCE_APP):
+                        source: str = MilkLog.SOURCE_APP, milker_employee_id: int | None = None):
         """Processes the milking entry, applies intelligence, and securely logs it."""
         livestock_id = cow_id
 
@@ -57,7 +60,7 @@ class ProductionService:
         # so backdated entries are compared against the average leading up to that date, not today.
         now = datetime.now(timezone.utc)
         reference_dt = farm_timestamp_for(milking_date, now) if milking_date else now
-        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=7, tenant_id=tenant_id, as_of=reference_dt)
+        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=ProductionService.ANOMALY_WINDOW_DAYS, tenant_id=tenant_id, as_of=reference_dt)
         is_anomaly = False
         warning_msg = None
 
@@ -79,6 +82,7 @@ class ProductionService:
             is_anomaly=is_anomaly,
             milking_date=milking_date,
             source=source,
+            milker_employee_id=milker_employee_id,
         )
 
         # 4b. Raise a manager-review alert so the drop actually surfaces in the review queue.
@@ -106,6 +110,7 @@ class ProductionService:
             "anomaly_detected": is_anomaly,
             "recorded_by": log.recorded_by,
             "recorded_via": log.source,
+            "milker_id": log.milker_employee_id,
         }
         
         # Add actionable warnings to the response payload if necessary
