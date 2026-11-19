@@ -173,6 +173,20 @@ class PeriodTotalsTestCase(BaseTestCase):
         self.assertEqual(round(kpi['net_profit'] * 100), int(summary['net']))
         self.assertEqual(kpi['ledger_records'], summary['count'])
 
+    def test_kpi_cards_send_profit_margin_as_one_dp_string(self):
+        # November: income 1,595, expenses 500, net 1,095 -> 68.652...% -> "68.7"
+        kpi = self._get('/api/finance/ledger?date_from=2026-11-01&date_to=2026-11-30')['summary']
+        self.assertEqual(kpi['profit_margin_pct'], '68.7')
+
+        # Expenses only (21 Oct): no sales, so no margin
+        kpi = self._get('/api/finance/ledger?date_from=2026-10-21&date_to=2026-10-21')['summary']
+        self.assertEqual(kpi['recognized_sales'], 0)
+        self.assertIsNone(kpi['profit_margin_pct'])
+
+        # No sales at all: null, never a division by zero
+        kpi = self._get('/api/finance/ledger?date_from=2026-01-01&date_to=2026-01-31')['summary']
+        self.assertIsNone(kpi['profit_margin_pct'])
+
     def test_group_totals_hierarchy_splits_weeks_across_months(self):
         groups = self._get('/api/ledger/group-totals?levels=year,month,week,day')['groups']
         self.assertEqual(groups[0], {

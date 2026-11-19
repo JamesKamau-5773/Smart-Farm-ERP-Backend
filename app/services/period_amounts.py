@@ -19,6 +19,11 @@ class LedgerAmounts:
     def net(self) -> Decimal:
         return self.income - self.expenses
 
+    @property
+    def margin_pct(self) -> Decimal | None:
+        """Net as a percentage of income; None when there is no income to divide by."""
+        return self.net / self.income * 100 if self.income else None
+
 
 @dataclass(frozen=True)
 class ProductionAmounts:

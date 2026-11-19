@@ -27,6 +27,7 @@ from app.repositories.period_totals_repo import LedgerTotalsRepository
 from app.schemas.ledger_filters import LedgerFilters
 from app.services.ledger_account_scope import LedgerAccountScopeResolver
 from app.services.period_resolver import bucket_keys
+from app.services.period_totals_serializer import one_dp
 from app.services.request_scope import FarmScope
 from app.utils.farm_time import farm_timestamp_for, to_farm_date
 from app.utils.error_envelope import register_error_envelope
@@ -438,6 +439,8 @@ def get_ledger():
             "posted_costs": float(total_costs),
             "total_amount_paid": float(total_amount_paid),
             "net_profit": float(total_income - total_costs),
+            # Net profit ÷ recognized sales as a 1-dp string ("68.7"); null when sales are 0.
+            "profit_margin_pct": one_dp(totals.margin_pct),
             "ledger_records": transaction_count,
             "total_income": float(total_income),
             "total_costs": float(total_costs),
