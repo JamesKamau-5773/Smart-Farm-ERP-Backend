@@ -74,3 +74,4 @@ wheel==0.48.0
 wrapt==2.1.2
 WTForms==3.2.1
 zopfli==0.4.2
+cloudinary==1.47.0

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import math
-import os
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from flask import current_app, jsonify
 from werkzeug.utils import secure_filename
+from app.services.media_storage import MediaStorage, MediaStorageError
 from app.utils.uploads import validate_certificate_upload
 
 from app.repositories.breeding_repo import (
@@ -285,17 +286,24 @@ class BreedingService:
         if not filename:
             return jsonify({"error": "File name is invalid."}), 400
         try:
-            validate_certificate_upload(file_storage)
+            extension = validate_certificate_upload(file_storage)
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        upload_dir = os.path.join(current_app.config['UPLOAD_ROOT'], 'ai_certificates', f'tenant_{tenant_id}')
-        os.makedirs(upload_dir, exist_ok=True)
+        # Public, as before: Cloudinary in production, UPLOAD_ROOT locally (MediaStorage).
+        try:
+            certificate_url = MediaStorage.save_public(
+                file_storage,
+                folder=f'ai_certificates/tenant_{tenant_id}',
+                name=f'{log.id}_{uuid.uuid4().hex}',
+                extension=extension,
+            )
+        except MediaStorageError:
+            current_app.logger.exception('AI certificate upload failed for breeding log %s.', log.id)
+            return jsonify({"error": "The certificate couldn't be stored. Try again."}), 502
+        MediaStorage.delete_public(log.certificate_image_url)
 
-        file_path = os.path.join(upload_dir, f"{log.id}_{filename}")
-        file_storage.save(file_path)
-
-        log.certificate_image_url = f"/uploads/ai_certificates/tenant_{tenant_id}/{os.path.basename(file_path)}"
+        log.certificate_image_url = certificate_url
         db.session.commit()
 
         return jsonify({

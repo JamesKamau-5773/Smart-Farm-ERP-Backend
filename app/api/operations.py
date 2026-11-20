@@ -1294,6 +1294,7 @@ def production_yield_legacy(log_id=None):
         if not log:
             return jsonify({'error': 'Production record not found.'}), 404
         data = request.get_json() or {}
+        previous = (float(log.amount_liters), log.session, to_farm_date(log.timestamp))
         if 'amount' in data and data.get('amount') is not None:
             try:
                 amount_float = float(data['amount'])
@@ -1321,6 +1322,10 @@ def production_yield_legacy(log_id=None):
             if milker_error:
                 return milker_error
             log.milker_employee_id = milker_id
+        # A corrected record is judged again by the drop rule, so its flag, status and the day's
+        # milk-drop alert agree with what it now says.
+        if (float(log.amount_liters), log.session, to_farm_date(log.timestamp)) != previous:
+            ProductionService.recheck_drop(log, previous_date=previous[2], user_id=get_jwt_identity())
         db.session.commit()
         return jsonify({
             'id': log.id,
@@ -1329,6 +1334,7 @@ def production_yield_legacy(log_id=None):
             'session': log.session,
             'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
+            'significant_drop': bool(log.anomaly_flag),
             'milker_id': log.milker_employee_id,
         }), 200
     if request.method == 'DELETE':
@@ -1522,6 +1528,44 @@ def production_summary_alias():
         'anomaly_count': int(flagged_count),
     }
     return jsonify(payload), 200
+
+
+@operations_alias_bp.route('/api/production/milkers', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
+def list_milkers():
+    """Who can be named as the milker on a milk record: the farm's current employees.
+
+    Open to every role that records milk (the staff list is owners only), so it carries just
+    what the picker needs: no pay, ID or contact details. ``is_me`` marks the caller's own
+    employee record, the picker's natural default.
+    """
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+    try:
+        me = int(get_jwt_identity())
+    except (TypeError, ValueError):
+        me = None
+    employees = (
+        Employee.query
+        .filter(
+            Employee.tenant_id == tenant_id,
+            Employee.is_active.is_(True),
+            Employee.offboarded_at.is_(None),
+            func.upper(func.coalesce(Employee.status, 'ACTIVE')) != 'INACTIVE',
+        )
+        .order_by(func.lower(Employee.full_name), Employee.id)
+        .all()
+    )
+    items = [{
+        'id': employee.id,
+        'name': employee.full_name,
+        'job_title': employee.role,
+        'status': (employee.status or 'ACTIVE').upper(),
+        'is_me': me is not None and employee.user_id == me,
+    } for employee in employees]
+    return jsonify({'items': items, 'count': len(items)}), 200
 
 
 @operations_bp.route('/api/production/milk-drop-alerts', methods=['GET'])

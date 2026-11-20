@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import base64
 import hashlib
-from functools import lru_cache
-from pathlib import Path
 from datetime import datetime, timezone
 
 from flask import render_template
@@ -22,20 +19,9 @@ from app.models.finance import (
 )
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.utils.brand_assets import logo_data_uri
 from app.utils.farm_time import farm_timezone
 from weasyprint import HTML
-
-
-_LOGO_PATH = Path(__file__).resolve().parent.parent / 'static' / 'brand' / 'logo-horizontal.svg'
-
-
-@lru_cache(maxsize=1)
-def _logo_data_uri() -> str | None:
-    """The horizontal brand logo, embedded so rendering never fetches a URL (BR-031)."""
-    try:
-        return 'data:image/svg+xml;base64,' + base64.b64encode(_LOGO_PATH.read_bytes()).decode('ascii')
-    except OSError:
-        return None
 
 
 def _local_display(value) -> str | None:
@@ -108,7 +94,7 @@ class ReceiptService:
     @classmethod
     def _render_document(cls, receipt: Receipt) -> bytes:
         return HTML(
-            string=render_template('pdf/receipt.html', receipt=cls.serialize(receipt), logo_src=_logo_data_uri())
+            string=render_template('pdf/receipt.html', receipt=cls.serialize(receipt), logo_src=logo_data_uri())
         ).write_pdf()
 
     @classmethod

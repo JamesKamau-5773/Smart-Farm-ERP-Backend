@@ -10,6 +10,7 @@ from app.models.user import Role
 from app.services.export_service import AnimalPassportService
 from app.utils.decorators import require_tenant_context, role_required
 from app.utils import get_tenant_id_from_context
+from app.utils.brand_assets import logo_data_uri
 
 export_bp = Blueprint('export', __name__)
 
@@ -27,11 +28,11 @@ def export_animal_passport(animal_id):
     if passport_context is None:
         return jsonify({"error": "Animal not found."}), 404
 
-    html_string = render_template('pdf/animal_passport.html', **passport_context)
+    html_string = render_template('pdf/animal_passport.html', logo_src=logo_data_uri(), **passport_context)
     pdf_bytes = HTML(string=html_string).write_pdf()
 
     animal = passport_context['animal']
-    filename = f"Jivu_Passport_{animal['tag_number']}.pdf"
+    filename = f"Maziwa_Smart_Passport_{animal['tag_number']}.pdf"
 
     return send_file(
         io.BytesIO(pdf_bytes),

@@ -12,7 +12,7 @@ from typing import Optional
 
 from app.models.finance import TransactionAttachment
 from app.repositories.ledger_repo import TransactionAttachmentRepository, TransactionRepository
-from app.services.private_file_storage import PrivateFileStorage
+from app.services.media_storage import MediaStorage, MediaStorageError
 from app.utils.api_errors import ApiError
 from app.utils.unit_of_work import unit_of_work
 from app.utils.uploads import RECEIPT_CONTENT_TYPES, validate_receipt_upload
@@ -35,33 +35,38 @@ class TransactionAttachmentService:
         except ValueError as exc:
             raise ApiError('VALIDATION_ERROR', str(exc))
 
-        relative_path = os.path.join(f'tenant_{tenant_id}', f'{transaction.id}_{uuid.uuid4().hex}{extension}')
-        PrivateFileStorage.save(file_storage, relative_path)
+        # Private: an authenticated Cloudinary file in production, the private folder locally.
+        try:
+            stored_path = MediaStorage.save_private(
+                file_storage, folder=f'tenant_{tenant_id}', name=f'{transaction.id}_{uuid.uuid4().hex}', extension=extension,
+            )
+        except MediaStorageError:
+            raise ApiError('STORAGE_UNAVAILABLE', "The receipt photo couldn't be stored. Try again.", 502)
         try:
             with unit_of_work():
                 return TransactionAttachmentRepository.stage(TransactionAttachment(
                     tenant_id=tenant_id,
                     transaction_id=transaction.id,
-                    stored_path=relative_path,
+                    stored_path=stored_path,
                     content_type=RECEIPT_CONTENT_TYPES[extension],
                     size_bytes=size,
                     original_filename=os.path.basename(file_storage.filename)[:255],
                     uploaded_by=uploaded_by,
                 ))
         except Exception:
-            PrivateFileStorage.delete(relative_path)
+            MediaStorage.delete_private(stored_path)
             raise
 
     @staticmethod
-    def open(tenant_id: int, transaction_id: int, attachment_id: int) -> tuple[TransactionAttachment, str]:
-        """The attachment and the absolute path of its file."""
+    def open(tenant_id: int, transaction_id: int, attachment_id: int) -> tuple[TransactionAttachment, bytes]:
+        """The attachment and its file's bytes (read from Cloudinary or the private folder)."""
         attachment = TransactionAttachmentRepository.get(tenant_id, transaction_id, attachment_id)
         if attachment is None:
             raise ApiError('NOT_FOUND', 'Attachment not found.', 404)
-        path = PrivateFileStorage.resolve(attachment.stored_path)
-        if path is None:
+        content = MediaStorage.read_private(attachment.stored_path)
+        if content is None:
             raise ApiError('NOT_FOUND', 'Attachment file is missing.', 404)
-        return attachment, path
+        return attachment, content
 
     @staticmethod
     def stage_copies(source, target) -> None:

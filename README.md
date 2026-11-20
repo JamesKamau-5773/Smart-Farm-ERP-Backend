@@ -9,8 +9,8 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 - **Clinical Records**: Log veterinary visits and manage milk withdrawal periods with a `hardlock` feature.
 - **Financial Management**: Record transactions, calculate daily unit production costs, and integrate with M-Pesa for billing.
 - **Operational Logging**: Track daily milk production for each cow: who milked and who entered each record,
-  how it arrived (app, WhatsApp, import), and its change against the cow's 7-day average, using the same
-  rule that raises milk-drop alerts. Calf feedings are logged against the day's milk, with litre totals.
+  how it arrived (app, WhatsApp, import), and its change against the cow's 7-day average for the same
+  session, using the same rule that raises milk-drop alerts (corrected records are judged again). Calf feedings are logged against the day's milk, with litre totals.
 - **Global Audit Trail**: Immutable logs for critical actions like financial transactions and security-sensitive changes.
 - **Centralized Error Handling**: Graceful and consistent error responses across the API.
 - **Database Backups**: Automated point-in-time backups for the PostgreSQL database using `pg_dump`.

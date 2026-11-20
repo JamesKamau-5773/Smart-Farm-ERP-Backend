@@ -20,10 +20,10 @@ def milk_row_context(logs) -> dict[int, dict]:
     """``{log.id: {milker_id, milker_name, recorded_by_name, avg_litres, vs_avg_litres}}``.
 
     * ``milker_name``: the employee recorded as the milker, else the person who entered it.
-    * ``avg_litres`` / ``vs_avg_litres``: the cow's average over the
-      ``ProductionService.ANOMALY_WINDOW_DAYS`` before this record (all sessions), the same
-      baseline the milk-drop rule uses, and this record's litres minus it. Null when the cow
-      has no record in that window.
+    * ``avg_litres`` / ``vs_avg_litres``: the cow's average for the same session over the
+      ``ProductionService.ANOMALY_WINDOW_DAYS`` before this record, the same baseline the
+      milk-drop rule uses, and this record's litres minus it. Null when the cow has no record of
+      that session in the window.
     """
     logs = [log for log in logs if log is not None]
     if not logs:
@@ -59,15 +59,16 @@ def milk_row_context(logs) -> dict[int, dict]:
 
 
 def _window_averages(logs) -> dict[int, Decimal]:
-    """Each log's cow average over the window before its timestamp, as the drop rule computes it
-    (``MilkRepository.get_cow_average_yield``: ``start <= timestamp < this record``)."""
+    """Each log's average for its cow and session over the window before its timestamp, as the
+    drop rule computes it (``MilkRepository.get_cow_average_yield``: ``start <= timestamp < this
+    record``, same session)."""
     window = timedelta(days=ProductionService.ANOMALY_WINDOW_DAYS)
     timed = [log for log in logs if log.timestamp is not None]
     if not timed:
         return {}
 
     rows = (
-        db.session.query(MilkLog.cow_id, MilkLog.timestamp, MilkLog.amount_liters)
+        db.session.query(MilkLog.cow_id, MilkLog.session, MilkLog.timestamp, MilkLog.amount_liters)
         .filter(
             MilkLog.tenant_id.in_({log.tenant_id for log in timed}),
             MilkLog.cow_id.in_({log.cow_id for log in timed}),
@@ -77,18 +78,23 @@ def _window_averages(logs) -> dict[int, Decimal]:
         .order_by(MilkLog.cow_id, MilkLog.timestamp)
         .all()
     )
-    # Per cow: timestamps in order, and running totals so each window sums in O(log n).
-    history: dict[int, tuple[list, list]] = {}
-    for cow_id, timestamp, amount in rows:
-        times, totals = history.setdefault(cow_id, ([], [Decimal('0')]))
+    # Per cow and session: timestamps in order, and running totals so each window sums in O(log n).
+    history: dict[tuple, tuple[list, list]] = {}
+    for cow_id, session, timestamp, amount in rows:
+        times, totals = history.setdefault((cow_id, _session_key(session)), ([], [Decimal('0')]))
         times.append(timestamp)
         totals.append(totals[-1] + Decimal(str(amount)))
 
     averages = {}
     for log in timed:
-        times, totals = history.get(log.cow_id, ([], [Decimal('0')]))
+        times, totals = history.get((log.cow_id, _session_key(log.session)), ([], [Decimal('0')]))
         start = bisect_left(times, log.timestamp - window)
         end = bisect_left(times, log.timestamp)
         if end > start:
             averages[log.id] = (totals[end] - totals[start]) / (end - start)
     return averages
+
+
+def _session_key(session) -> str:
+    # Matches the rule's case- and space-insensitive session comparison.
+    return str(session or '').strip().lower()

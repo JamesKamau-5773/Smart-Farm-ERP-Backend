@@ -71,7 +71,57 @@ class MilkRowPeopleTestCase(BaseTestCase):
         self.assertEqual(patch({'milker_id': 'x'}).status_code, 400)
 
 
-class MilkRowAverageTestCase(BaseTestCase):
+class MilkersListTestCase(BaseTestCase):
+    """The milker picker's list, open to the people who record milk (the staff list is owners only)."""
+
+    def setUp(self):
+        super().setUp()
+        self.herdsman = self.create_user(username='herdsman', password='password', role=Role.FARM_HAND)
+        self.cow = Cow(tag_number='COW001', date_of_birth=date(2022, 1, 1))
+        hired = date(2026, 1, 1)
+        self.me = Employee(tenant_id=self.tenant.id, user_id=self.herdsman.id, full_name='Kamau',
+                           role='Herdsman', hire_date=hired, base_salary=12000)
+        self.on_leave = Employee(tenant_id=self.tenant.id, full_name='Achieng', role='Milker', hire_date=hired,
+                                 base_salary=9000, status='ON_LEAVE')
+        self.left = Employee(tenant_id=self.tenant.id, full_name='Barasa', hire_date=hired, base_salary=1,
+                             is_active=False, status='INACTIVE', offboarded_at=datetime.now(timezone.utc))
+        other = Tenant(name='Other farm')
+        db.session.add_all([self.cow, self.me, self.on_leave, self.left, other])
+        db.session.flush()
+        db.session.add(Employee(tenant_id=other.id, full_name='Stranger', hire_date=hired, base_salary=1))
+        db.session.commit()
+        self.client.post('/api/auth/login', data=json.dumps({'username': 'herdsman', 'password': 'password'}),
+                         content_type='application/json')
+
+    def test_herdsman_sees_current_staff_names_only(self):
+        response = self.client.get('/api/production/milkers')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        items = response.get_json()['items']
+        self.assertEqual([item['name'] for item in items], ['Achieng', 'Kamau'])
+        self.assertEqual({key for item in items for key in item}, {'id', 'name', 'job_title', 'status', 'is_me'})
+        self.assertEqual([item['is_me'] for item in items], [False, True])
+        self.assertEqual(items[0]['status'], 'ON_LEAVE')
+        # The full staff list stays with the owner.
+        self.assertEqual(self.client.get('/api/hr/employees').status_code, 403)
+
+    def test_herdsman_can_name_the_milker(self):
+        response = self.client.post('/api/production/yield', data=json.dumps(
+            {'cow_id': self.cow.id, 'amount': 10, 'session': 'Morning', 'milker_id': self.on_leave.id}),
+            content_type='application/json')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        row = self.client.get('/api/production/yield').get_json()['items'][0]
+        self.assertEqual(row['milker_name'], 'Achieng')
+        self.assertEqual(row['recorded_by_name'], 'herdsman')
+
+    def test_customers_cannot_list_milkers(self):
+        self.create_user(username='buyer', password='password', role=Role.CUSTOMER)
+        self.client.post('/api/auth/logout')
+        self.client.post('/api/auth/login', data=json.dumps({'username': 'buyer', 'password': 'password'}),
+                         content_type='application/json')
+        self.assertEqual(self.client.get('/api/production/milkers').status_code, 403)
+
+
+class _MilkAverageBase(BaseTestCase):
 
     def setUp(self):
         super().setUp()
@@ -100,29 +150,43 @@ class MilkRowAverageTestCase(BaseTestCase):
         rows = self.client.get('/api/production/yield').get_json()['items']
         return next(row for row in rows if row['id'] == log_id)
 
+
+
+class MilkRowAverageTestCase(_MilkAverageBase):
+
     def test_first_record_has_no_average(self):
         row = self._row(self._post(12))
         self.assertIsNone(row['avg_litres'])
         self.assertIsNone(row['vs_avg_litres'])
         self.assertFalse(row['significant_drop'])
 
-    def test_change_uses_the_drop_rules_window_and_verdict(self):
-        self._seed(1, 14)
-        self._seed(2, 12, session='Evening')
-        self._seed(9, 40)   # outside the 7-day window: not part of the average
-        log_id = self._post(8)   # 8 < 13 * 0.85 → a drop
+    def test_change_uses_the_drop_rules_window_session_and_verdict(self):
+        self._seed(1, 12, session='Evening')
+        self._seed(2, 14, session='Evening')
+        self._seed(1, 30)                    # a morning: not part of an evening's average
+        self._seed(9, 40, session='Evening')  # outside the 7-day window
+        log_id = self._post(9)               # 9 < 13 * 0.85 → a drop
         row = self._row(log_id)
         self.assertEqual(row['avg_litres'], 13.0)
-        self.assertEqual(row['vs_avg_litres'], -5.0)
+        self.assertEqual(row['vs_avg_litres'], -4.0)
         self.assertTrue(row['significant_drop'])
         self.assertEqual(row['status'], MilkLog.STATUS_FLAGGED)
-        # The same verdict raised the milk-drop alert.
-        self.assertEqual(MilkDropAlert.query.filter_by(cow_id=self.cow.id).count(), 1)
+        alert = MilkDropAlert.query.filter_by(cow_id=self.cow.id).one()
+        self.assertIn('evening average', alert.reason)
 
-    def test_small_dip_is_not_a_significant_drop(self):
-        self._seed(1, 10)
+    def test_bigger_mornings_do_not_make_an_evening_a_drop(self):
+        self._seed(1, 20)                    # mornings are bigger
+        self._seed(1, 10, session='Evening')
         row = self._row(self._post(9.2))
+        self.assertEqual(row['avg_litres'], 10.0)
         self.assertEqual(row['vs_avg_litres'], -0.8)
+        self.assertFalse(row['significant_drop'])
+        self.assertEqual(MilkDropAlert.query.count(), 0)
+
+    def test_first_record_of_a_session_has_no_average(self):
+        self._seed(1, 20)
+        row = self._row(self._post(5))
+        self.assertIsNone(row['vs_avg_litres'])
         self.assertFalse(row['significant_drop'])
 
     def test_each_row_is_measured_against_its_own_window(self):
@@ -136,7 +200,7 @@ class MilkRowAverageTestCase(BaseTestCase):
         self.assertEqual(rows[30.0]['vs_avg_litres'], 15.0)
 
     def test_animal_history_and_record_detail_carry_the_same_fields(self):
-        self._seed(1, 10)
+        self._seed(1, 10, session='Evening')
         log_id = self._post(9)
         history = self.client.get(f'/api/animals/{self.cow.id}/milk-history').get_json()
         row = next(item for item in history['sessions'] if item['id'] == log_id)
@@ -144,3 +208,67 @@ class MilkRowAverageTestCase(BaseTestCase):
         detail = self.client.get(f'/api/production/yield/{log_id}').get_json()
         row = next(item for item in detail['sessions'] if item['id'] == log_id)
         self.assertEqual(row['vs_avg_litres'], -1.0)
+
+
+class MilkRecordCorrectionTestCase(_MilkAverageBase):
+    """A corrected record is judged again, so its flag, status and alert agree with it."""
+
+    def _patch(self, log_id, **body):
+        response = self.client.patch(f'/api/production/yield/{log_id}', data=json.dumps(body),
+                                     content_type='application/json')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json()
+
+    def test_correcting_a_typo_clears_the_drop_and_closes_the_alert(self):
+        self._seed(1, 12, session='Evening')
+        log_id = self._post(1.2)                       # typo for 12
+        self.assertEqual(MilkDropAlert.query.one().status, 'OPEN')
+        body = self._patch(log_id, amount=12)
+        self.assertEqual(body['status'], MilkLog.STATUS_RECORDED)
+        self.assertFalse(body['significant_drop'])
+        alert = MilkDropAlert.query.one()
+        self.assertEqual(alert.status, 'RESOLVED')
+        self.assertEqual(alert.investigated_by, self.farmer.id)
+
+    def test_correcting_into_a_drop_raises_an_alert(self):
+        self._seed(1, 12, session='Evening')
+        log_id = self._post(12)
+        self.assertEqual(MilkDropAlert.query.count(), 0)
+        body = self._patch(log_id, amount=6)
+        self.assertEqual(body['status'], MilkLog.STATUS_FLAGGED)
+        self.assertTrue(body['significant_drop'])
+        self.assertEqual(MilkDropAlert.query.filter_by(status='OPEN').count(), 1)
+
+    def test_an_alert_under_investigation_is_left_alone(self):
+        self._seed(1, 12, session='Evening')
+        log_id = self._post(1.2)
+        alert = MilkDropAlert.query.one()
+        alert.status = 'INVESTIGATING'
+        db.session.commit()
+        self._patch(log_id, amount=12)
+        self.assertEqual(MilkDropAlert.query.one().status, 'INVESTIGATING')
+
+    def test_alert_stays_while_another_record_that_day_is_a_drop(self):
+        self._seed(1, 12, session='Evening')
+        self._seed(1, 20)
+        evening = self._post(1.2)
+        morning = self.client.post('/api/production/yield', data=json.dumps(
+            {'cow_id': self.cow.id, 'amount': 5, 'session': 'Morning'}), content_type='application/json')
+        self.assertTrue(morning.get_json()['anomaly_detected'])
+        self.assertEqual(MilkDropAlert.query.count(), 2)
+        self._patch(evening, amount=12)
+        self.assertEqual(MilkDropAlert.query.filter_by(status='OPEN').count(), 2)
+
+    def test_verified_record_keeps_its_status(self):
+        self._seed(1, 12, session='Evening')
+        log_id = self._post(1.2)
+        self.client.patch(f'/api/production/yield/{log_id}/verify')
+        body = self._patch(log_id, amount=12)
+        self.assertEqual(body['status'], MilkLog.STATUS_VERIFIED)
+        self.assertFalse(body['significant_drop'])
+
+    def test_editing_only_the_milker_does_not_rejudge(self):
+        self._seed(1, 12, session='Evening')
+        log_id = self._post(1.2)
+        self._patch(log_id, milker_id=None)
+        self.assertEqual(MilkDropAlert.query.one().status, 'OPEN')

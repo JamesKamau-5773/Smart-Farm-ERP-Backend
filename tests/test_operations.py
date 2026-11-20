@@ -633,7 +633,9 @@ class OperationsTestCase(BaseTestCase):
             tenant_id=self.tenant.id,
             cow_id=self.cow.id,
             amount_liters=20.0,
-            session='Morning',
+            # The drop rule compares a session with the same session, so the history is an evening.
+            session='Evening',
+            timestamp=datetime.now(timezone.utc) - timedelta(days=1),
             recorded_by=self.farmer.id,
             status=MilkLog.STATUS_RECORDED,
             is_saleable=True,

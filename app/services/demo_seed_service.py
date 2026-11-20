@@ -180,6 +180,10 @@ class DemoDataPurger:
     def purge(tenant: Tenant) -> None:
         if not tenant.is_demo:
             raise RuntimeError('Refusing to purge a tenant that is not the demo workspace.')
+        if db.engine.dialect.name == 'postgresql':
+            # The receipt triggers allow deleting a demo tenant's receipts only with this set, for
+            # this transaction (migration p8a9b0c1d2e3). Real farms' receipts stay undeletable.
+            db.session.execute(select(db.func.set_config('app.purging_demo_tenant', str(tenant.id), True)))
 
         tables = db.metadata.sorted_tables
         tenant_owned = {table.name for table in tables if 'tenant_id' in table.c}
