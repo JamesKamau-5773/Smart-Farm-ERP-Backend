@@ -55,6 +55,12 @@ def _cloudinary():
     cloud_name = parsed.netloc.rsplit('@', 1)[-1]
     if parsed.scheme != 'cloudinary' or not cloud_name or not parsed.username or not parsed.password:
         raise MediaStorageError('MEDIA_STORAGE is cloudinary but CLOUDINARY_URL is missing or malformed.')
+    if any(mark in url for mark in '<>') or 'your_api' in url.lower():
+        # Cloudinary's example value (cloudinary://<your_api_key>:<your_api_secret>@...) pasted as is.
+        raise MediaStorageError(
+            'CLOUDINARY_URL still holds the example placeholders; paste the real "API environment '
+            'variable" from the Cloudinary console (Settings > API Keys).'
+        )
     cloudinary.config(
         cloud_name=cloud_name,
         api_key=urllib.parse.unquote(parsed.username),

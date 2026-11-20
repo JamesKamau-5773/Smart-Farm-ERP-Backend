@@ -64,6 +64,13 @@ class CloudinaryUrlTests(CloudinaryCase):
         self.upload.assert_not_called()
 
 
+    def test_the_example_placeholders_are_named_as_the_problem(self):
+        self.app.config['CLOUDINARY_URL'] = 'cloudinary://<your_api_key>:<your_api_secret>@maziwa-test'
+        with self.assertRaisesRegex(MediaStorageError, 'example placeholders'):
+            MediaStorage.save_public(FileStorage(io.BytesIO(PNG), filename='x.png'), folder='f', name='x', extension='.png')
+        self.upload.assert_not_called()
+
+
 class CowPhotoOnCloudinaryTests(CloudinaryCase):
     def setUp(self):
         super().setUp()
@@ -95,6 +102,15 @@ class CowPhotoOnCloudinaryTests(CloudinaryCase):
 
         db.session.refresh(self.cow)
         self.assertEqual(self.cow.photo_url, second_url)
+
+    def test_a_storage_failure_is_a_clear_502_and_the_old_photo_stays(self):
+        self.cow.photo_url = '/uploads/animal_photos/tenant_1/old.jpg'
+        db.session.commit()
+        self.upload.side_effect = RuntimeError('Invalid api_key')
+        response = self._post_photo()
+        self.assertEqual((response.status_code, response.get_json()['code']), (502, 'STORAGE_UNAVAILABLE'))
+        db.session.refresh(self.cow)
+        self.assertEqual(self.cow.photo_url, '/uploads/animal_photos/tenant_1/old.jpg')
 
     def test_removing_the_photo_deletes_it_on_cloudinary(self):
         self.upload.side_effect = lambda source, **options: _uploaded(f"{options['folder']}/{options['public_id']}")

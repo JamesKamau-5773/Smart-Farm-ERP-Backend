@@ -852,10 +852,15 @@ def upload_animal_photo(cow_id=None, animal_id=None):
 
     file_storage = request.files.get('file') or request.files.get('photo')
     from app.services.animal_photo_service import AnimalPhotoService
+    from app.services.media_storage import MediaStorageError
     try:
         AnimalPhotoService.upload_photo(tenant_id=tenant_id, cow=cow, file_storage=file_storage)
     except ValueError as exc:
         return jsonify({'error': str(exc)}), 400
+    except MediaStorageError:
+        # Storage is down or misconfigured (the log says which); the cow keeps its old photo.
+        current_app.logger.exception('Animal photo upload failed for cow %s.', cow.id)
+        return jsonify({'code': 'STORAGE_UNAVAILABLE', 'error': "The photo couldn't be stored. Try again."}), 502
 
     return jsonify(_serialize_animal_summary(cow, tenant_id)), 200
 
