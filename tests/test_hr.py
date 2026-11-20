@@ -108,7 +108,10 @@ class HRTestCase(BaseTestCase):
         transaction = Transaction.query.filter_by(reference_code='PAYROLL-2026-09').one()
         self.assertIsNotNone(payload['run']['farmId'])
         self.assertEqual(transaction.farm_id, payload['run']['farmId'])
-        self.assertEqual(float(transaction.amount), 7000.0)
+        # 7,000 less NSSF 420, SHIF 300 (the minimum) and Housing Levy 105; no PAYE at this pay.
+        self.assertEqual(float(transaction.amount), 6175.0)
+        statutory = Transaction.query.filter_by(reference_code='PAYROLL-2026-09-STATUTORY').one()
+        self.assertEqual(float(statutory.amount), 420 + 300 + 105 + 420 + 105)
 
     def test_admin_can_access_farmer_scoped_hr_routes(self):
         self._login('admin', 'password')
@@ -527,11 +530,14 @@ class HRTestCase(BaseTestCase):
             payroll_expense = Transaction.query.filter_by(reference_code='PAYROLL-2026-07').one()
             self.assertEqual(payroll_expense.transaction_type, TransactionType.EXPENSE)
             self.assertEqual(payroll_expense.category, TransactionCategory.LABOR_WAGES)
-            self.assertEqual(float(payroll_expense.amount), 28000.0)
+            # 30,000 less NSSF 1,800, SHIF 825, Housing Levy 450, PAYE 731.25 and the 2,000 advance.
+            self.assertEqual(float(payroll_expense.amount), 24193.75)
+            statutory = Transaction.query.filter_by(reference_code='PAYROLL-2026-07-STATUTORY').one()
+            self.assertEqual(float(statutory.amount), 3806.25 + 2250)  # employee deductions + employer NSSF and levy
 
             ledger_response = self.client.get('/api/finance/ledger')
             self.assertEqual(ledger_response.status_code, 200)
-            self.assertEqual(json.loads(ledger_response.data.decode())['summary']['total_costs'], 28000.0)
+            self.assertEqual(json.loads(ledger_response.data.decode())['summary']['total_costs'], 24193.75 + 6056.25)
 
             duplicate_finalize = self.client.post('/api/hr/payroll/runs/2026-07/finalize')
             self.assertEqual(duplicate_finalize.status_code, 200)

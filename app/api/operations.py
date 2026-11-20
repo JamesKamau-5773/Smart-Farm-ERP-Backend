@@ -9,7 +9,7 @@ from app.services.genetic_projection_service import GeneticProjectionService
 from app.services.breeding_accounting_service import BreedingAccountingService
 from app.repositories.cow_repo import CowRepository
 from app.repositories.breeding_repo import BreedingLogRepository
-from app.models.supply import MilkLog
+from app.models.supply import MilkLog, MilkSession
 from app.models.supply import MilkDropAlert
 from app.models.finance import Transaction, TransactionCategory, TransactionType
 from app import db
@@ -26,6 +26,14 @@ from app.models.genetics import GeneticProfile, GeneticTraitDefinition, GeneticT
 from app.models.livestock import AnimalTimelineEvent, LactationCycle, Cow
 from app.services.cow_status_service import CowStatusService
 from app.repositories.milk_disposition_repo import MilkInventoryRepository
+from app.api.period_totals import production_period_summary
+from app.repositories.production_query import apply_production_filters, milk_status_sql
+from app.models.hr import Employee
+from app.services.milk_row_context import milk_row_context
+from app.schemas.production_filters import ProductionFilters
+from app.services.period_resolver import bucket_keys
+from app.services.request_scope import FarmScope
+from app.utils.farm_time import farm_timestamp_for, to_farm_date
 
 operations_bp = Blueprint('operations', __name__)
 operations_alias_bp = Blueprint('operations_alias', __name__)
@@ -132,26 +140,69 @@ def _user_can_verify_yield():
     return role in {Role.FARM_ADMIN, Role.FARM_MANAGER, Role.ADMIN, Role.SUPER_ADMIN, Role.FARMER}
 
 
-def _serialize_milk_session(log, cow_tag=None, cow_name=None, milker_name=None):
-    milking_date = log.timestamp.date().isoformat() if log.timestamp else None
+def _parse_milker(data, tenant_id):
+    """``(employee_id | None, error_response | None)`` for the optional ``milker_id`` field:
+    the employee who milked, when it wasn't the person entering the record."""
+    raw = data.get('milker_id')
+    if raw in (None, ''):
+        return None, None
+    invalid = (jsonify({
+        'code': 'VALIDATION_ERROR',
+        'error': 'milker_id must be an employee on this farm.',
+        'fields': {'milker_id': 'invalid'},
+    }), 400)
+    if isinstance(raw, bool):
+        return None, invalid
+    try:
+        employee_id = int(raw)
+    except (TypeError, ValueError):
+        return None, invalid
+    if not Employee.query.filter_by(id=employee_id, tenant_id=tenant_id).first():
+        return None, invalid
+    return employee_id, None
+
+
+def _milking_date(log):
+    local_date = to_farm_date(log.timestamp)
+    return local_date.isoformat() if local_date else None
+
+
+def _serialize_milk_session(log, cow_tag=None, cow_name=None, context=None):
+    """One milk record. ``context`` is this log's entry from ``milk_row_context`` (lists pass one
+    worked out for the whole page); without it, it is worked out for this log alone."""
+    milking_date = _milking_date(log)
+    if context is None:
+        context = milk_row_context([log]).get(log.id, {})
     return {
         'id': log.id,
         'log_id': log.id,
         'cow_id': log.cow_id,
         'amount': float(log.amount_liters),
-        'session': log.session,
+        'session': MilkSession.normalize(log.session) or log.session,
         'cow_tag': cow_tag,
         'cow_name': cow_name,
         'milkingDate': milking_date,
         'status': _milk_log_status(log),
         'milker': log.recorded_by,
-        'milker_name': milker_name,
+        # Who milked: the employee named on the record, else the person who entered it.
+        'milker_id': context.get('milker_id'),
+        'milker_name': context.get('milker_name'),
+        # Who entered it, and how ("WhatsApp" when there's no name to show).
         'recorded_by': log.recorded_by,
+        'recorded_by_name': context.get('recorded_by_name'),
+        'recorded_via': getattr(log, 'source', None) or MilkLog.SOURCE_APP,
+        # Against the cow's average over the drop rule's window (BR-025). significant_drop is
+        # the drop rule's own verdict, the same one that raised any milk-drop alert.
+        'avg_litres': context.get('avg_litres'),
+        'vs_avg_litres': context.get('vs_avg_litres'),
+        'significant_drop': bool(log.anomaly_flag),
         'timestamp': log.timestamp.isoformat() if log.timestamp else None,
         'is_saleable': log.is_saleable,
         'anomaly_detected': log.anomaly_flag,
         'verified_by': log.verified_by,
         'verified_at': log.verified_at.isoformat() if log.verified_at else None,
+        # Farm-local calendar buckets, so clients group without date maths.
+        'bucket': bucket_keys(to_farm_date(log.timestamp)),
     }
 
 
@@ -234,16 +285,17 @@ def _augment_yield_response(response_data, status_code, tenant_id):
     """
     # If the service layer returned a Response object, we need to extract its data.
     if isinstance(response_data, Response):
-        # For non-success responses, just return the original response.
+        # For non-success responses, return the original response with its status code.
+        # (Returning the Response alone makes Flask send 200, so errors looked like success.)
         if status_code >= 300:
-            return response_data
+            return response_data, status_code
 
         # For success responses, get the json data to augment it.
         try:
             data = response_data.get_json()
         except Exception:
             # If it's not a JSON response, we can't augment it.
-            return response_data
+            return response_data, status_code
     else:
         data = response_data
 
@@ -353,8 +405,15 @@ def log_milk(cow_id_or_tag):
     if not cow:
         return jsonify({'error': 'Animal not found.'}), 404
 
+    milker_id, milker_error = _parse_milker(data, tenant_id)
+    if milker_error:
+        return milker_error
+
     cow_id = cow.id # Use the resolved integer cow_id
-    response_data, status_code = ProductionService.log_daily_yield(cow_id, amount_float, session, user_id, tenant_id, milking_date=milking_date)
+    response_data, status_code = ProductionService.log_daily_yield(
+        cow_id, amount_float, session, user_id, tenant_id, milking_date=milking_date,
+        milker_employee_id=milker_id,
+    )
     return _augment_yield_response(response_data, status_code, tenant_id)
 
 
@@ -940,12 +999,7 @@ def animal_milk_history(cow_id_or_tag):
     if not cow:
         return jsonify({'error': 'Animal not found.'}), 404
 
-    query = db.session.query(
-        MilkLog,
-        User.name,
-    ).select_from(MilkLog).outerjoin(
-        User, User.id == MilkLog.recorded_by
-    ).filter(MilkLog.cow_id == cow.id, MilkLog.tenant_id == tenant_id)
+    query = MilkLog.query.filter(MilkLog.cow_id == cow.id, MilkLog.tenant_id == tenant_id)
 
     try:
         start_dt, end_dt, end_is_exclusive = _parse_history_date_bounds(
@@ -961,7 +1015,7 @@ def animal_milk_history(cow_id_or_tag):
         comparator = MilkLog.timestamp < end_dt if end_is_exclusive else MilkLog.timestamp <= end_dt
         query = query.filter(comparator)
 
-    summary_logs = [log for log, _ in query.all()]
+    summary_logs = query.all()
     session_count = len(summary_logs)
     total_logged = sum(float(log.amount_liters or 0) for log in summary_logs)
     average_yield, peak_yield = _compute_daily_average_and_peak(summary_logs)
@@ -969,9 +1023,10 @@ def animal_milk_history(cow_id_or_tag):
     query = query.order_by(MilkLog.timestamp.desc())
     paginated = _paginate_query(query)
 
+    context = milk_row_context(paginated.items)
     sessions = [
-        _serialize_milk_session(log, cow_tag=cow.tag_number, cow_name=cow.name, milker_name=milker_name)
-        for log, milker_name in paginated.items
+        _serialize_milk_session(log, cow_tag=cow.tag_number, cow_name=cow.name, context=context.get(log.id))
+        for log in paginated.items
     ]
     return jsonify({
         'animal': _serialize_animal_summary(cow, tenant_id),
@@ -1130,62 +1185,50 @@ def production_yield_legacy(log_id=None):
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
     if request.method == 'GET' and log_id is None:
-        base_query = MilkLog.query.filter_by(tenant_id=tenant_id)
-        status_filter = request.args.get('status')
-        if status_filter == 'anomaly':
-            base_query = base_query.filter(MilkLog.anomaly_flag.is_(True))
-
-        all_rows = base_query.all()
-        status_counts = {
-            'recorded': 0,
-            'isolated': 0,
-            'flagged': 0,
-        }
+        scope = FarmScope.from_request()
+        filters = ProductionFilters.from_args(request.args)
+        status_expr = milk_status_sql()
+        counts_query = apply_production_filters(
+            db.session.query(status_expr, func.count(MilkLog.id), func.coalesce(func.sum(MilkLog.amount_liters), 0)),
+            scope, filters,
+        ).group_by(status_expr)
+        status_counts = {status: 0 for status in MilkLog.STATUSES}
         total_volume = 0.0
-        for row in all_rows:
-            total_volume += float(row.amount_liters or 0)
-            status = _milk_log_status(row)
-            if status == 'FLAGGED':
-                status_counts['flagged'] += 1
-            elif status == 'ISOLATED':
-                status_counts['isolated'] += 1
-            else:
-                status_counts['recorded'] += 1
+        for status, count, volume in counts_query.all():
+            status_counts[status] = count
+            total_volume += float(volume or 0)
+        total_records = sum(status_counts.values())
 
         summary = {
-            'total_records': len(all_rows),
-            'recorded_count': status_counts['recorded'],
-            'isolated_count': status_counts['isolated'],
-            'flagged_count': status_counts['flagged'],
+            'total_records': total_records,
+            'verified_count': status_counts[MilkLog.STATUS_VERIFIED],
+            'recorded_count': status_counts[MilkLog.STATUS_RECORDED],
+            'flagged_count': status_counts[MilkLog.STATUS_FLAGGED],
+            'isolated_count': status_counts[MilkLog.STATUS_ISOLATED],
             'total_volume': total_volume,
-            # Frontend compatibility aliases.
-            'verified_count': status_counts['recorded'],
-            'pending_count': status_counts['isolated'],
+            # Older aliases. "Pending" means recorded but not yet verified.
+            'pending_count': status_counts[MilkLog.STATUS_RECORDED],
             'totalVolume': total_volume,
-            'verifiedEntries': status_counts['recorded'],
-            'pendingEntries': status_counts['isolated'],
-            'flaggedEntries': status_counts['flagged'],
+            'verifiedEntries': status_counts[MilkLog.STATUS_VERIFIED],
+            'pendingEntries': status_counts[MilkLog.STATUS_RECORDED],
+            'flaggedEntries': status_counts[MilkLog.STATUS_FLAGGED],
         }
 
         paginated_query = db.session.query(
             MilkLog,
             Cow.tag_number,
             Cow.name,
-            User.name
         ).select_from(MilkLog).join(
             Cow, Cow.id == MilkLog.cow_id
-        ).outerjoin(
-            User, User.id == MilkLog.recorded_by
-        ).filter(MilkLog.tenant_id == tenant_id)
-
-        if status_filter == 'anomaly':
-            paginated_query = paginated_query.filter(MilkLog.anomaly_flag.is_(True))
+        )
+        paginated_query = apply_production_filters(paginated_query, scope, filters)
 
         paginated_query = paginated_query.order_by(MilkLog.timestamp.desc())
         paginated = _paginate_query(paginated_query)
+        context = milk_row_context([log for log, _, _ in paginated.items])
         rows = [
-            _serialize_milk_session(log, cow_tag=cow_tag, cow_name=cow_name, milker_name=milker_name)
-            for log, cow_tag, cow_name, milker_name in paginated.items
+            _serialize_milk_session(log, cow_tag=cow_tag, cow_name=cow_name, context=context.get(log.id))
+            for log, cow_tag, cow_name in paginated.items
         ]
         return jsonify({'items': rows, 'meta': {'page': paginated.page, 'per_page': paginated.per_page, 'total': paginated.total, 'pages': paginated.pages}, 'summary': summary}), 200
     if request.method == 'POST' and log_id is None:
@@ -1208,7 +1251,13 @@ def production_yield_legacy(log_id=None):
         milking_date, date_error = _parse_milking_date(data)
         if date_error:
             return date_error
-        response_data, status_code = ProductionService.log_daily_yield(cow.id, amount_float, session, user_id, tenant_id, milking_date=milking_date)
+        milker_id, milker_error = _parse_milker(data, tenant_id)
+        if milker_error:
+            return milker_error
+        response_data, status_code = ProductionService.log_daily_yield(
+            cow.id, amount_float, session, user_id, tenant_id, milking_date=milking_date,
+            milker_employee_id=milker_id,
+        )
         return _augment_yield_response(response_data, status_code, tenant_id)
     if request.method == 'GET':
         log = db.session.query(MilkLog).filter_by(id=log_id, tenant_id=tenant_id).first()
@@ -1221,6 +1270,7 @@ def production_yield_legacy(log_id=None):
             .order_by(MilkLog.timestamp.desc(), MilkLog.id.desc())
         )
         cow_sessions = cow_sessions_query.all()
+        sessions_context = milk_row_context(cow_sessions)
         average, peak = _compute_daily_average_and_peak(cow_sessions)
 
         return jsonify({
@@ -1230,11 +1280,14 @@ def production_yield_legacy(log_id=None):
             'breed': cow.breed_status if cow else None,
             'amount': float(log.amount_liters),
             'session': log.session,
-            'milkingDate': log.timestamp.date().isoformat() if log.timestamp else None,
+            'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
             'average': average,
             'peak': peak,
-            'sessions': [_serialize_milk_session(session) for session in cow_sessions],
+            'sessions': [
+                _serialize_milk_session(session, context=sessions_context.get(session.id))
+                for session in cow_sessions
+            ],
         }), 200
     if request.method == 'PATCH':
         log = db.session.query(MilkLog).filter_by(id=log_id, tenant_id=tenant_id).first()
@@ -1250,21 +1303,33 @@ def production_yield_legacy(log_id=None):
                 return jsonify({'error': 'Amount must be a valid number.'}), 400
             log.amount_liters = amount_float
         if data.get('session'):
-            log.session = data['session']
+            new_session = MilkSession.normalize(data['session'])
+            if new_session is None:
+                return jsonify({
+                    'code': 'VALIDATION_ERROR',
+                    'error': 'session must be Morning, Midday or Evening.',
+                    'fields': {'session': 'invalid'},
+                }), 400
+            log.session = new_session
         milking_date, date_error = _parse_milking_date(data)
         if date_error:
             return date_error
         if milking_date:
-            current_time = log.timestamp.timetz() if log.timestamp else datetime.now(timezone.utc).timetz()
-            log.timestamp = datetime.combine(milking_date, current_time)
+            log.timestamp = farm_timestamp_for(milking_date, log.timestamp or datetime.now(timezone.utc))
+        if 'milker_id' in data:
+            milker_id, milker_error = _parse_milker(data, tenant_id)
+            if milker_error:
+                return milker_error
+            log.milker_employee_id = milker_id
         db.session.commit()
         return jsonify({
             'id': log.id,
             'cow_id': log.cow_id,
             'amount': float(log.amount_liters),
             'session': log.session,
-            'milkingDate': log.timestamp.date().isoformat() if log.timestamp else None,
+            'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
+            'milker_id': log.milker_employee_id,
         }), 200
     if request.method == 'DELETE':
         log = db.session.query(MilkLog).filter_by(id=log_id, tenant_id=tenant_id).first()
@@ -1310,16 +1375,13 @@ def verify_production_yield(log_id):
         MilkLog,
         Cow.tag_number,
         Cow.name,
-        User.name
     ).select_from(MilkLog).join(
         Cow, Cow.id == MilkLog.cow_id
-    ).outerjoin(
-        User, User.id == MilkLog.recorded_by
     ).filter(MilkLog.id == log.id).first()
 
     if result:
-        log_res, cow_tag, cow_name, milker_name = result
-        return jsonify(_serialize_milk_session(log_res, cow_tag=cow_tag, cow_name=cow_name, milker_name=milker_name)), 200
+        log_res, cow_tag, cow_name = result
+        return jsonify(_serialize_milk_session(log_res, cow_tag=cow_tag, cow_name=cow_name)), 200
 
     return jsonify(_serialize_milk_session(log)), 200
 
@@ -1328,6 +1390,8 @@ def verify_production_yield(log_id):
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND, Role.VET)
 def production_summary_alias():
+    if 'period' in request.args:
+        return production_period_summary()
     tenant_id = _get_tenant_id_from_claims()
     if tenant_id is None:
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
@@ -1636,7 +1700,13 @@ def create_lab_or_clerk_entry():
     milking_date, date_error = _parse_milking_date(data)
     if date_error:
         return date_error
-    response_data, status_code = ProductionService.log_daily_yield(cow.id, amount_float, session, user_id, tenant_id, milking_date=milking_date)
+    milker_id, milker_error = _parse_milker(data, tenant_id)
+    if milker_error:
+        return milker_error
+    response_data, status_code = ProductionService.log_daily_yield(
+        cow.id, amount_float, session, user_id, tenant_id, milking_date=milking_date,
+        milker_employee_id=milker_id,
+    )
     return _augment_yield_response(response_data, status_code, tenant_id)
 
 

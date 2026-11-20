@@ -1,7 +1,9 @@
 import traceback
 from flask import jsonify, json
 from werkzeug.exceptions import HTTPException
-from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.exceptions import RequestEntityTooLarge, TooManyRequests
+
+from app.utils.api_errors import ApiError
 
 
 def register_error_handlers(app):
@@ -15,6 +17,21 @@ def register_error_handlers(app):
             "code": e.code,
             "name": e.name,
             "description": e.description,
+        })
+        response.content_type = "application/json"
+        return response
+
+    @app.errorhandler(ApiError)
+    def handle_api_error(error):
+        return error.to_response()
+
+    @app.errorhandler(TooManyRequests)
+    def handle_rate_limited(e):
+        # Keep Flask-Limiter's Retry-After / X-RateLimit-* headers.
+        response = e.get_response()
+        response.data = json.dumps({
+            "code": "RATE_LIMITED",
+            "error": "Too many requests. Please try again later.",
         })
         response.content_type = "application/json"
         return response

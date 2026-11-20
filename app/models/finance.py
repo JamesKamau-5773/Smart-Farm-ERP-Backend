@@ -262,7 +262,29 @@ class Transaction(db.Model):
             "(transaction_type = 'PAYMENT') = (category IN ('PAYMENT', 'BUYER_PAYMENT'))",
             name='ck_transactions_payment_classification',
         ),
+        # Period totals filter and group on the farm-local date (app.utils.farm_time.local_date_sql).
+        db.Index(
+            'ix_transactions_tenant_farm_local_date',
+            'tenant_id', 'farm_id', db.text("(CAST(timezone('Africa/Nairobi', \"timestamp\") AS DATE))"),
+        ),
     )
+
+
+class TransactionAttachment(db.Model):
+    """A receipt photo or document kept with a ledger entry. Served only through the tenant-scoped API."""
+    __tablename__ = 'transaction_attachments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='RESTRICT'), nullable=False, index=True)
+    transaction_id = db.Column(db.Integer, db.ForeignKey('transactions.id', ondelete='RESTRICT'), nullable=False, index=True)
+    stored_path = db.Column(db.String(255), nullable=False)
+    content_type = db.Column(db.String(50), nullable=False)
+    size_bytes = db.Column(db.Integer, nullable=False)
+    original_filename = db.Column(db.String(255), nullable=True)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    uploaded_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    transaction = db.relationship('Transaction', backref=db.backref('attachments', lazy=True, order_by='TransactionAttachment.id'))
 
 
 class TransactionAuditLog(db.Model):

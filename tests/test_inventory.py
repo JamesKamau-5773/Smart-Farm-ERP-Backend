@@ -21,6 +21,7 @@ class InventoryTestCase(BaseTestCase):
             amount=Decimal('2.50'),
             user_id=storekeeper.id,
             notes='Morning feeding deduction',
+            tenant_id=self.tenant.id,
         )
 
         self.assertEqual(updated_item.current_qty, Decimal('7.50'))
@@ -31,7 +32,8 @@ class InventoryTestCase(BaseTestCase):
             transaction_type='OUT',
             quantity=Decimal('5.00'),
             logged_by=storekeeper.id,
-            reference_note='Afternoon ration',
+            notes='Afternoon ration',
+            tenant_id=self.tenant.id,
         )
 
         self.assertEqual(transaction.transaction_type, 'OUT')

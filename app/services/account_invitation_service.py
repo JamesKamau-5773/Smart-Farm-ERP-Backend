@@ -23,6 +23,8 @@ from app.services.audit_service import record_audit
 from app.services.staff_account_service import StaffAccountService
 from app.services.page_access import normalize_page_access
 from app.utils.jwt_payload import public_tenant_id
+from app.utils.auth_errors import WeakPasswordError
+from app.utils.password_policy import PasswordPolicy
 
 
 class AccountInvitationService:
@@ -175,9 +177,6 @@ class AccountInvitationService:
 
     @staticmethod
     def claim_invite(token: str, password: str, username: str | None = None):
-        if len(password or '') < 8:
-            return jsonify({'error': 'password must be at least 8 characters.'}), 400
-
         token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
         invitation = AccountInvitation.query.filter_by(token_hash=token_hash).with_for_update().first()
         decoded = None
@@ -252,6 +251,12 @@ class AccountInvitationService:
                 or expires_at <= now
             ):
                 return jsonify({'error': 'Invalid, expired, or superseded invite token.'}), 400
+
+        violations = PasswordPolicy.violations(
+            password, personal_values=[chosen_username, account.phone_number, account.email],
+        )
+        if violations:
+            return WeakPasswordError(violations).to_response()
 
         account.username = chosen_username
         account.set_password(password)

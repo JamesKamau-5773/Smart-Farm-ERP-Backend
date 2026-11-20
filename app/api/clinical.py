@@ -1,12 +1,13 @@
 from __future__ import annotations
-from flask import Blueprint, request, jsonify, current_app, g
+from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from app.services.medical_service import MedicalService
+from app.services.milk_hold_service import MilkHoldService
+from app.services.milk_safety_board_service import MilkSafetyBoardService
+from app.services.milk_safety_serializers import MilkTestSerializer
+from app.services.milk_test_service import MilkTestService
 from app.services.vet_visit_service import VetVisitService
-from app.models.livestock import VetVisit, Cow, MedicalRecord
-from app.models.supply import MilkLog
-from app.models.user import User
-from app import db
+from app.utils.error_envelope import register_error_envelope
 from app.utils.decorators import role_required
 from app.models.user import Role
 from app.utils.jwt_payload import parse_public_int_id
@@ -15,6 +16,7 @@ clinical_bp = Blueprint('clinical', __name__)
 medical_alias_bp = Blueprint('medical_alias', __name__)
 safety_bp = Blueprint('safety', __name__)
 veterinary_bp = Blueprint('veterinary', __name__)
+register_error_envelope(clinical_bp, safety_bp, veterinary_bp)
 
 
 def _pagination_params():
@@ -161,7 +163,9 @@ def toggle_farmer_hardlock(cow_id):
     is_locked = bool(data.get('is_locked'))
     user_id = get_jwt_identity()
     ip_address = request.remote_addr
-    return MedicalService.enforce_hardlock(tenant_id, cow_id, is_locked, user_id, ip_address)
+    return MedicalService.enforce_hardlock(
+        tenant_id, cow_id, is_locked, user_id, ip_address, override_reason=data.get('override_reason'),
+    )
 
 
 @clinical_bp.route('/vet-visits', methods=['POST'])
@@ -259,56 +263,54 @@ def safety_dashboard():
         return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
 
     page, per_page = _pagination_params()
-    severity = (request.args.get('severity') or '').strip().lower()
-    query = Cow.query.filter(Cow.is_hardlocked.is_(True), Cow.tenant_id == tenant_id)
-    search = (request.args.get('q') or '').strip()
-    if search:
-        search_like = f"%{search}%"
-        query = query.filter((Cow.name.ilike(search_like)) | (Cow.tag_number.ilike(search_like)))
-    query = query.order_by(Cow.id.desc())
-    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    return jsonify(MilkSafetyBoardService.board(
+        tenant_id,
+        page=page,
+        per_page=per_page,
+        severity=(request.args.get('severity') or '').strip().lower(),
+        search=(request.args.get('q') or '').strip(),
+    )), 200
 
-    items = []
-    for cow in paginated.items:
-        latest_medical = MedicalRecord.query.filter_by(cow_id=cow.id, tenant_id=tenant_id).order_by(MedicalRecord.visit_date.desc(), MedicalRecord.id.desc()).first()
-        if latest_medical and latest_medical.withdrawal_days_recommended and latest_medical.withdrawal_days_recommended >= 14:
-            computed_severity = 'high'
-        elif latest_medical and latest_medical.withdrawal_days_recommended and latest_medical.withdrawal_days_recommended >= 7:
-            computed_severity = 'medium'
-        else:
-            computed_severity = 'low'
-        if severity and computed_severity != severity:
-            continue
 
-        lock_expires = None
-        if latest_medical and latest_medical.visit_date and latest_medical.withdrawal_days_recommended:
-            from datetime import timedelta
-            lock_expires_dt = latest_medical.visit_date + timedelta(days=int(latest_medical.withdrawal_days_recommended))
-            lock_expires = lock_expires_dt.isoformat()
+@safety_bp.route('/api/safety/holds', methods=['POST'])
+@jwt_required()
+@role_required(Role.FARMER, Role.VET, Role.FARM_HAND)
+def place_milk_hold():
+    """Anyone who can see the board may put milk on hold; releasing it stays with the farmer."""
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+    cow = MilkHoldService.place(
+        tenant_id, request.get_json(silent=True) or {}, actor_id=int(get_jwt_identity()), ip_address=request.remote_addr,
+    )
+    return jsonify(MilkSafetyBoardService.item(cow, tenant_id)), 201
 
-        items.append({
-            'cow_id': cow.id,
-            'cow_name': cow.name,
-            'cow_tag': cow.tag_number,
-            'severity': computed_severity,
-            'reason': latest_medical.diagnosis if latest_medical else 'Hardlock active',
-            'lock_expires': lock_expires,
-            'section': 'clinical',
-            'medication': latest_medical.medication if latest_medical else None,
-            'updated_at': latest_medical.visit_date.isoformat() if latest_medical and latest_medical.visit_date else None,
-            'updated_by': latest_medical.vet_id if latest_medical else None,
-            'notes': latest_medical.remarks if latest_medical else None,
-        })
 
+@safety_bp.route('/api/safety/milk-tests', methods=['POST'])
+@jwt_required()
+@role_required(Role.FARMER, Role.VET, Role.FARM_HAND)
+def record_milk_test():
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+    test, cow, placed_on_hold = MilkTestService.record(
+        tenant_id, request.get_json(silent=True) or {}, actor_id=int(get_jwt_identity()), ip_address=request.remote_addr,
+    )
     return jsonify({
-        'items': items,
-        'meta': {
-            'page': paginated.page,
-            'per_page': paginated.per_page,
-            'total': paginated.total,
-            'pages': paginated.pages,
-        },
-    }), 200
+        'test': MilkTestSerializer.serialize(test),
+        'placed_on_hold': placed_on_hold,
+        'hold': MilkSafetyBoardService.item(cow, tenant_id) if cow.is_hardlocked else None,
+    }), 201
+
+
+@safety_bp.route('/api/safety/cows/<int:cow_id>/milk-tests', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.VET, Role.FARM_HAND)
+def list_milk_tests(cow_id):
+    tenant_id = _get_tenant_id_from_claims()
+    if tenant_id is None:
+        return jsonify({'error': 'Missing or invalid tenant in token.'}), 400
+    return jsonify({'items': [MilkTestSerializer.serialize(test) for test in MilkTestService.list_for_cow(tenant_id, cow_id)]}), 200
 
 
 @veterinary_bp.route('/api/veterinary/hardlocks/active', methods=['GET'])

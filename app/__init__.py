@@ -61,12 +61,16 @@ def create_app(config_class=Config):
     from app.middleware import (
         begin_idempotent_request,
         complete_idempotent_request,
+        enforce_demo_read_only,
         enforce_page_access,
+        enforce_phone_verification,
         enforce_required_password_reset,
         set_tenant_context,
     )
     app.before_request(set_tenant_context)
+    app.before_request(enforce_demo_read_only)
     app.before_request(enforce_required_password_reset)
+    app.before_request(enforce_phone_verification)
     app.before_request(enforce_page_access)
     app.before_request(begin_idempotent_request)
     app.after_request(complete_idempotent_request)
@@ -79,6 +83,7 @@ def create_app(config_class=Config):
     # We import model classes directly from their modules to avoid circular dependencies.
     from app.models.user import User
     from app.models.user import RevokedToken
+    from app.models.auth import AccountDataIssue, SocialAccount, VerificationChallenge
     from app.models.account_invitation import AccountInvitation
     from app.models.finance import Buyer, Customer, Delivery, Receipt, SalesLedger, Transaction
     from app.models.supply import MilkDisposition, MilkLog # Inferred from finance API
@@ -94,19 +99,35 @@ def create_app(config_class=Config):
     from app.models.messaging import ChatSession
     from app.models.idempotency import IdempotencyRecord
 
+    from app.services.session_service import SessionService
+
     @jwt.token_in_blocklist_loader
     def is_token_revoked(_jwt_header, jwt_payload):
         token_id = jwt_payload.get('jti')
-        return bool(token_id and RevokedToken.query.filter_by(jti=token_id).first())
+        if token_id and RevokedToken.query.filter_by(jti=token_id).first():
+            return True
+        # Password resets bump users.token_version, revoking every older token.
+        return not SessionService.is_token_current(jwt_payload)
+
+    from app.services.google_identity_provider import GoogleIdentityProvider
+    GoogleIdentityProvider.init_app(app)
+
+    from app.cli import register_cli
+    register_cli(app)
 
     # --- Blueprint Registration ---
     from app.api.clinical import clinical_bp
     from app.api.auth import auth_bp
+    from app.api.auth_google import auth_google_bp
+    from app.api.auth_demo import auth_demo_bp
+    from app.api.auth_recovery import auth_recovery_bp
+    from app.api.auth_verification import auth_verification_bp
     from app.api.operations import operations_bp, operations_alias_bp
     from app.api.breeding import breeding_bp
     from app.api.export import export_bp
     from app.api.inventory import inventory_bp
     from app.api.finance import finance_bp
+    from app.api.period_totals import period_totals_bp
     from app.api.webhooks import webhooks_bp
     from app.api.whatsapp_webhook import whatsapp_bp
     from app.api.hr import hr_bp
@@ -130,6 +151,10 @@ def create_app(config_class=Config):
     register_error_handlers(app)
 
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
+    app.register_blueprint(auth_verification_bp, url_prefix='/api/auth')
+    app.register_blueprint(auth_recovery_bp, url_prefix='/api/auth')
+    app.register_blueprint(auth_google_bp, url_prefix='/api/auth')
+    app.register_blueprint(auth_demo_bp, url_prefix='/api/auth')
     app.register_blueprint(clinical_bp, url_prefix='/api/clinical')
     app.register_blueprint(operations_bp, url_prefix='/api/operations')
     app.register_blueprint(operations_alias_bp)
@@ -153,6 +178,7 @@ def create_app(config_class=Config):
     app.register_blueprint(veterinary_bp)
     app.register_blueprint(genetics_bp, url_prefix='/api/v1/genetics')
     app.register_blueprint(reports_bp)
+    app.register_blueprint(period_totals_bp)
     app.register_blueprint(uploads_bp)
     app.register_blueprint(milk_dispositions_bp)
     app.register_blueprint(onboarding_bp, url_prefix='/api/onboarding')

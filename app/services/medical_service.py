@@ -1,6 +1,9 @@
 from app.repositories.medical_repo import MedicalRepository
 from app.repositories.cow_repo import CowRepository
 from app.services.animal_timeline_service import AnimalTimelineService
+from app.services.audit_service import record_audit
+from app.services.milk_hold_service import MilkHoldService
+from app.services.milk_withdrawal_service import MilkWithdrawalService
 from flask import jsonify
 
 class MedicalService:
@@ -65,12 +68,22 @@ class MedicalService:
         return jsonify(response), 201
 
     @staticmethod
-    def enforce_hardlock(tenant_id, cow_id, is_locked, user_id, ip_address):
+    def enforce_hardlock(tenant_id, cow_id, is_locked, user_id, ip_address, override_reason=None):
         """Processes the Farmer's decision to lock/unlock livestock."""
         livestock_id = cow_id
         livestock = CowRepository.get_by_id(livestock_id, tenant_id=tenant_id)
         if not livestock:
             return jsonify({"error": "Cow not found in registry."}), 404
+
+        if not is_locked:
+            MilkWithdrawalService.check_release(livestock, tenant_id, override_reason)
+            MilkHoldService.clear(livestock)
+            if (override_reason or '').strip():
+                record_audit(
+                    user_id=user_id, action='RELEASE_MILK_DURING_WITHDRAWAL', entity_type='Livestock',
+                    entity_id=livestock.id, old_value={'is_hardlocked': True},
+                    new_value={'is_hardlocked': False, 'override_reason': override_reason.strip()}, ip_address=ip_address,
+                )
 
         updated_livestock = MedicalRepository.toggle_hardlock(tenant_id, livestock_id, is_locked, user_id, ip_address)
         

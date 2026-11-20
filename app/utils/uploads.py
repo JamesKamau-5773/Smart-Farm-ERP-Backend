@@ -54,3 +54,34 @@ def validate_animal_photo_upload(file_storage) -> str:
         raise ValueError(f'Photo must be smaller than {MAX_PHOTO_SIZE_BYTES // (1024 * 1024)}MB.')
 
     return extension
+
+
+ALLOWED_RECEIPT_TYPES = {**ALLOWED_PHOTO_TYPES, '.pdf': b'%PDF-'}
+RECEIPT_CONTENT_TYPES = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.pdf': 'application/pdf',
+}
+MAX_RECEIPT_SIZE_BYTES = 4 * 1024 * 1024  # 4MB, under MAX_CONTENT_LENGTH
+
+
+def validate_receipt_upload(file_storage) -> tuple[str, int]:
+    """Returns the safe extension and size of a receipt photo or PDF."""
+    extension = _match_signature(file_storage, ALLOWED_RECEIPT_TYPES, 'Receipt')
+    if extension == '.webp':
+        file_storage.stream.seek(8)
+        is_webp = file_storage.stream.read(4) == b'WEBP'
+        file_storage.stream.seek(0)
+        if not is_webp:
+            raise ValueError('Receipt content does not match its file type.')
+
+    file_storage.stream.seek(0, 2)
+    size = file_storage.stream.tell()
+    file_storage.stream.seek(0)
+    if size == 0:
+        raise ValueError('Receipt file is empty.')
+    if size > MAX_RECEIPT_SIZE_BYTES:
+        raise ValueError(f'Receipt must be smaller than {MAX_RECEIPT_SIZE_BYTES // (1024 * 1024)}MB.')
+    return extension, size

@@ -51,3 +51,19 @@ class MedicalRepository:
         except SQLAlchemyError as e:
             db.session.rollback()
             raise Exception("Failed, Database error while updating livestock status.")
+    @staticmethod
+    def list_with_withdrawal(cow_id: int, tenant_id: int) -> list[MedicalRecord]:
+        """Treatments that carry a milk withdrawal period."""
+        return MedicalRecord.query.filter(
+            MedicalRecord.cow_id == cow_id,
+            MedicalRecord.tenant_id == tenant_id,
+            MedicalRecord.withdrawal_days_recommended > 0,
+        ).all()
+
+    @staticmethod
+    def latest_for_cow(cow_id: int, tenant_id: int) -> MedicalRecord | None:
+        return (
+            MedicalRecord.query.filter_by(cow_id=cow_id, tenant_id=tenant_id)
+            .order_by(MedicalRecord.visit_date.desc(), MedicalRecord.id.desc())
+            .first()
+        )

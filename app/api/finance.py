@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 
-from flask import Blueprint, g, request, jsonify, render_template, send_file
+from flask import Blueprint, current_app, g, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -13,10 +14,23 @@ from app import db
 from app.models.finance import Buyer, CostClass, Customer, Delivery, ReceiptAuditLog, SalesLedger, Transaction, TransactionStatus, TransactionType, TransactionCategory
 from app.models.user import Role
 from app.services.payment_service import PaymentService
+from app.services import ledger_category_policy
 from app.services.ledger_correction_service import LedgerCorrectionService
+from app.services.ledger_correction_policy import LedgerCorrectionPolicy
 from app.services.buyer_service import BuyerService
 from app.services.animal_cost_allocation_service import AnimalCostAllocationService
 from app.services.receipt_service import ReceiptService
+from app.services.transaction_attachment_serializer import TransactionAttachmentSerializer
+from app.services.transaction_attachment_service import TransactionAttachmentService
+from app.repositories.ledger_query import apply_ledger_filters
+from app.repositories.period_totals_repo import LedgerTotalsRepository
+from app.schemas.ledger_filters import LedgerFilters
+from app.services.ledger_account_scope import LedgerAccountScopeResolver
+from app.services.period_resolver import bucket_keys
+from app.services.period_totals_serializer import one_dp
+from app.services.request_scope import FarmScope
+from app.utils.farm_time import farm_timestamp_for, to_farm_date
+from app.utils.error_envelope import register_error_envelope
 from app.utils import get_tenant_id_from_context
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
@@ -24,31 +38,7 @@ from weasyprint import HTML
 
 
 finance_bp = Blueprint('finance', __name__)
-
-
-def _parse_date_param(param_name: str, default: date | None = None) -> date | None:
-    """Safely parse an optional request date argument."""
-    raw = request.args.get(param_name)
-    if raw in (None, ''):
-        return default
-    try:
-        return datetime.fromisoformat(raw.split('T')[0]).date()
-    except (TypeError, ValueError):
-        raise ValueError(f'{param_name} must be a valid date in YYYY-MM-DD format.')
-
-
-DEFAULT_COST_CLASS_BY_CATEGORY = {
-    TransactionCategory.FEED_PURCHASE: CostClass.COGS,
-    TransactionCategory.VET_FEES: CostClass.COGS,
-    TransactionCategory.AI_SERVICE: CostClass.COGS,
-    TransactionCategory.LABOR_WAGES: CostClass.COGS,
-    TransactionCategory.UTILITIES: CostClass.COGS,
-    TransactionCategory.INVENTORY_WRITE_OFF: CostClass.COGS,
-    TransactionCategory.EQUIPMENT_MAINTENANCE: CostClass.OPERATING,
-    TransactionCategory.TRANSPORT: CostClass.OPERATING,
-    TransactionCategory.OPENING_BALANCE: CostClass.OPERATING,
-    TransactionCategory.OTHER: CostClass.OPERATING,
-}
+register_error_envelope(finance_bp)
 
 
 def _current_farm_id():
@@ -116,6 +106,7 @@ def _serialize_transaction(transaction_tuple) -> dict:
     counterparty_name = customer_name or buyer_name or transaction.counterparty_name
     receipt = transaction.receipt
     animal_cost_allocations = transaction.animal_cost_allocations
+    amount_lock_reason = LedgerCorrectionPolicy.amount_lock_reason(transaction)
     return {
         'id': transaction.id,
         'date': transaction_date.isoformat() if transaction_date else None,
@@ -142,17 +133,23 @@ def _serialize_transaction(transaction_tuple) -> dict:
         'replacement_transaction_id': transaction.correction_replacement.id if transaction.correction_replacement else None,
         'farm_id': transaction.farm_id,
         'amount': float(getattr(transaction, 'amount', 0.0) or 0.0),
+        'amount_correctable': amount_lock_reason is None,
+        'amount_lock_reason': amount_lock_reason,
+        # Farm-local calendar buckets, so clients group without date maths.
+        'bucket': bucket_keys(to_farm_date(transaction_date)),
         'animal_cost_allocations': [{
             'cow_id': allocation.cow_id,
             'cost_type': allocation.cost_type.value,
             'amount': float(allocation.amount),
             'attribution_method': allocation.attribution_method,
         } for allocation in animal_cost_allocations] if animal_cost_allocations else [],
+        'attachments': [TransactionAttachmentSerializer.serialize(attachment) for attachment in transaction.attachments],
         'receipt_available': receipt is not None,
         'receipt': {
             'id': receipt.id,
             'receipt_number': receipt.receipt_number,
             'issued_at': receipt.issued_at.isoformat(),
+            'status': getattr(receipt.status, 'value', receipt.status),
         } if receipt else None,
     }
 
@@ -333,12 +330,13 @@ def update_customer(customer_id):
     try:
         db.session.commit()
         return jsonify(_serialize_customer(customer)), 200
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
-    except Exception as e:
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 
 @finance_bp.route('/deliveries', methods=['GET'])
@@ -377,90 +375,14 @@ def get_ledger():
     Account scope can be selected explicitly with account_type/account_id (or
     legacy customer_id), or by matching customer/buyer names with search_query.
     """
-    tenant_id = get_tenant_id_from_context()
-    if not tenant_id:
-        return jsonify({'error': 'Tenant context is missing.'}), 400
-
+    scope = FarmScope.from_request()
+    filters = LedgerFilters.from_args(request.args)
+    accounts = LedgerAccountScopeResolver.resolve(scope, filters)
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
-    farm_id = _current_farm_id()
+    tenant_id, farm_id = scope.tenant_id, scope.farm_id
+    customer_ids, buyer_ids = accounts.customer_ids, accounts.buyer_ids
 
-    # Updated to capture 'search' from the new frontend search bar, with fallback to 'search_query'
-    search_query = str(request.args.get('search') or request.args.get('search_query') or '').strip()
-
-    account_type = str(request.args.get('account_type') or '').strip().lower()
-    account_id_raw = request.args.get('account_id')
-    legacy_customer_id = request.args.get('customer_id')
-
-    try:
-        start_date = _parse_date_param('start_date')
-        end_date = _parse_date_param('end_date')
-    except ValueError as exc:
-        return jsonify({'error': str(exc)}), 400
-
-    if start_date and end_date and end_date < start_date:
-        return jsonify({'error': 'end_date cannot be earlier than start_date.'}), 400
-
-    if legacy_customer_id not in (None, ''):
-        if account_type or account_id_raw not in (None, ''):
-            return jsonify({'error': 'Use either customer_id or account_type/account_id, not both.'}), 400
-        account_type = 'customer'
-        account_id_raw = legacy_customer_id
-    if search_query and (account_type or account_id_raw not in (None, '')):
-        return jsonify({'error': 'Use either search_query or an explicit account scope, not both.'}), 400
-    if bool(account_type) != (account_id_raw not in (None, '')):
-        return jsonify({'error': 'account_type and account_id must be provided together.'}), 400
-    if account_type and account_type not in ('customer', 'buyer'):
-        return jsonify({'error': 'account_type must be customer or buyer.'}), 400
-
-    account_id = None
-    if account_id_raw not in (None, ''):
-        try:
-            account_id = _parse_optional_integer(account_id_raw, 'account_id')
-        except ValueError as exc:
-            return jsonify({'error': str(exc)}), 400
-
-    customer_ids = None
-    buyer_ids = None
-    scope_mode = 'all'
-    if account_type == 'customer':
-        customer = Customer.query.filter_by(id=account_id, tenant_id=tenant_id).first()
-        if not customer:
-            return jsonify({'error': 'Customer not found.'}), 404
-        customer_ids, buyer_ids, scope_mode = [customer.id], [], 'account'
-    elif account_type == 'buyer':
-        buyer_query = Buyer.query.filter_by(id=account_id, tenant_id=tenant_id)
-        if farm_id is not None:
-            buyer_query = buyer_query.filter(Buyer.farm_id == farm_id)
-        buyer = buyer_query.first()
-        if not buyer:
-            return jsonify({'error': 'Buyer not found.'}), 404
-        customer_ids, buyer_ids, scope_mode = [], [buyer.id], 'account'
-    elif search_query:
-        customer_ids = [row[0] for row in db.session.query(Customer.id).filter(
-            Customer.tenant_id == tenant_id,
-            Customer.name.ilike(f'%{search_query}%'),
-        ).all()]
-        buyer_search = db.session.query(Buyer.id).filter(
-            Buyer.tenant_id == tenant_id,
-            Buyer.name.ilike(f'%{search_query}%'),
-        )
-        if farm_id is not None:
-            buyer_search = buyer_search.filter(Buyer.farm_id == farm_id)
-        buyer_ids = [row[0] for row in buyer_search.all()]
-        scope_mode = 'search'
-
-    def apply_account_scope(scoped_query):
-        if customer_ids is None and buyer_ids is None:
-            return scoped_query
-        account_predicates = []
-        if customer_ids:
-            account_predicates.append(Transaction.customer_id.in_(customer_ids))
-        if buyer_ids:
-            account_predicates.append(Transaction.buyer_id.in_(buyer_ids))
-        return scoped_query.filter(or_(*account_predicates)) if account_predicates else scoped_query.filter(False)
-
-    # Start with a base query scoped to the tenant
     query = db.session.query(
         Transaction,
         Customer.name.label('customer_name'),
@@ -469,66 +391,23 @@ def get_ledger():
         Customer, Transaction.customer_id == Customer.id
     ).outerjoin(
         Buyer, Transaction.buyer_id == Buyer.id
-    ).filter(Transaction.tenant_id == tenant_id)
+    )
+    query = apply_ledger_filters(query, scope, filters, accounts)
 
-    if farm_id is not None:
-        query = query.filter(Transaction.farm_id == farm_id)
-    if start_date is not None:
-        query = query.filter(func.date(Transaction.timestamp) >= start_date)
-    if end_date is not None:
-        query = query.filter(func.date(Transaction.timestamp) <= end_date)
-    query = apply_account_scope(query)
-
-    # Apply ordering and pagination
     paginated_transactions = query.order_by(Transaction.timestamp.desc()).paginate(
         page=page, per_page=per_page, error_out=False
     )
-
-    # The query now returns tuples of (Transaction, customer_name)
     items = [_serialize_transaction(t_tuple) for t_tuple in paginated_transactions.items]
 
-    recognized_income = case(
-        (Transaction.transaction_type.in_((TransactionType.REVENUE, TransactionType.DEBIT)), Transaction.amount),
-        (
-            (Transaction.transaction_type == TransactionType.PAYMENT)
-            & (Transaction.income_category == TransactionCategory.MILK_SALE.value),
-            Transaction.amount,
-        ),
-        (Transaction.transaction_type == TransactionType.CREDIT, -Transaction.amount),
-        else_=0,
+    # KPI cards: the same filter builder and classification as the period totals.
+    totals = LedgerTotalsRepository.totals(scope, filters, accounts)
+    total_income, total_costs = totals.income, totals.expenses
+    transaction_count = totals.count
+    total_amount_paid = db.session.query(func.coalesce(func.sum(func.abs(Transaction.amount)), 0)).filter(
+        Transaction.transaction_type == TransactionType.PAYMENT,
+        Transaction.status == TransactionStatus.POSTED.value,
     )
-    totals_query = db.session.query(
-        func.coalesce(func.sum(case(
-            (Transaction.status == TransactionStatus.POSTED.value, recognized_income),
-            else_=0,
-        )), 0),
-        func.coalesce(func.sum(case(
-            (
-                (Transaction.transaction_type == TransactionType.EXPENSE)
-                & (Transaction.status == TransactionStatus.POSTED.value),
-                Transaction.amount,
-            ),
-            else_=0,
-        )), 0),
-        func.coalesce(func.sum(case(
-            (
-                (Transaction.transaction_type == TransactionType.PAYMENT)
-                & (Transaction.status == TransactionStatus.POSTED.value),
-                Transaction.amount,
-            ),
-            else_=0,
-        )), 0),
-        func.count(Transaction.id),
-    ).filter(Transaction.tenant_id == tenant_id)
-    if farm_id is not None:
-        totals_query = totals_query.filter(Transaction.farm_id == farm_id)
-    if start_date is not None:
-        totals_query = totals_query.filter(func.date(Transaction.timestamp) >= start_date)
-    if end_date is not None:
-        totals_query = totals_query.filter(func.date(Transaction.timestamp) <= end_date)
-    totals_query = apply_account_scope(totals_query)
-    totals = totals_query.one()
-    total_income, total_costs, total_amount_paid, transaction_count = totals
+    total_amount_paid = apply_ledger_filters(total_amount_paid, scope, filters, accounts).scalar() or Decimal('0')
 
     customer_balances = db.session.query(
         func.coalesce(func.sum(case((Customer.account_balance > 0, Customer.account_balance), else_=0)), 0),
@@ -560,6 +439,8 @@ def get_ledger():
             "posted_costs": float(total_costs),
             "total_amount_paid": float(total_amount_paid),
             "net_profit": float(total_income - total_costs),
+            # Net profit ÷ recognized sales as a 1-dp string ("68.7"); null when sales are 0.
+            "profit_margin_pct": one_dp(totals.margin_pct),
             "ledger_records": transaction_count,
             "total_income": float(total_income),
             "total_costs": float(total_costs),
@@ -567,10 +448,12 @@ def get_ledger():
             "transaction_count": transaction_count,
         },
         "summary_scope": {
-            "mode": scope_mode,
-            "account_type": account_type or None,
-            "account_id": account_id,
-            "search_query": search_query or None,
+            "mode": accounts.mode,
+            "account_type": filters.account_type,
+            "account_id": filters.account_id,
+            "search_query": filters.search,
+            "typo_matched": accounts.typo_matched,
+            "matched_names": accounts.matched_names,
             "matched_customer_ids": customer_ids,
             "matched_buyer_ids": buyer_ids,
             "customer_balance_scope": "tenant",
@@ -607,26 +490,7 @@ def create_ledger_entry():
     except (TypeError, ValueError):
         return jsonify({'error': 'Invalid transaction category.'}), 400
 
-    allowed_categories = {
-        TransactionType.REVENUE: {
-            TransactionCategory.MILK_SALE,
-            TransactionCategory.LIVESTOCK_SALE,
-            TransactionCategory.OTHER_INCOME,
-            TransactionCategory.OTHER,
-        },
-        TransactionType.EXPENSE: {
-            TransactionCategory.FEED_PURCHASE,
-            TransactionCategory.VET_FEES,
-            TransactionCategory.LABOR_WAGES,
-            TransactionCategory.UTILITIES,
-            TransactionCategory.EQUIPMENT_MAINTENANCE,
-            TransactionCategory.TRANSPORT,
-            TransactionCategory.OPENING_BALANCE,
-            TransactionCategory.INVENTORY_WRITE_OFF,
-            TransactionCategory.OTHER,
-        },
-    }
-    if category not in allowed_categories[transaction_type]:
+    if category not in ledger_category_policy.categories_for(transaction_type):
         return jsonify({'error': f'{category.value} is not valid for {transaction_type.value} records.'}), 400
 
     cost_class = None
@@ -641,7 +505,7 @@ def create_ledger_entry():
     if transaction_type == TransactionType.REVENUE and cost_class is not None:
         return jsonify({'error': 'cost_class is only valid for expense records.'}), 400
     if transaction_type == TransactionType.EXPENSE and cost_class is None:
-        cost_class = DEFAULT_COST_CLASS_BY_CATEGORY[category]
+        cost_class = ledger_category_policy.default_cost_class(category)
 
     try:
         amount = Decimal(str(data.get('amount')))
@@ -724,7 +588,7 @@ def create_ledger_entry():
     if data.get('date'):
         try:
             entered_date = datetime.fromisoformat(data['date']).date()
-            timestamp = datetime.combine(entered_date, timestamp.timetz())
+            timestamp = farm_timestamp_for(entered_date, timestamp)
         except (TypeError, ValueError):
             return jsonify({'error': 'date must be in YYYY-MM-DD format.'}), 400
 
@@ -780,10 +644,11 @@ def create_ledger_entry():
 
 
 @finance_bp.route('/transactions/<int:transaction_id>/void-and-replace', methods=['POST'])
+@finance_bp.route('/transactions/<int:transaction_id>/corrections', methods=['POST'])
 @jwt_required()
 @role_required(Role.FARMER)
 def void_and_replace_expense_transaction(transaction_id):
-    """Correct an expense classification without mutating or deleting the posted record."""
+    """Correct an income or expense entry (category, cost class, amount) without deleting the posted record."""
     tenant_id = get_tenant_id_from_context()
     if not tenant_id:
         return jsonify({'error': 'Tenant context is missing.'}), 400
@@ -795,13 +660,14 @@ def void_and_replace_expense_transaction(transaction_id):
     if not isinstance(replacement_data, dict):
         return jsonify({'error': 'replacement must be an object.'}), 400
     try:
-        original, replacement = LedgerCorrectionService.void_and_replace_expense(
+        original, replacement = LedgerCorrectionService.void_and_replace(
             tenant_id=tenant_id,
             transaction_id=transaction_id,
             void_reason=data.get('void_reason'),
             corrected_by=int(get_jwt_identity()),
             category=replacement_data.get('category'),
             cost_class=replacement_data.get('cost_class'),
+            amount=replacement_data.get('amount'),
             ip_address=request.remote_addr,
         )
         db.session.commit()
@@ -817,6 +683,35 @@ def void_and_replace_expense_transaction(transaction_id):
         'voided_transaction': _serialize_transaction(original),
         'replacement_transaction': _serialize_transaction(replacement),
     }), 201
+
+
+@finance_bp.route('/categories', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def ledger_categories():
+    """Categories a ledger entry may use, and each expense category's default cost class."""
+    return jsonify(ledger_category_policy.catalogue()), 200
+
+
+@finance_bp.route('/transactions/<int:transaction_id>/attachments', methods=['POST'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def upload_transaction_attachment(transaction_id):
+    attachment = TransactionAttachmentService.upload(
+        get_tenant_id_from_context(), transaction_id, request.files.get('file'), uploaded_by=int(get_jwt_identity()),
+    )
+    return jsonify(TransactionAttachmentSerializer.serialize(attachment)), 201
+
+
+@finance_bp.route('/transactions/<int:transaction_id>/attachments/<int:attachment_id>', methods=['GET'])
+@jwt_required()
+@role_required(Role.FARMER, Role.FARM_HAND)
+def download_transaction_attachment(transaction_id, attachment_id):
+    attachment, path = TransactionAttachmentService.open(get_tenant_id_from_context(), transaction_id, attachment_id)
+    response = send_file(path, mimetype=attachment.content_type, download_name=attachment.original_filename or os.path.basename(path))
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 
 @finance_bp.route('/transactions/<int:transaction_id>/receipt', methods=['POST'])
@@ -869,8 +764,8 @@ def download_receipt_pdf(receipt_id):
     if not receipt:
         return jsonify({'error': 'Receipt not found.'}), 404
     if receipt.document_content is None:
-        payload = ReceiptService.serialize(receipt)
-        receipt.document_content = HTML(string=render_template('pdf/receipt.html', receipt=payload)).write_pdf()
+        # Same renderer (and logo) as receipts issued with their PDF.
+        receipt.document_content = ReceiptService._render_document(receipt)
         receipt.document_sha256 = hashlib.sha256(receipt.document_content).hexdigest()
     ReceiptService.record_access(receipt, 'DOWNLOADED', int(get_jwt_identity()), request.remote_addr)
     db.session.commit()
@@ -963,9 +858,10 @@ def create_customer():
     except IntegrityError:
         db.session.rollback()
         return jsonify({'error': 'A customer with this phone number already exists.'}), 409
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 @finance_bp.route('/deliveries', methods=['POST'])
 @jwt_required()
@@ -1056,12 +952,13 @@ def create_delivery():
     try:
         db.session.commit()
         return jsonify(_serialize_delivery(delivery)), 201
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
-    except Exception as e:
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
+    except Exception:
         db.session.rollback()
-        return jsonify({'error': 'An unexpected error occurred.', 'details': str(e)}), 500
+        current_app.logger.exception('An unexpected error occurred.')
+        return jsonify({'code': 'INTERNAL_ERROR', 'error': 'An unexpected error occurred.'}), 500
 
 
 @finance_bp.route('/deliveries/<int:delivery_id>', methods=['PATCH'])
@@ -1152,9 +1049,9 @@ def update_delivery(delivery_id):
     except (TypeError, ArithmeticError):
         db.session.rollback()
         return jsonify({'error': 'Invalid numeric values for delivery details.'}), 400
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error.', 'details': str(e)}), 409
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error.'}), 409
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'An unexpected error occurred during update.'}), 500
@@ -1209,9 +1106,9 @@ def delete_delivery(delivery_id):
     except FileNotFoundError as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 404
-    except IntegrityError as e:
+    except IntegrityError:
         db.session.rollback()
-        return jsonify({'error': 'Database integrity error during reversal.', 'details': str(e)}), 409
+        return jsonify({'code': 'CONFLICT', 'error': 'Database integrity error during reversal.'}), 409
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'An unexpected error occurred during deletion.'}), 500

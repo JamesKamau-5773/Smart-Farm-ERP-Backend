@@ -3,7 +3,11 @@ from flask_jwt_extended import jwt_required, get_jwt, get_jwt_identity
 
 from app.models.user import Role
 from app.repositories.user_repo import UserRepository
+from app import limiter
+from app.services.admin_password_reset_service import AdminPasswordResetService
 from app.services.cooperative_service import CooperativeService
+from app.utils.current_user import require_current_user
+from app.utils.rate_limiting import authenticated_user_key
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import normalize_tenant_type
 
@@ -128,3 +132,12 @@ def import_current_tenant_members_csv():
         return error
     file_storage = request.files.get('file') or request.files.get('csv_file')
     return CooperativeService.import_members_from_csv(user.tenant_id, file_storage, _assignable_roles_for(user))
+
+
+@tenant_bp.route('/users/<int:user_id>/password-reset', methods=['POST'])
+@jwt_required()
+@limiter.limit("10 per hour", key_func=authenticated_user_key)
+def issue_member_password_reset(user_id):
+    """Farm owner/admin creates a one-time reset link for a user in their tenant."""
+    result = AdminPasswordResetService.issue(require_current_user(), user_id, ip_address=request.remote_addr)
+    return jsonify(result), 201

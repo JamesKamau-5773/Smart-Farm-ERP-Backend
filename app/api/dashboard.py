@@ -85,7 +85,7 @@ def get_command_center_summary():
         return jsonify({"error": "An internal server error occurred while generating the dashboard."}), 500
 
 
-@dashboard_bp.route('/api/production/summary', methods=['GET'])
+# Served at /api/production/summary by operations_alias (registered first) and at /api/dashboard below.
 @jwt_required()
 def get_production_summary():
     tenant_id, tenant_error = _resolve_tenant_id_from_context_or_header()

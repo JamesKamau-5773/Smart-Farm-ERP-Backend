@@ -7,7 +7,11 @@ from app.services.password_reset_service import PasswordResetService
 from app import limiter
 from app.repositories.user_repo import UserRepository
 from app.utils.jwt_payload import parse_public_int_id
+from app.utils.farm_time import farm_timezone_name
 from app.services.page_access import normalize_page_access
+from app.services.account_state_service import AccountStateService
+from app.services.session_service import SessionService
+from app.utils.rate_limiting import login_identifier_key
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -15,20 +19,27 @@ auth_bp = Blueprint('auth', __name__)
 @auth_bp.route('/login', methods=['POST'])
 @limiter.limit("10 per 10 minutes")
 @limiter.limit("5 per minute")  # Redis throttle: Max 10 attempts per IP
+@limiter.limit("10 per 15 minutes", key_func=login_identifier_key)
 def login():
     # Some clients trigger preflight through wrapped decorators; keep login tolerant.
     if request.method == 'OPTIONS':
         return jsonify({"ok": True}), 200
 
     data = request.get_json(silent=True) or {}
-    username_or_phone = (data.get('username') or data.get('phone_number') or '').strip()
+    # `login` accepts a phone, email or username; the legacy fields still work.
+    identifier = str(
+        data.get('login') or data.get('email') or data.get('phone_number') or data.get('username') or ''
+    ).strip()
 
     # Input Validation
-    if not username_or_phone or not data.get('password'):
-        return jsonify({"error": "phone_number (or username) and password are required"}), 400
+    if not identifier or not data.get('password'):
+        return jsonify({
+            "code": "VALIDATION_ERROR",
+            "error": "login (phone, email or username) and password are required",
+        }), 400
 
     return AuthService.authenticate_user(
-        username_or_phone,
+        identifier,
         data['password'],
         farm_id=data.get('farm_id'),
     )
@@ -39,7 +50,7 @@ def login():
 @limiter.limit("2 per minute")
 def register():
     data = request.get_json(silent=True) or {}
-    return AuthService.register_workspace(data)
+    return AuthService.register_workspace(data, ip_address=request.remote_addr)
 
 
 @auth_bp.route('/bootstrap-status', methods=['GET'])
@@ -56,7 +67,7 @@ def switch_farm():
         return jsonify({"error": "farm_id is required"}), 400
 
     user_id = get_jwt_identity()
-    return AuthService.switch_farm(user_id, farm_id)
+    return AuthService.switch_farm(user_id, farm_id, auth_method=SessionService.auth_method_from_claims(get_jwt()))
 
 
 @auth_bp.route('/logout', methods=['POST'])
@@ -109,6 +120,7 @@ def me():
         'name': user.name or user.username,
         'username': user.username,
         'phone_number': phone_number,
+        'email': user.email,
         'role': user.role,
         'is_active': user.is_active,
         'requires_password_reset': user.requires_password_reset,
@@ -121,7 +133,19 @@ def me():
         'available_farms': claims.get('available_farms', []),
         'permissions': [user.role],
         'page_access': normalize_page_access(user.page_access, user.role),
+        'farm_timezone': farm_timezone_name(),
+        'session_expires_at': _session_expires_at(claims),
+        **AccountStateService.describe(user, SessionService.auth_method_from_claims(claims)),
     }), 200
+
+
+def _session_expires_at(claims):
+    from datetime import datetime, timezone
+
+    exp = (claims or {}).get('exp')
+    if not exp:
+        return None
+    return datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 @auth_bp.route('/me', methods=['PATCH'])
@@ -133,7 +157,8 @@ def update_me():
     Body: {
         "name": str (optional),
         "farm_location": str (optional),
-        "phone_number": str (optional; '' or null clears it)
+        "phone_number": str (optional; '' or null clears it),
+        "email": str (optional; '' or null clears it)
     }
     """
     user_id = get_jwt_identity()
@@ -142,7 +167,7 @@ def update_me():
         return jsonify({"error": "User not found"}), 404
 
     data = request.get_json(silent=True) or {}
-    return AuthService.update_profile(user, data)
+    return AuthService.update_profile(user, data, ip_address=request.remote_addr)
 
 
 @auth_bp.route('/status', methods=['GET'])

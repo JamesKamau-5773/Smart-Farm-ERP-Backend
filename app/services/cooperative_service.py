@@ -16,6 +16,9 @@ from app.services.auth_service import AuthService
 from app.services.account_invitation_service import AccountInvitationService
 from app.services.page_access import normalize_page_access
 from app.utils.jwt_payload import normalize_tenant_type, public_tenant_id
+from app.utils.phone import phone_identifier, phone_username
+from app.utils.auth_errors import WeakPasswordError
+from app.utils.password_policy import PasswordPolicy
 
 
 class CooperativeService:
@@ -23,7 +26,7 @@ class CooperativeService:
 
     @staticmethod
     def _normalize_username(data: dict, phone_number: str, full_name: str) -> str:
-        username = (data.get('username') or phone_number or full_name or '').strip()
+        username = (data.get('username') or (phone_username(phone_number) if phone_number else '') or full_name or '').strip()
         if username:
             return username
         return f"member_{uuid4().hex[:12]}"
@@ -63,7 +66,7 @@ class CooperativeService:
         registration_number = (data.get('registration_number') or data.get('registrationNumber') or '').strip() or None
         admin_name = (data.get('admin_name') or data.get('adminName') or '').strip()
         admin_phone = AuthService._normalize_phone_number(data.get('admin_phone_number') or data.get('adminPhoneNumber'))
-        admin_username = (data.get('admin_username') or data.get('adminUsername') or admin_phone or '').strip()
+        admin_username = (data.get('admin_username') or data.get('adminUsername') or (phone_username(admin_phone) if admin_phone else '')).strip()
         admin_password = data.get('admin_password') or data.get('adminPassword') or ''
         admin_email = (data.get('admin_email') or data.get('adminEmail') or '').strip() or None
 
@@ -77,8 +80,9 @@ class CooperativeService:
             return jsonify({'error': 'admin_name is required.'}), 400
         if not admin_username:
             return jsonify({'error': 'admin_username or admin_phone_number is required.'}), 400
-        if len(admin_password) < 8:
-            return jsonify({'error': 'admin_password must be at least 8 characters.'}), 400
+        violations = PasswordPolicy.violations(admin_password, personal_values=[admin_username, admin_phone, admin_email])
+        if violations:
+            return WeakPasswordError(violations).to_response()
 
         try:
             tenant = Tenant(
@@ -96,7 +100,8 @@ class CooperativeService:
 
             admin_user = User(
                 tenant_id=tenant.id,
-                identifier=f"phone_{admin_phone}" if admin_phone else f"coop_admin_{tenant.id}",
+                identifier=phone_identifier(admin_phone) if admin_phone else f"coop_admin_{tenant.id}",
+                phone_number=admin_phone or None,
                 username=admin_username,
                 name=admin_name,
                 email=admin_email,
@@ -156,7 +161,7 @@ class CooperativeService:
         if not full_name:
             return jsonify({'error': 'full_name is required.'}), 400
         if not phone_number:
-            return jsonify({'error': 'phone_number is required.'}), 400
+            return jsonify({'error': 'phone_number is required and must be a valid phone number.'}), 400
         allowed_roles = set(assignable_roles or Role.assignable_tenant_member_roles())
         if role not in allowed_roles:
             return jsonify({'error': 'role is not assignable to a tenant member.'}), 400
@@ -167,7 +172,8 @@ class CooperativeService:
             temp_password = uuid4().hex
             member = User(
                 tenant_id=tenant.id,
-                identifier=f'phone_{phone_number}',
+                identifier=phone_identifier(phone_number),
+                phone_number=phone_number,
                 username=username,
                 name=full_name,
                 email=email,
@@ -249,23 +255,26 @@ class CooperativeService:
             email = CooperativeService._csv_value(row, 'email') or None
             farm_location = CooperativeService._csv_value(row, 'farm_location', 'farmLocation', 'location') or None
             role = (CooperativeService._csv_value(row, 'role') or Role.FARMER).upper()
-            username = CooperativeService._normalize_username(row, phone_number, full_name)
+            normalized_phone = AuthService._normalize_phone_number(phone_number)
+            username = CooperativeService._normalize_username(row, normalized_phone, full_name)
 
             if not full_name or not phone_number:
                 errors.append({'row': row_number, 'error': 'full_name and phone_number are required.'})
                 continue
+            if not normalized_phone:
+                errors.append({'row': row_number, 'error': 'phone_number must be a valid phone number.'})
+                continue
             if role not in allowed_roles:
                 errors.append({'row': row_number, 'error': 'role is not assignable to a tenant member.'})
                 continue
-
-            normalized_phone = AuthService._normalize_phone_number(phone_number)
 
             try:
                 with db.session.begin_nested():
                     temp_password = uuid4().hex
                     member = User(
                         tenant_id=tenant.id,
-                        identifier=f'phone_{normalized_phone}',
+                        identifier=phone_identifier(normalized_phone),
+                        phone_number=normalized_phone,
                         username=username,
                         name=full_name,
                         email=email,

@@ -2,6 +2,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app import db
+from app.utils.farm_time import farm_today
 from sqlalchemy import Computed, ForeignKeyConstraint, event, inspect
 
 class ItemCategory:
@@ -30,6 +31,8 @@ class InventoryItem(db.Model):
     mixer_role = db.Column(db.String(50), nullable=False, default='roughage')
     inclusion_percentage_dairy_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     inclusion_percentage_main_meal = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    # Archived items keep their history but are hidden from lists and new mixes.
+    is_active = db.Column(db.Boolean, nullable=False, default=True, server_default=db.true())
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     transactions = db.relationship(
@@ -362,7 +365,7 @@ class FeedBatch(db.Model):
     total_cost = db.Column(db.Numeric(14, 4), nullable=False)
     cost_per_kg = db.Column(db.Numeric(14, 4), nullable=False)
     status = db.Column(db.String(50), nullable=False, default='ACTIVE')
-    mixed_on = db.Column(db.Date, nullable=False, default=lambda: datetime.now(timezone.utc).date())
+    mixed_on = db.Column(db.Date, nullable=False, default=farm_today)
     depleted_on = db.Column(db.Date, nullable=True)
     created_by = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -542,6 +545,14 @@ class MilkSession:
     EVENING = "Evening"
     MIDDAY = "Midday"
 
+    ALL = (MORNING, MIDDAY, EVENING)
+
+    @classmethod
+    def normalize(cls, value) -> str | None:
+        """The canonical session for ``value`` (case-insensitive), or None if it isn't one."""
+        cleaned = str(value or '').strip().lower()
+        return next((session for session in cls.ALL if session.lower() == cleaned), None)
+
 class MilkLog(db.Model):
     """Tracks daily yield and flags anomalies or hardlocked milk."""
     __tablename__ = 'milk_logs'
@@ -550,6 +561,11 @@ class MilkLog(db.Model):
     STATUS_ISOLATED = 'ISOLATED'
     STATUS_FLAGGED = 'FLAGGED'
     STATUS_VERIFIED = 'VERIFIED'
+    STATUSES = (STATUS_VERIFIED, STATUS_RECORDED, STATUS_FLAGGED, STATUS_ISOLATED)
+
+    SOURCE_APP = 'app'
+    SOURCE_WHATSAPP = 'whatsapp'
+    SOURCE_IMPORT = 'import'
 
     id = db.Column(db.Integer, primary_key=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id', ondelete='CASCADE'), nullable=False, index=True)
@@ -566,11 +582,27 @@ class MilkLog(db.Model):
     anomaly_flag = db.Column(db.Boolean, default=False, nullable=False) # True if yield dropped > 15%
     verified_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     verified_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    # How the entry reached us; sent as ``recorded_via`` so a row without a named milker still says where it came from.
+    source = db.Column(db.String(20), nullable=False, default=SOURCE_APP, server_default=SOURCE_APP)
+    # Who milked the cow, when someone other than the person entering it did (BR-019).
+    # Staff are employees, and many milkers have no app login, so this is not a user.
+    milker_employee_id = db.Column(
+        db.Integer, db.ForeignKey('employees.id', ondelete='SET NULL'), nullable=True, index=True,
+    )
 
     __table_args__ = (
         db.CheckConstraint(
             "status IN ('RECORDED', 'ISOLATED', 'FLAGGED', 'VERIFIED')",
             name='ck_milk_logs_status_valid',
+        ),
+        db.CheckConstraint(
+            "source IN ('app', 'whatsapp', 'import')",
+            name='ck_milk_logs_source_valid',
+        ),
+        # milk_logs has no farm_id; production is tenant-scoped. See app.utils.farm_time.local_date_sql.
+        db.Index(
+            'ix_milk_logs_tenant_local_date',
+            'tenant_id', db.text("(CAST(timezone('Africa/Nairobi', \"timestamp\") AS DATE))"),
         ),
     )
 

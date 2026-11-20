@@ -1,0 +1,104 @@
+# Maziwa Smart local stack: PostgreSQL, Redis, API, Celery worker and the frontend dev server.
+#
+#   docker compose up --build        # first run (builds the backend image)
+#   docker compose up                # later runs
+#   docker compose down              # stop (data is kept in named volumes)
+#
+# App:   http://localhost:5173   API: http://localhost:5000/api
+# Secrets (M-Pesa, WhatsApp, JWT) are read from backend/.env if it exists; see .env.example.
+# Ports can be changed with BACKEND_PORT, FRONTEND_PORT and DB_PORT.
+
+name: maziwa
+
+x-backend-env: &backend-env
+  APP_ENV: development
+  DATABASE_URL: postgresql://maziwa:${POSTGRES_PASSWORD:-maziwa-dev}@db:5432/maziwa
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  CORS_ALLOWED_ORIGINS: http://localhost:${FRONTEND_PORT:-5173}
+  UPLOAD_ROOT: /app/instance/uploads
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: maziwa
+      POSTGRES_USER: maziwa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-maziwa-dev}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Published on a non-standard port so it doesn't clash with a local PostgreSQL on 5432.
+    ports:
+      - "127.0.0.1:${DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maziwa -d maziwa"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: .
+    image: maziwa-backend:dev
+    env_file:
+      - path: .env
+        required: false
+    # Values here override .env, which points at localhost services.
+    environment:
+      <<: *backend-env
+      PORT: "5000"
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-5000}:5000"
+    volumes:
+      - uploads:/app/instance/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    image: maziwa-backend:dev
+    command: ["celery", "-A", "celery_worker.celery", "worker", "--loglevel=info"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend-env
+    volumes:
+      - uploads:/app/instance/uploads
+    # The backend runs migrations on start; wait for it so the worker sees the schema.
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  frontend:
+    image: node:20.19-slim
+    working_dir: /app
+    environment:
+      # The browser on your machine calls the API through the published backend port.
+      VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-5000}/api
+    command: ["sh", "-c", "npm ci --legacy-peer-deps && npx vite --host 0.0.0.0 --port 5173 --strictPort"]
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:5173"
+    volumes:
+      - ../frontend/jivu-frontend:/app
+      # Keep Linux node_modules inside the container, separate from the host's.
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      - backend
+
+volumes:
+  db-data:
+  uploads:
+  frontend-node-modules:

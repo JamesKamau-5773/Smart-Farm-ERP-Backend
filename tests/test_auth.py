@@ -140,7 +140,9 @@ class AuthTestCase(BaseTestCase):
             self.assertEqual(data['tenant_name'], 'Green Valley Holdings')
             self.assertEqual(data['farm_name'], 'Green Valley Farm')
             self.assertEqual(data['role'], Role.FARMER)
-            self.assertEqual(data['phone_number'], '254712345678')
+            self.assertEqual(data['phone_number'], '+254712345678')
+            self.assertEqual(data['auth_state'], 'ACTIVE')
+            self.assertFalse(data['account_flags']['phone_verified'])
 
     def test_login_ignores_stale_access_token_cookie(self):
         self.create_user(username='cookie_user', password='password', role=Role.FARMER)
@@ -207,7 +209,8 @@ class AuthTestCase(BaseTestCase):
                 '/api/auth/register',
                 data=json.dumps(dict(
                     farm_name='Duplicate Farm',
-                    phone_number='testuser',
+                    username='testuser',
+                    phone_number='0712999888',
                     password='StrongPass123',
                 )),
                 content_type='application/json'

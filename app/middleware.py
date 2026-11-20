@@ -61,6 +61,7 @@ def set_tenant_context():
     is not applied, and access is determined by the default RLS behavior.
     """
     g.actor_id = None
+    g.auth_method = None
     g.tenant_id = None
     g.cooperative_id = None
     g.farm_id = None
@@ -87,6 +88,7 @@ def set_tenant_context():
     farm_id = claims.get("farm_id")
 
     g.actor_id = identity
+    g.auth_method = claims.get("amr")
     g.tenant_id = tenant_id
     g.cooperative_id = tenant_id
     g.farm_id = farm_id
@@ -104,6 +106,43 @@ def set_tenant_context():
                     )
         except Exception as e:
             print(f"Error setting tenant context: {e}")
+
+
+def enforce_demo_read_only():
+    """The single enforcement point for demo sessions (see app.services.demo_access_policy).
+
+    Runs right after the tenant context is set, before any other gate or
+    endpoint, so a refused request has no side effects at all.
+    """
+    actor_id = getattr(g, 'actor_id', None)
+    if actor_id is None:
+        return None
+
+    from app.services.demo_account import DemoAccount
+    from app.services.demo_access_policy import denial_for
+
+    if not DemoAccount.is_demo_actor(actor_id):
+        return None
+
+    denial = denial_for(
+        method=request.method,
+        endpoint=request.endpoint,
+        path=request.path,
+        google_intent=_google_oauth_intent(),
+    )
+    if denial is None:
+        return None
+    return jsonify(denial.body()), denial.status
+
+
+def _google_oauth_intent():
+    if not (request.endpoint or '').startswith('auth_google.'):
+        return None
+    from flask import session
+    from app.api.auth_google import OAUTH_CONTEXT_KEY
+
+    pending = session.get(OAUTH_CONTEXT_KEY) or {}
+    return request.args.get('intent') or pending.get('intent')
 
 
 def begin_idempotent_request():
@@ -160,7 +199,7 @@ def enforce_required_password_reset():
         'auth.logout',
         'auth.status',
     }
-    if request.endpoint in allowed_endpoints:
+    if request.endpoint in allowed_endpoints or (request.endpoint or '').startswith('auth_recovery.'):
         return None
 
     from app.models.user import User
@@ -173,6 +212,43 @@ def enforce_required_password_reset():
         return jsonify({
             'code': 'PASSWORD_RESET_REQUIRED',
             'error': 'Password configuration is required before accessing this resource.',
+        }), 403
+    return None
+
+
+PHONE_VERIFICATION_ALLOWED_ENDPOINTS = {
+    'auth.me',
+    'auth.update_me',
+    'auth.logout',
+    'auth.status',
+    'auth_verification.start_phone_verification',
+    'auth_verification.phone_verification_status',
+}
+
+
+def enforce_phone_verification():
+    """Sessions started through Google stay restricted until the account has a
+    verified phone. Checked against live state so verification takes effect
+    without a new login."""
+    actor_id = getattr(g, 'actor_id', None)
+    if actor_id is None or request.method == 'OPTIONS':
+        return None
+    if request.endpoint in PHONE_VERIFICATION_ALLOWED_ENDPOINTS:
+        return None
+    if (request.endpoint or '').startswith(('auth_recovery.', 'auth_google.')):
+        return None
+
+    from app.models.user import User
+    from app.services.account_state_service import AccountStateService
+
+    try:
+        user = db.session.get(User, int(actor_id))
+    except (TypeError, ValueError):
+        user = None
+    if user and AccountStateService.requires_phone_verification(user, getattr(g, 'auth_method', None)):
+        return jsonify({
+            'code': 'PHONE_VERIFICATION_REQUIRED',
+            'error': 'Verify your phone number before accessing this resource.',
         }), 403
     return None
 

@@ -31,7 +31,8 @@ def upgrade():
     # The initial schema created a VARCHAR-backed enum, which PostgreSQL
     # represents as a check constraint. Later enum alterations can leave the
     # original check in place, so replace it explicitly.
-    op.drop_constraint('transactioncategory', 'transactions', type_='check')
+    # Conditional: a database built from these migrations may not have the original check.
+    op.execute('ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactioncategory')
     op.create_check_constraint(
         'transactioncategory',
         'transactions',
@@ -43,7 +44,8 @@ def downgrade():
     previous_categories = tuple(
         value for value in _TRANSACTION_CATEGORIES if value != 'AI_SERVICE'
     )
-    op.drop_constraint('transactioncategory', 'transactions', type_='check')
+    # Conditional: a database built from these migrations may not have the original check.
+    op.execute('ALTER TABLE transactions DROP CONSTRAINT IF EXISTS transactioncategory')
     op.create_check_constraint(
         'transactioncategory',
         'transactions',

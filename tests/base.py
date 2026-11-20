@@ -16,6 +16,9 @@ class BaseTestCase(unittest.TestCase):
         self.client = self.app.test_client()
         self.app_context = self.app.app_context()
         self.app_context.push()
+        # unittest skips tearDown when setUp raises (here or in a subclass). Without this the
+        # open session keeps its locks and the next test's drop_all() waits forever.
+        self.addCleanup(self._release_database)
         db.session.rollback()
         db.session.remove()
         db.drop_all()
@@ -73,5 +76,14 @@ class BaseTestCase(unittest.TestCase):
         db.session.rollback()
         db.session.remove()
         db.drop_all()
+        db.engine.dispose()
+        self.app_context.pop()
+        self._database_released = True
+
+    def _release_database(self):
+        if getattr(self, '_database_released', False):
+            return
+        db.session.rollback()
+        db.session.remove()
         db.engine.dispose()
         self.app_context.pop()

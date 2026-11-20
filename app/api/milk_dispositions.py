@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from flask import Blueprint, g, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required
 
@@ -55,6 +57,8 @@ def list_milk_dispositions():
             disposition_date=request.args.get('date'),
             calf_id=request.args.get('calf_id'),
         )
-        return jsonify({'items': items, 'count': len(items)}), 200
+        # The list is unpaginated, so the total covers exactly these filters (date, calf_id).
+        total_liters = round(sum(Decimal(str(item['liters'])) for item in items), 1)
+        return jsonify({'items': items, 'count': len(items), 'total_liters': float(total_liters)}), 200
     except MilkDispositionValidationError as exc:
         return jsonify({'error': str(exc)}), 400

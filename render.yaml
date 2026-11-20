@@ -5,3 +5,15 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: ./scripts/start_web.sh
     healthCheckPath: /health
+    # Same site as the frontend (www.maziwasmart.co.ke), so session and CSRF cookies work.
+    domains:
+      - api.maziwasmart.co.ke
+    envVars:
+      - key: FRONTEND_BASE_URL
+        value: https://www.maziwasmart.co.ke
+      - key: GOOGLE_REDIRECT_URI
+        value: https://api.maziwasmart.co.ke/api/auth/google/callback
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

@@ -21,6 +21,7 @@ from app.models.supply import (
     MilkLog,
 )
 from app.services.feeding_group_recipe_policy_service import FeedingGroupRecipePolicyService
+from app.utils.farm_time import farm_today
 
 
 class InsufficientStockError(ValueError):
@@ -109,7 +110,7 @@ class NutritionService:
         return rows
 
     @staticmethod
-    def _batch_consumption_pace(batch: FeedBatch, *, tenant_id: int, total_consumed: Decimal | None = None) -> dict:
+    def batch_consumption_pace(batch: FeedBatch, *, tenant_id: int, total_consumed: Decimal | None = None) -> dict:
         """Derive consumption pace only from recorded feeding events."""
         total_weight = Decimal(str(batch.total_weight or 0))
 
@@ -165,7 +166,7 @@ class NutritionService:
         if not batch:
             return jsonify({'error': 'Batch not found for this tenant.'}), 404
 
-        pace = NutritionService._batch_consumption_pace(batch, tenant_id=tenant_id)
+        pace = NutritionService.batch_consumption_pace(batch, tenant_id=tenant_id)
         return jsonify({
             'batchId': batch.id,
             'batchName': batch.batch_name,
@@ -523,8 +524,10 @@ class NutritionService:
                 consumed_on = datetime.fromisoformat(str(consumed_on_raw)).date()
             except ValueError:
                 return jsonify({'error': 'consumedOn must be a valid ISO date (YYYY-MM-DD).'}), 400
+            if consumed_on > farm_today():
+                return jsonify({'error': 'consumedOn cannot be in the future.'}), 400
         else:
-            consumed_on = datetime.now(timezone.utc).date()
+            consumed_on = farm_today()
 
         try:
             feeding_group = FeedingGroupRecipePolicyService.normalize_feeding_group(
@@ -586,7 +589,7 @@ class NutritionService:
 
             db.session.commit()
 
-            pace = NutritionService._batch_consumption_pace(
+            pace = NutritionService.batch_consumption_pace(
                 batch, tenant_id=tenant_id, total_consumed=total_consumed
             )
 
@@ -650,7 +653,7 @@ class NutritionService:
                 float((total_protein_grams / (total_weight_kg * 1000)) * 100)
                 if total_weight_kg > 0 else 0.0
             )
-            pace = NutritionService._batch_consumption_pace(batch, tenant_id=tenant_id)
+            pace = NutritionService.batch_consumption_pace(batch, tenant_id=tenant_id)
 
             results.append({
                 'batchId': batch.id,

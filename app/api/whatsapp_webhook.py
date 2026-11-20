@@ -4,9 +4,10 @@ from app.models.farm import Farm
 from app.models.user import User
 from app.repositories.chat_session_repo import ChatSessionRepository
 from app.services import whatsapp_message_service as messages
+from app.services.reverse_otp_message_handler import ReverseOtpMessageHandler
 from app.services.whatsapp_command_router import route_command
 from app.utils.decorators import verify_whatsapp_signature
-from app.utils.phone import normalize_phone
+from app.utils.phone import from_wa_id, to_wa_id
 
 whatsapp_bp = Blueprint('whatsapp', __name__, url_prefix='/api/whatsapp')
 
@@ -51,11 +52,19 @@ def receive_webhook():
 
     for message in _iter_inbound_messages(payload):
         message_id = message.get('id')
-        wa_id = normalize_phone(message.get('from', ''))
-        if not wa_id:
+        sender = from_wa_id(message.get('from', ''))
+        if not sender:
+            continue
+        wa_id = to_wa_id(sender)
+
+        # Verification codes may come from numbers not yet linked to an account.
+        otp_result = ReverseOtpMessageHandler.handle(message, sender=sender)
+        if otp_result.handled:
+            if otp_result.reply:
+                messages.send_message(wa_id, messages.build_text_message(otp_result.reply))
             continue
 
-        user = User.query.filter_by(phone_number=wa_id, is_active=True).first()
+        user = User.query.filter_by(phone_number=sender, is_active=True).first()
         if not user:
             current_app.logger.warning(f"WhatsApp message from unregistered number: {wa_id}")
             continue

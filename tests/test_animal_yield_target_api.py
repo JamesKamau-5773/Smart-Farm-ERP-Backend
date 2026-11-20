@@ -31,7 +31,7 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
             json={'username': 'testuser', 'password': 'testpass'}
         )
         if login_response.status_code == 200:
-            self.user_token = json.loads(login_response.data)['token']
+            self.user_token = json.loads(login_response.data)['access_token']
         else:
             # If token generation fails, set a placeholder
             self.user_token = 'test-token'
@@ -65,9 +65,9 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
 
         self.assertEqual(response.status_code, 201)
         data = json.loads(response.data)
-        self.assertIsNotNone(data['target_id'])
+        self.assertIsNotNone(data['id'])
         self.assertEqual(data['cow_id'], test_cow.id)
-        self.assertEqual(data['tag_number'], 'API-TEST-001')
+        self.assertEqual(data['cow_tag'], 'API-TEST-001')
         self.assertEqual(data['target_liters'], 2.5)
         self.assertEqual(data['status'], 'Active')
 
@@ -116,7 +116,9 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
         test_cow = self._create_test_cow()
         payload = {'target_liters': 2.5}
 
-        response = self.client.post(
+        # A fresh client: self.client still carries the JWT cookie from the login in setUp.
+        anonymous_client = self.app.test_client()
+        response = anonymous_client.post(
             f'/api/v1/animals/{test_cow.id}/yield-target',
             data=json.dumps(payload),
             headers={'Content-Type': 'application/json'}
@@ -188,7 +190,7 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(data['total_cows'], 3)
+        self.assertEqual(data['count'], 3)
         self.assertEqual(len(data['targets']), 3)
         self.assertTrue(all(t['status'] == 'Active' for t in data['targets']))
 
@@ -201,7 +203,7 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
 
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.data)
-        self.assertEqual(data['total_cows'], 0)
+        self.assertEqual(data['count'], 0)
         self.assertEqual(len(data['targets']), 0)
 
     def test_calculate_herd_feeding_plan_success(self):
@@ -321,7 +323,7 @@ class TestAnimalYieldTargetAPI(BaseTestCase):
             data=json.dumps({'target_liters': 2.5}),
             headers={**self.auth_headers, 'Content-Type': 'application/json'}
         )
-        target_id = json.loads(set_response.data)['target_id']
+        target_id = json.loads(set_response.data)['id']
 
         # Delete target
         delete_payload = {'target_id': target_id}

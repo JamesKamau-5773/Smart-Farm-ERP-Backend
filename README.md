@@ -8,7 +8,9 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 - **Livestock Management**: Register and track individual cows.
 - **Clinical Records**: Log veterinary visits and manage milk withdrawal periods with a `hardlock` feature.
 - **Financial Management**: Record transactions, calculate daily unit production costs, and integrate with M-Pesa for billing.
-- **Operational Logging**: Track daily milk production for each cow.
+- **Operational Logging**: Track daily milk production for each cow: who milked and who entered each record,
+  how it arrived (app, WhatsApp, import), and its change against the cow's 7-day average, using the same
+  rule that raises milk-drop alerts. Calf feedings are logged against the day's milk, with litre totals.
 - **Global Audit Trail**: Immutable logs for critical actions like financial transactions and security-sensitive changes.
 - **Centralized Error Handling**: Graceful and consistent error responses across the API.
 - **Database Backups**: Automated point-in-time backups for the PostgreSQL database using `pg_dump`.
@@ -28,6 +30,54 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 - Python 3.8+
 - Docker and Docker Compose
 - `pip` and `venv`
+
+## Quick Start with Docker
+
+Runs PostgreSQL, Redis, the API, the Celery worker and the frontend dev server together. You need Docker with Compose v2, and the frontend checked out next to this repo at `../frontend/jivu-frontend`.
+
+```bash
+cp .env.example .env          # optional: add M-Pesa / WhatsApp keys
+docker compose up --build     # first run; later just `docker compose up`
+```
+
+- App: http://localhost:5173
+- API: http://localhost:5000/api (health check: http://localhost:5000/health)
+- PostgreSQL (for `psql` or restoring dumps): `localhost:55432`, database/user `maziwa`, password `maziwa-dev`
+
+Migrations run automatically when the backend container starts. Data is kept in named volumes; `docker compose down` keeps it, `docker compose down -v` deletes it.
+
+**Ports in use?** If something else already uses a port (for example a local Vite server on 5173), pick others:
+
+```bash
+FRONTEND_PORT=5174 BACKEND_PORT=5001 docker compose up
+```
+
+**Environment.** `docker-compose.yml` sets the database, Redis, Celery and CORS settings. Everything else (JWT secrets, M-Pesa, WhatsApp) comes from `.env` if present; see `.env.example`. Secrets are never copied into the image.
+
+**Loading an existing dump** into a fresh stack:
+
+```bash
+docker compose up -d db
+docker compose exec -T db psql -U maziwa -d maziwa < full_clean_dump.sql
+docker compose up
+```
+
+**Running the tests** in the container:
+
+```bash
+docker compose exec db psql -U maziwa -d maziwa -c "CREATE DATABASE maziwa_test"
+docker compose run --rm --no-deps -e APP_ENV=testing \
+  -e TEST_DATABASE_URL=postgresql://maziwa:maziwa-dev@db:5432/maziwa_test \
+  backend python -m pytest -q tests
+```
+
+**The image on its own.** `Dockerfile` builds one image for both the web server and the worker (Python 3.13, non-root user, health check on `/health`):
+
+```bash
+docker build -t maziwa-backend .
+docker run --env-file .env -p 10000:10000 maziwa-backend                                    # web (runs migrations, then gunicorn)
+docker run --env-file .env maziwa-backend celery -A celery_worker.celery worker --loglevel=info  # worker
+```
 
 ## Getting Started
 
@@ -94,6 +144,9 @@ Apply the database schema to your database:
 flask db upgrade heads
 ```
 
+Run this again after pulling changes that add a migration. If the code is newer than the database,
+requests fail with errors such as `column milk_logs.milker_employee_id does not exist`.
+
 ### 6. Run the Application
 
 Start the Flask development server:
@@ -118,6 +171,27 @@ For an existing Render service, set its **Start Command** to:
 
 Set `DATABASE_URL` to the Render PostgreSQL **internal** connection string and
 set `APP_ENV=production`, `SECRET_KEY`, and `JWT_SECRET_KEY`. Then deploy again.
+
+
+#### Moving the Render service to Docker
+
+`render.yaml` still uses Render's Python runtime. Render services generally can't switch runtime in place, so move to the Dockerfile with a new service rather than editing the live one:
+
+1. In Render, create a new **Web Service** from this repo with **Docker** as the runtime (Dockerfile path `./Dockerfile`, health check path `/health`).
+2. Copy the environment variables from the current service (`DATABASE_URL`, `SECRET_KEY`, `JWT_SECRET_KEY`, M-Pesa, WhatsApp, `CORS_ALLOWED_ORIGINS`, `APP_ENV=production`). Render sets `PORT`; the image's start script uses it.
+3. Deploy, check `/health` and log in from the frontend against the new URL.
+4. Point the API domain (or the frontend's `VITE_API_BASE_URL`) at the new service, then retire the old one.
+5. Replace the service block in `render.yaml` with:
+
+   ```yaml
+   - type: web
+     name: smart-farm-erp-backend
+     runtime: docker
+     dockerfilePath: ./Dockerfile
+     healthCheckPath: /health
+   ```
+
+The Celery worker isn't deployed on Render today. To run background tasks there, add a **Background Worker** from the same image with the command `celery -A celery_worker.celery worker --loglevel=info` and the same environment variables (plus `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` pointing at a Redis instance).
 
 ## Running Tests
 
@@ -156,6 +230,10 @@ A high-level overview of the available API endpoints:
 
 - `POST /api/operations/cows`: Add a new cow.
 - `POST /api/operations/cows/<id>/milk`: Record milk production.
+- `GET|POST /api/production/yield`, `GET|PATCH|DELETE /api/production/yield/<id>`: Milk records. Rows carry
+  `milker_name`, `recorded_by_name`, `recorded_via`, `vs_avg_litres` and `significant_drop`; `POST` and `PATCH`
+  take an optional `milker_id` (an employee).
+- `GET|POST /api/production/milk-dispositions`: Calf feedings, with `count` and `total_liters`.
 
 - `POST /api/clinical/cows/<id>/medical`: Log a vet visit (VET only).
 - `PUT /api/clinical/cows/<id>/hardlock`: Lock/unlock a cow's milk for sale (FARMER only).

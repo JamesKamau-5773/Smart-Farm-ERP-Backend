@@ -68,6 +68,7 @@ class MilkDispositionTestCase(BaseTestCase):
         )
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(json.loads(list_response.data.decode())['count'], 1)
+        self.assertEqual(json.loads(list_response.data.decode())['total_liters'], 3.0)
 
         dashboard_response = self.client.get('/api/dashboard')
         self.assertEqual(dashboard_response.status_code, 200)

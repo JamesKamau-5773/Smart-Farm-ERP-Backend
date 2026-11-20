@@ -246,7 +246,11 @@ class FeedMixerPolicyService:
 
         rows = (
             InventoryItem.query
-            .filter(InventoryItem.tenant_id == tenant_id, InventoryItem.id.in_(unique_ids))
+            .filter(
+                InventoryItem.tenant_id == tenant_id,
+                InventoryItem.id.in_(unique_ids),
+                InventoryItem.is_active.is_(True),
+            )
             .all()
         )
         by_id = {row.id: row for row in rows}

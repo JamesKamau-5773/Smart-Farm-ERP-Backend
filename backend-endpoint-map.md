@@ -143,7 +143,8 @@ The browser payload `{ id, name, breed, dob, hasCalved }` is accepted because `i
 - `POST /api/production/yield`
 - `GET /api/production/yield/<log_id>`
 - `DELETE /api/production/yield/<log_id>`
-- `GET /api/production/summary`
+- `GET /api/production/summary` (with `period=week|month|year`: period totals, see `docs/contracts/period-totals.md`)
+- `GET /api/production/group-totals`
 - `GET /api/breeding`
 - `POST /api/breeding`
 - `PATCH /api/breeding/<log_id>`
@@ -218,7 +219,9 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `GET /api/finance/customers`
 - `POST /api/finance/customers`
 - `GET /api/finance/customers/<customer_id>`
-- `GET /api/finance/ledger`
+- `GET /api/finance/ledger` (filters: `type`, `category`, `search`, `date_from`, `date_to`; each item carries `bucket`)
+- `GET /api/ledger/summary` (also `/api/finance/ledger/summary`)
+- `GET /api/ledger/group-totals` (also `/api/finance/ledger/group-totals`)
 - `POST /api/finance/ledger`
 - `POST /api/finance/transactions/<transaction_id>/receipt`
 - `GET /api/finance/receipts/<receipt_id>`
@@ -231,7 +234,7 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `PATCH /api/finance/buyers/<buyer_id>`
 - `POST /api/finance/buyers/<buyer_id>/invoice/generate`
 - `POST /api/finance/invoices/<invoice_id>/send`
-- `GET /api/finance/statements/<token>`
+- `GET /statements/<token>`: disabled (BR-016). Always `404 { "code": "STATEMENT_LINK_INVALID" }` until opaque statement links exist.
 - `POST /api/finance/billing/stk-push`
 - `POST /api/finance/mpesa/callback`
 
@@ -367,6 +370,32 @@ Yield edit request (`PATCH /api/production/yield/<log_id>`):
 	"milkingDate": "2026-07-03T16:30:00+00:00"
 }
 ```
+
+Sessions are `Morning`, `Midday` or `Evening` only. Input is matched case-insensitively and stored and
+returned in that spelling; anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "session": "invalid" } }`
+on `POST` and `PATCH`.
+
+Yield list (`GET /api/production/yield`):
+
+- Filters: `status` (`VERIFIED` | `RECORDED` | `FLAGGED` | `ISOLATED`, or legacy `anomaly`), `session`, `search`,
+  `date_from`, `date_to`. The same filters apply to `GET /api/production/summary` and
+  `GET /api/production/group-totals`.
+- `summary`: `total_records`, `verified_count`, `recorded_count`, `flagged_count`, `isolated_count`, `total_volume`.
+  Aliases: `verifiedEntries` = verified; `pending_count` / `pendingEntries` = recorded, not yet verified;
+  `flaggedEntries`; `totalVolume`.
+- Each row always has `session`, `milkingDate`, `status` and `recorded_via` (`app` | `whatsapp` | `import`).
+- People: `milker_id` / `milker_name` is the employee who milked, when one was named; with no
+  `milker_id`, `milker_name` is the person who entered the record. `recorded_by_name` is who entered it.
+  `POST` and `PATCH` take an optional `milker_id` (an employee id on this farm; `null` on `PATCH` clears
+  it); anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "milker_id": "invalid" } }`.
+- Against the cow's average (BR-025): `avg_litres` is the cow's average per record over the 7 days
+  before this one, across all sessions (the milk-drop rule's baseline); `vs_avg_litres` is this record's
+  litres minus it (1 dp). Both null when the cow has no record in that window. `significant_drop` is the
+  drop rule's verdict when the record was entered (more than 15% below that average), the same verdict
+  that set `FLAGGED` and raised the milk-drop alert.
+
+Calf feedings (`GET /api/production/milk-dispositions?date=&calf_id=`): `items`, `count` and
+`total_liters` (sum of `liters` for the same filters, 1 dp).
 
 Yield detail response (`GET /api/production/yield/<log_id>`) includes:
 

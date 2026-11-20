@@ -48,8 +48,12 @@ class CowStatusService:
         )
 
         if latest_cycle:
-            # Has calved before. Is she currently milking or dry?
-            return CowStatus.LACTATING if latest_cycle.end_date is None else CowStatus.DRY
+            # Has calved before. Is she currently milking or dry? LactationCycle has no end date:
+            # a cycle ends when it is closed (is_active False) or its drying-off date has passed.
+            dried_off = latest_cycle.is_active is False or (
+                latest_cycle.drying_date is not None and latest_cycle.drying_date <= date.today()
+            )
+            return CowStatus.DRY if dried_off else CowStatus.LACTATING
 
         # 4. No calving history, so she's a Calf or Heifer based on age.
         if not cow.date_of_birth:

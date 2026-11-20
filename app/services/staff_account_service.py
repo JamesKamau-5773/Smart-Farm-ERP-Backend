@@ -6,6 +6,7 @@ from app import db
 from app.models.user import Role, User
 from app.repositories.user_repo import UserRepository
 from app.services.auth_service import AuthService
+from app.utils.phone import phone_identifier, phone_username
 
 
 class StaffAccountService:
@@ -20,7 +21,7 @@ class StaffAccountService:
     @staticmethod
     def create_linked_account(employee, data: dict, *, role: str, password: str, is_active: bool, requires_password_reset: bool):
         phone_number = AuthService._normalize_phone_number(data.get('phone_number') or employee.phone_number)
-        username = (data.get('username') or phone_number).strip()
+        username = (data.get('username') or '').strip() or (phone_username(phone_number) if phone_number else '')
         email = (data.get('email') or '').strip() or None
         if not phone_number:
             raise ValueError('phone_number is required on the employee or onboarding request.')
@@ -29,7 +30,7 @@ class StaffAccountService:
 
         account = User(
             tenant_id=employee.tenant_id,
-            identifier=f'phone_{phone_number}',
+            identifier=phone_identifier(phone_number),
             username=username,
             name=employee.full_name,
             email=email,
