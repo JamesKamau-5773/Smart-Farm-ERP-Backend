@@ -406,6 +406,10 @@ Yield list (`GET /api/production/yield`):
   `milker_id`, `milker_name` is the person who entered the record. `recorded_by_name` is who entered it.
   `POST` and `PATCH` take an optional `milker_id` (an employee id on this farm; `null` on `PATCH` clears
   it); anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "milker_id": "invalid" } }`.
+- Milker picker: `GET /api/production/milkers` lists the farm's current employees (on leave included,
+  offboarded and inactive left out) as `{id, name, job_title, status, is_me}`, sorted by name. Open to every
+  role that records milk (the staff list `GET /api/hr/employees` is owners only), so it carries no pay, ID or
+  contact details. `is_me` marks the caller's own employee record, the natural default.
 - Against the cow's average (BR-025): `avg_litres` is the cow's average for the **same session** over
   the 7 days before this record (the milk-drop rule's baseline); `vs_avg_litres` is this record's litres
   minus it (1 dp). Both null when the cow has no record of that session in the window.

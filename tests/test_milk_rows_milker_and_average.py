@@ -71,6 +71,56 @@ class MilkRowPeopleTestCase(BaseTestCase):
         self.assertEqual(patch({'milker_id': 'x'}).status_code, 400)
 
 
+class MilkersListTestCase(BaseTestCase):
+    """The milker picker's list, open to the people who record milk (the staff list is owners only)."""
+
+    def setUp(self):
+        super().setUp()
+        self.herdsman = self.create_user(username='herdsman', password='password', role=Role.FARM_HAND)
+        self.cow = Cow(tag_number='COW001', date_of_birth=date(2022, 1, 1))
+        hired = date(2026, 1, 1)
+        self.me = Employee(tenant_id=self.tenant.id, user_id=self.herdsman.id, full_name='Kamau',
+                           role='Herdsman', hire_date=hired, base_salary=12000)
+        self.on_leave = Employee(tenant_id=self.tenant.id, full_name='Achieng', role='Milker', hire_date=hired,
+                                 base_salary=9000, status='ON_LEAVE')
+        self.left = Employee(tenant_id=self.tenant.id, full_name='Barasa', hire_date=hired, base_salary=1,
+                             is_active=False, status='INACTIVE', offboarded_at=datetime.now(timezone.utc))
+        other = Tenant(name='Other farm')
+        db.session.add_all([self.cow, self.me, self.on_leave, self.left, other])
+        db.session.flush()
+        db.session.add(Employee(tenant_id=other.id, full_name='Stranger', hire_date=hired, base_salary=1))
+        db.session.commit()
+        self.client.post('/api/auth/login', data=json.dumps({'username': 'herdsman', 'password': 'password'}),
+                         content_type='application/json')
+
+    def test_herdsman_sees_current_staff_names_only(self):
+        response = self.client.get('/api/production/milkers')
+        self.assertEqual(response.status_code, 200, response.get_json())
+        items = response.get_json()['items']
+        self.assertEqual([item['name'] for item in items], ['Achieng', 'Kamau'])
+        self.assertEqual({key for item in items for key in item}, {'id', 'name', 'job_title', 'status', 'is_me'})
+        self.assertEqual([item['is_me'] for item in items], [False, True])
+        self.assertEqual(items[0]['status'], 'ON_LEAVE')
+        # The full staff list stays with the owner.
+        self.assertEqual(self.client.get('/api/hr/employees').status_code, 403)
+
+    def test_herdsman_can_name_the_milker(self):
+        response = self.client.post('/api/production/yield', data=json.dumps(
+            {'cow_id': self.cow.id, 'amount': 10, 'session': 'Morning', 'milker_id': self.on_leave.id}),
+            content_type='application/json')
+        self.assertEqual(response.status_code, 201, response.get_json())
+        row = self.client.get('/api/production/yield').get_json()['items'][0]
+        self.assertEqual(row['milker_name'], 'Achieng')
+        self.assertEqual(row['recorded_by_name'], 'herdsman')
+
+    def test_customers_cannot_list_milkers(self):
+        self.create_user(username='buyer', password='password', role=Role.CUSTOMER)
+        self.client.post('/api/auth/logout')
+        self.client.post('/api/auth/login', data=json.dumps({'username': 'buyer', 'password': 'password'}),
+                         content_type='application/json')
+        self.assertEqual(self.client.get('/api/production/milkers').status_code, 403)
+
+
 class _MilkAverageBase(BaseTestCase):
 
     def setUp(self):
