@@ -101,6 +101,13 @@ class Config:
 
     # Uploaded file storage (certificates, animal photos, etc.)
     UPLOAD_ROOT = os.environ.get('UPLOAD_ROOT', os.path.join(_BACKEND_ROOT, 'instance', 'uploads'))
+    # Where uploads are kept (app/services/media_storage.py): 'cloudinary' when CLOUDINARY_URL
+    # (cloudinary://API_KEY:API_SECRET@CLOUD_NAME) is set, as on Render, whose own disk is wiped on
+    # every deploy; 'local' (UPLOAD_ROOT) otherwise. MEDIA_STORAGE overrides the choice.
+    CLOUDINARY_URL = os.environ.get('CLOUDINARY_URL') or None
+    MEDIA_STORAGE = (os.environ.get('MEDIA_STORAGE') or ('cloudinary' if CLOUDINARY_URL else 'local')).strip().lower()
+    # Top-level Cloudinary folder, so this app's files stay apart from anything else in the account.
+    CLOUDINARY_FOLDER = os.environ.get('CLOUDINARY_FOLDER', 'maziwa')
 
     # Public demo account ("Try the live demo"). Off unless explicitly enabled;
     # when off, POST /api/auth/demo returns 404.
@@ -159,3 +166,6 @@ class TestConfig(Config):
     FRONTEND_BASE_URL = 'https://app.example.test'
     # Isolated from the real instance/uploads tree so test runs never write/delete real files.
     UPLOAD_ROOT = os.environ.get('TEST_UPLOAD_ROOT', tempfile.mkdtemp(prefix='jivu_test_uploads_'))
+    # Tests never reach Cloudinary; the Cloudinary path is tested with the SDK mocked.
+    CLOUDINARY_URL = None
+    MEDIA_STORAGE = 'local'

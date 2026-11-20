@@ -4,7 +4,7 @@ import hashlib
 import io
 import os
 
-from flask import Blueprint, current_app, g, request, jsonify, render_template, send_file
+from flask import Blueprint, current_app, g, request, jsonify, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import IntegrityError
@@ -34,7 +34,6 @@ from app.utils.error_envelope import register_error_envelope
 from app.utils import get_tenant_id_from_context
 from app.utils.decorators import role_required
 from app.utils.jwt_payload import parse_public_int_id
-from weasyprint import HTML
 
 
 finance_bp = Blueprint('finance', __name__)
@@ -707,8 +706,11 @@ def upload_transaction_attachment(transaction_id):
 @jwt_required()
 @role_required(Role.FARMER, Role.FARM_HAND)
 def download_transaction_attachment(transaction_id, attachment_id):
-    attachment, path = TransactionAttachmentService.open(get_tenant_id_from_context(), transaction_id, attachment_id)
-    response = send_file(path, mimetype=attachment.content_type, download_name=attachment.original_filename or os.path.basename(path))
+    attachment, content = TransactionAttachmentService.open(get_tenant_id_from_context(), transaction_id, attachment_id)
+    response = send_file(
+        io.BytesIO(content), mimetype=attachment.content_type,
+        download_name=attachment.original_filename or os.path.basename(attachment.stored_path),
+    )
     response.headers['Cache-Control'] = 'private, no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     return response

@@ -17,3 +17,7 @@ services:
         sync: false
       - key: GOOGLE_CLIENT_SECRET
         sync: false
+      # Uploaded images and receipt photos (app/services/media_storage.py). Render's own disk is
+      # wiped on every deploy, so files must live elsewhere. cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+      - key: CLOUDINARY_URL
+        sync: false
