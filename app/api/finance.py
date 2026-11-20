@@ -764,8 +764,8 @@ def download_receipt_pdf(receipt_id):
     if not receipt:
         return jsonify({'error': 'Receipt not found.'}), 404
     if receipt.document_content is None:
-        payload = ReceiptService.serialize(receipt)
-        receipt.document_content = HTML(string=render_template('pdf/receipt.html', receipt=payload)).write_pdf()
+        # Same renderer (and logo) as receipts issued with their PDF.
+        receipt.document_content = ReceiptService._render_document(receipt)
         receipt.document_sha256 = hashlib.sha256(receipt.document_content).hexdigest()
     ReceiptService.record_access(receipt, 'DOWNLOADED', int(get_jwt_identity()), request.remote_addr)
     db.session.commit()

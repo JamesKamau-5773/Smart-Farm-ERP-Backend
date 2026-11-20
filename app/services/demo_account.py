@@ -20,6 +20,8 @@ class DemoAccount:
     TENANT_NAME = 'Silato Farm'
     FARM_NAME = 'Silato Farm'
     FARM_LOCATION = 'Nakuru County'
+    # Shown on the demo's receipts and farm profile; obviously not a real registration.
+    REGISTRATION_NUMBER = 'DEMO-SILATO-0001'
 
     # Global-unique columns are namespaced so they can never collide with a real account.
     OWNER_USERNAME = 'demo.silato.owner'

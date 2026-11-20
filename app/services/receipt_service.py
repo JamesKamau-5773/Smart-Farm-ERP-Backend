@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+from functools import lru_cache
+from pathlib import Path
 from datetime import datetime, timezone
 
 from flask import render_template
@@ -19,11 +22,40 @@ from app.models.finance import (
 )
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.utils.farm_time import farm_timezone
 from weasyprint import HTML
 
 
+_LOGO_PATH = Path(__file__).resolve().parent.parent / 'static' / 'brand' / 'logo-horizontal.svg'
+
+
+@lru_cache(maxsize=1)
+def _logo_data_uri() -> str | None:
+    """The horizontal brand logo, embedded so rendering never fetches a URL (BR-031)."""
+    try:
+        return 'data:image/svg+xml;base64,' + base64.b64encode(_LOGO_PATH.read_bytes()).decode('ascii')
+    except OSError:
+        return None
+
+
+def _local_display(value) -> str | None:
+    """A timestamp in the farm's time zone, as people read it: "22 Oct 2026, 5:58 PM"."""
+    if not value:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    local = value.astimezone(farm_timezone())
+    return local.strftime('%d %b %Y, %I:%M %p').replace(', 0', ', ')
+
+
 class ReceiptService:
-    TEMPLATE_VERSION = '2'
+    # 3: the layout of the app's receipt preview, with the brand logo and farm-local times.
+    TEMPLATE_VERSION = '3'
     CURRENCY = 'KES'
 
     @staticmethod
@@ -76,7 +108,7 @@ class ReceiptService:
     @classmethod
     def _render_document(cls, receipt: Receipt) -> bytes:
         return HTML(
-            string=render_template('pdf/receipt.html', receipt=cls.serialize(receipt))
+            string=render_template('pdf/receipt.html', receipt=cls.serialize(receipt), logo_src=_logo_data_uri())
         ).write_pdf()
 
     @classmethod
@@ -86,7 +118,13 @@ class ReceiptService:
         issued_by: int | None = None,
         farm_id: int | None = None,
         ip_address: str | None = None,
+        issued_at: datetime | None = None,
+        render_document: bool = True,
     ) -> Receipt:
+        """Issue the receipt for a posted payment or revenue. ``issued_at`` defaults to now; the demo
+        seed passes the payment's own time so its receipts read as issued when the money came in.
+        ``render_document=False`` leaves the PDF to be made on first download (the demo, which
+        can't download, skips rendering dozens of PDFs each morning)."""
         if transaction.id is None:
             db.session.flush()
 
@@ -96,7 +134,7 @@ class ReceiptService:
         if not cls.is_eligible(locked_transaction):
             raise ValueError('Receipts require a positive posted payment or revenue transaction.')
 
-        issued_at = datetime.now(timezone.utc)
+        issued_at = issued_at or datetime.now(timezone.utc)
         farm = cls._resolve_farm(locked_transaction, farm_id)
         if locked_transaction.farm_id is None:
             locked_transaction.farm_id = farm.id
@@ -140,9 +178,11 @@ class ReceiptService:
             currency=cls.CURRENCY,
             template_version=cls.TEMPLATE_VERSION,
         )
-        document = cls._render_document(receipt)
-        receipt.document_content = document
-        receipt.document_sha256 = hashlib.sha256(document).hexdigest()
+        if render_document:
+            document = cls._render_document(receipt)
+            receipt.document_content = document
+            receipt.document_sha256 = hashlib.sha256(document).hexdigest()
+        # Otherwise the PDF is made on its first download (finance.download_receipt_pdf).
         db.session.add(receipt)
         db.session.flush()
         cls._audit(receipt, 'ISSUED', issued_by, ip_address, {'document_sha256': receipt.document_sha256})
@@ -222,6 +262,8 @@ class ReceiptService:
             'issued_by': receipt.issued_by,
             'issued_at_display': receipt.issued_at.astimezone(timezone.utc).strftime('%d %b %Y, %I:%M %p UTC'),
             'status': receipt.status,
+            'issued_at_local_display': _local_display(receipt.issued_at),
+            'transaction_date_display': _local_display((receipt.snapshot or {}).get('transaction_date')),
             'currency': receipt.currency,
             'template_version': receipt.template_version,
             'document_sha256': receipt.document_sha256,

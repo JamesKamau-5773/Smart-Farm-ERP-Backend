@@ -23,6 +23,8 @@ from sqlalchemy import or_, select
 from app import db
 from app.models.farm import Farm
 from app.models.finance import (
+    AnimalCostAllocation,
+    AnimalCostType,
     Buyer,
     CostClass,
     Customer,
@@ -34,8 +36,10 @@ from app.models.finance import (
     TransactionStatus,
     TransactionType,
 )
-from app.models.hr import Employee, Payroll, PayrollStatus
+from app.models.genetics import GeneticProfile, GeneticTraitDefinition, GeneticTraitScore
+from app.models.hr import Employee, Payroll, PayrollRun, PayrollRunStatus, PayrollStatus
 from app.models.livestock import (
+    AnimalTimelineEvent,
     AnimalYieldTarget,
     BreedStatus,
     BreedingLog,
@@ -52,13 +56,19 @@ from app.models.livestock import (
     VetVisit,
 )
 from app.models.supply import (
+    BatchIngredient,
+    FarmMeasurementUnit,
+    FeedBatch,
+    FeedBatchConsumptionEvent,
     FeedingGroupProfile,
     FeedRecipe,
+    Ingredient,
     InventoryItem,
     InventoryTransaction,
     ItemCategory,
     MilkDisposition,
     MilkDispositionType,
+    MilkDropAlert,
     MilkLog,
     MilkSession,
     RecipeIngredient,
@@ -68,6 +78,8 @@ from app.models.user import Role, User
 from app.services.demo_account import DemoAccount
 from app.services.feed_mixer_policy_service import FeedMixerPolicyService
 from app.services.page_access import PAGE_ACCESS
+from app.services.payroll_run_builder import PayrollRunBuilder
+from app.services.receipt_service import ReceiptService
 from app.utils.farm_time import farm_timezone, farm_today
 
 HISTORY_DAYS = 75
@@ -118,6 +130,8 @@ class DemoAccountProvisioner:
             db.session.add(tenant)
             db.session.flush()
 
+        if not tenant.registration_number:
+            tenant.registration_number = DemoAccount.REGISTRATION_NUMBER
         farm = DemoAccount.farm(tenant)
         if farm is None:
             farm = Farm(tenant_id=tenant.id, name=DemoAccount.FARM_NAME, is_active=True)
@@ -211,17 +225,17 @@ class _CowSpec:
 _HERD: List[_CowSpec] = [
     _CowSpec('SF-001', 'Malkia', BreedStatus.PEDIGREE, 2350, 'lactating', 80, 7.6, 4, 'pending', 14),
     _CowSpec('SF-002', 'Neema', BreedStatus.APPENDIX, 1900, 'lactating', 118, 7.0, 3, 'pregnant', 52),
-    _CowSpec('SF-003', 'Baraka', BreedStatus.INTERMEDIATE, 1650, 'lactating', 35, 6.4, 2, 'heat'),
+    _CowSpec('SF-003', 'Baraka', BreedStatus.INTERMEDIATE, 1650, 'lactating', 35, 6.4, 2, 'heat', dam_tag='SF-004'),
     _CowSpec('SF-004', 'Zawadi', BreedStatus.PEDIGREE, 2700, 'lactating', 190, 6.8, 5, 'pregnant', 105),
-    _CowSpec('SF-005', 'Faraja', BreedStatus.APPENDIX, 1500, 'lactating', 88, 5.9, 2, 'failed', 40),
+    _CowSpec('SF-005', 'Faraja', BreedStatus.APPENDIX, 1500, 'lactating', 88, 5.9, 2, 'failed', 40, dam_tag='SF-010'),
     _CowSpec('SF-006', 'Imani', BreedStatus.INTERMEDIATE, 2100, 'lactating', 150, 6.2, 3, 'pregnant', 70),
     _CowSpec('SF-007', 'Rehema', BreedStatus.FOUNDATION, 1800, 'lactating', 230, 5.4, 3, 'pregnant', 140),
-    _CowSpec('SF-008', 'Tumaini', BreedStatus.APPENDIX, 1010, 'lactating', 20, 6.0, 1),
+    _CowSpec('SF-008', 'Tumaini', BreedStatus.APPENDIX, 1010, 'lactating', 20, 6.0, 1, dam_tag='SF-001'),
     _CowSpec('SF-009', 'Upendo', BreedStatus.INTERMEDIATE, 2500, 'lactating', 260, 5.0, 4, 'pregnant', 180),
     _CowSpec('SF-010', 'Amani', BreedStatus.PEDIGREE, 2900, 'dry', 330, 7.0, 5, 'pregnant', 245),
     _CowSpec('SF-011', 'Furaha', BreedStatus.APPENDIX, 2000, 'dry', 345, 6.5, 3, 'pregnant', 255),
-    _CowSpec('SF-012', 'Nuru', BreedStatus.INTERMEDIATE, 610, 'heifer', breeding='pending', bred_days_ago=9),
-    _CowSpec('SF-013', 'Pendo', BreedStatus.APPENDIX, 560, 'heifer', breeding='heat'),
+    _CowSpec('SF-012', 'Nuru', BreedStatus.INTERMEDIATE, 610, 'heifer', breeding='pending', bred_days_ago=9, dam_tag='SF-002'),
+    _CowSpec('SF-013', 'Pendo', BreedStatus.APPENDIX, 560, 'heifer', breeding='heat', dam_tag='SF-006'),
     _CowSpec('SF-014', 'Tamu', BreedStatus.PEDIGREE, 80, 'calf', dam_tag='SF-001'),
     _CowSpec('SF-015', 'Shiru', BreedStatus.INTERMEDIATE, 150, 'calf', dam_tag='SF-006'),
 ]
@@ -233,6 +247,21 @@ _DRY_OFF_AFTER_DAYS = 290
 _TREATED_TAG = 'SF-005'
 _TREATED_DAYS_AGO = 2
 _WITHDRAWAL_DAYS = 4
+
+# Projected milk-volume breeding values (litres/day above the breed base). Daughters of the
+# farm's AI sires score above their dams, which is what the genetic progress chart shows.
+_MILK_VOLUME_PTA = {
+    'SF-001': 1.10, 'SF-002': 0.80, 'SF-003': 1.30, 'SF-004': 0.90, 'SF-005': 1.00, 'SF-006': 0.70,
+    'SF-007': 0.40, 'SF-008': 1.60, 'SF-009': 0.50, 'SF-010': 0.60, 'SF-011': 0.70, 'SF-012': 1.50,
+    'SF-013': 1.40, 'SF-014': 1.90, 'SF-015': 1.60,
+}
+
+# Yield drops the farm was alerted to: (tag, days ago) -> share of the usual morning yield, status,
+# notes. Faraja's drop is how her mastitis was found; Upendo's is this morning's, not yet checked.
+_MILK_DROPS = {
+    (_TREATED_TAG, _TREATED_DAYS_AGO): (0.60, 'INVESTIGATING', 'Hard, warm front-left quarter. Vet called; mastitis treatment started.'),
+    ('SF-009', 0): (0.78, 'OPEN', None),
+}
 
 _SIRES = [
     ('Ridgeview Titan', 'RVT-2291', 'Friesian'),
@@ -252,6 +281,8 @@ class DemoFarmGenerator:
         self.cows: Dict[str, Cow] = {}
         self.daily_saleable: Dict[date, Decimal] = {}
         self.counts: Dict[str, int] = {}
+        self.items: Dict[str, InventoryItem] = {}
+        self.recipes: Dict[str, FeedRecipe] = {}
 
     # -- helpers ----------------------------------------------------------
     def _day(self, days_ago: int) -> date:
@@ -266,6 +297,14 @@ class DemoFarmGenerator:
             key = type(row).__tablename__
             self.counts[key] = self.counts.get(key, 0) + 1
 
+    def _event(self, cow: Cow, event_type: str, title: str, when, *, description: Optional[str] = None,
+               data: Optional[dict] = None, by: Optional[int] = None) -> None:
+        """One entry on a cow's timeline, shaped like the ones the services write."""
+        stamp = when if isinstance(when, datetime) else self._at(when, 9, 0)
+        self._add(AnimalTimelineEvent(tenant_id=self.t, cow_id=cow.id, event_type=event_type, title=title,
+                                      description=description, event_date=stamp, event_data=data or {},
+                                      created_by=by or self.a.owner.id))
+
     def _history(self):
         for offset in range(HISTORY_DAYS - 1, -1, -1):
             yield self._day(offset)
@@ -273,13 +312,16 @@ class DemoFarmGenerator:
     # -- run ----------------------------------------------------------------
     def generate(self) -> Dict[str, int]:
         self._herd()
+        self._genetics()
         self._breeding()
         self._health()
         self._milk()
         self._milk_usage_and_sales()
         self._inventory_and_feed()
+        self._feed_batches()
         self._staff_and_tasks()
         self._expenses_and_income()
+        self._receipts()
         return self.counts
 
     # -- herd ----------------------------------------------------------------
@@ -310,10 +352,22 @@ class DemoFarmGenerator:
         for spec in _HERD:
             cow = self.cows[spec.tag]
             if spec.dam_tag:
-                cow.dam_id = self.cows[spec.dam_tag].id
+                dam = self.cows[spec.dam_tag]
+                cow.dam_id = dam.id
+                self._event(cow, 'birth', 'Born / Registered', self._at(cow.date_of_birth, 5, 40),
+                            description=f'Born to dam {dam.tag_number} ({dam.name}). Delivery: Live birth.',
+                            data={'dam_id': dam.id, 'dam_tag': dam.tag_number, 'dam_name': dam.name},
+                            by=self.a.herdsman.id)
             if spec.calved_days_ago is None:
                 continue
             calved = self._day(spec.calved_days_ago)
+            calf = next((self.cows[c.tag] for c in _HERD
+                         if c.dam_tag == spec.tag and c.age_days == spec.calved_days_ago), None)
+            self._event(cow, 'calving', f'Calved - {"Female" if calf else "Calf"} (lactation {spec.lactation_number})',
+                        self._at(calved, 5, 40), description='Delivery outcome: Live birth. Calving ease: Unassisted.',
+                        data={'calf_id': calf.id if calf else None, 'calf_tag': calf.tag_number if calf else None,
+                              'calf_name': calf.name if calf else None, 'lactation_number': spec.lactation_number},
+                        by=self.a.herdsman.id)
             dry = spec.stage == 'dry'
             self._add(LactationCycle(
                 cow_id=cow.id,
@@ -322,6 +376,25 @@ class DemoFarmGenerator:
                 drying_date=self._day(spec.calved_days_ago - _DRY_OFF_AFTER_DAYS) if dry else None,
                 is_active=not dry,
             ))
+
+    # -- genetics --------------------------------------------------------------
+    def _genetics(self) -> None:
+        """A projected milk-volume score per cow (Breeding: herd genetic progress)."""
+        trait = GeneticTraitDefinition.query.filter_by(name='milk_volume').first()
+        if trait is None:  # a shared lookup row, the same one real farms score against
+            trait = GeneticTraitDefinition(name='milk_volume', display_name='Milk Volume', category='Production',
+                                           unit='liters/day')
+            db.session.add(trait)
+            db.session.flush()
+        for spec in _HERD:
+            profile = GeneticProfile(cow_id=self.cows[spec.tag].id, tenant_id=self.t,
+                                     source=GeneticProfile.SOURCE_PROJECTED)
+            self._add(profile)
+            db.session.flush()
+            self._add(GeneticTraitScore(profile_id=profile.id, trait_definition_id=trait.id,
+                                        value=Decimal(str(_MILK_VOLUME_PTA[spec.tag])),
+                                        reliability=70 if spec.stage in ('lactating', 'dry') else 45,
+                                        scored_source=GeneticTraitScore.SCORED_SOURCE_SYSTEM))
 
     # -- breeding --------------------------------------------------------------
     def _breeding(self) -> None:
@@ -350,18 +423,31 @@ class DemoFarmGenerator:
                 self._add(log)
                 db.session.flush()
                 observed = self._at(served - timedelta(days=1), 17, 15)
-                self._add(HeatObservation(
+                self._heat(cow, HeatObservation(
                     tenant_id=self.t, cow_id=cow.id, observed_at=observed, intensity='HIGH',
                     signs=['standing to be mounted', 'clear mucus', 'restless'],
                     next_window_start=served + timedelta(days=18), next_window_end=served + timedelta(days=24),
                     breeding_log_id=log.id, created_by=self.a.herdsman.id,
                 ))
+                calving_due = served + timedelta(days=283)
+                self._event(cow, 'breeding', f'Inseminated with {straw.bull_name}', self._at(served, 9, 30),
+                            description=f'Status: {status} | Expected calving: {calving_due.isoformat()}',
+                            data={'breeding_log_id': log.id, 'provided_by': 'FARM', 'status': status,
+                                  'expected_calving_date': calving_due.isoformat(),
+                                  'pregnancy_check_date': (served + timedelta(days=35)).isoformat()})
                 if spec.breeding == 'pregnant':
                     cow.pregnancy_status = 'Pregnant'
-                    cow.due_date = served + timedelta(days=283)
+                    cow.due_date = calving_due
+                    if spec.bred_days_ago >= 35:
+                        self._event(cow, 'breeding_status_update', 'Breeding status changed to Pregnant',
+                                    self._at(served + timedelta(days=35), 10, 0),
+                                    data={'breeding_log_id': log.id, 'status': 'Pregnant'}, by=self.a.vet.id)
                 elif spec.breeding == 'failed':
+                    self._event(cow, 'breeding_status_update', 'Insemination unsuccessful',
+                                self._at(self._day(2), 6, 45), description='Returned to heat after the service.',
+                                data={'breeding_log_id': log.id, 'status': 'Failed'}, by=self.a.herdsman.id)
                     # Returned to heat after the failed service; due for a repeat.
-                    self._add(HeatObservation(
+                    self._heat(cow, HeatObservation(
                         tenant_id=self.t, cow_id=cow.id, observed_at=self._at(self._day(2), 6, 40),
                         intensity='MEDIUM', signs=['mounting others', 'bellowing'],
                         next_window_start=self._day(2 - 18), next_window_end=self._day(2 - 24),
@@ -369,13 +455,23 @@ class DemoFarmGenerator:
                     ))
             elif spec.breeding == 'heat':
                 seen = self.rng.randint(0, 1)
-                self._add(HeatObservation(
+                self._heat(cow, HeatObservation(
                     tenant_id=self.t, cow_id=cow.id, observed_at=self._at(self._day(seen), 6, 15),
                     intensity=self.rng.choice(['MEDIUM', 'HIGH']), signs=['standing heat', 'swollen vulva'],
                     notes='Serve within 12 hours.',
                     next_window_start=self._day(seen - 18), next_window_end=self._day(seen - 24),
                     created_by=self.a.herdsman.id,
                 ))
+
+    def _heat(self, cow: Cow, observation: HeatObservation) -> None:
+        self._add(observation)
+        db.session.flush()
+        self._event(cow, 'heat_observation', f'Heat observed ({observation.intensity.lower()})',
+                    observation.observed_at, description=observation.notes,
+                    data={'heat_observation_id': observation.id, 'signs': observation.signs,
+                          'next_window_start': observation.next_window_start.isoformat(),
+                          'next_window_end': observation.next_window_end.isoformat()},
+                    by=observation.created_by)
 
     # -- health --------------------------------------------------------------
     def _health(self) -> None:
@@ -392,6 +488,9 @@ class DemoFarmGenerator:
         ]
         for tag, days_ago, reason, diagnosis, severity, meds in visits:
             follow_up = tag == _TREATED_TAG
+            self._event(self.cows[tag], 'medical', reason, self._at(self._day(days_ago), 10, 0), description=diagnosis,
+                        data={'medications': meds or None, 'follow_up_required': follow_up,
+                              'follow_up_date': self._day(-3).isoformat() if follow_up else None}, by=vet)
             self._add(VetVisit(
                 tenant_id=self.t, animal_id=self.cows[tag].id, vet_id=vet, visit_date=self._day(days_ago),
                 reason_for_visit=reason, diagnosis=diagnosis, medications=meds or None, severity=severity,
@@ -412,6 +511,8 @@ class DemoFarmGenerator:
                           visit_date=self._at(self._day(60), 9, 0), diagnosis='Routine deworming',
                           medication='Albendazole 10%', withdrawal_days_recommended=3),
         )
+        self._event(self.cows['SF-002'], 'medical', 'Routine deworming', self._at(self._day(60), 9, 0),
+                    data={'medication': 'Albendazole 10%', 'withdrawal_days_recommended': 3}, by=vet)
         for days_ago, tag, result in [(1, _TREATED_TAG, MilkTestResult.FAIL), (9, 'SF-003', MilkTestResult.PASS),
                                       (9, 'SF-008', MilkTestResult.PASS), (16, 'SF-001', MilkTestResult.PASS)]:
             self._add(MilkTest(tenant_id=self.t, cow_id=self.cows[tag].id, tested_at=self._at(self._day(days_ago), 7, 0),
@@ -452,16 +553,31 @@ class DemoFarmGenerator:
                 if day == self.today:
                     sessions = sessions[:1]  # today's evening milking hasn't happened yet
                 for session, share, hour, minute in sessions:
-                    litres = _money(total * share)
+                    usual = _money(total * share)
+                    drop = _MILK_DROPS.get((spec.tag, (self.today - day).days)) if session == MilkSession.MORNING else None
+                    litres = _money(usual * Decimal(str(drop[0]))) if drop else usual
+                    status = MilkLog.STATUS_ISOLATED if withheld else (
+                        MilkLog.STATUS_FLAGGED if drop else MilkLog.STATUS_VERIFIED)
                     self._add(MilkLog(
                         tenant_id=self.t, cow_id=self.cows[spec.tag].id, amount_liters=litres, session=session,
                         timestamp=self._at(day, hour, minute), recorded_by=self.a.herdsman.id,
                         butterfat_pct=_money(self.rng.uniform(3.4, 4.2)),
-                        status=MilkLog.STATUS_ISOLATED if withheld else MilkLog.STATUS_VERIFIED,
+                        status=status, anomaly_flag=bool(drop),
                         is_saleable=not withheld,
-                        verified_by=None if withheld else self.a.owner.id,
-                        verified_at=None if withheld else self._at(day, hour + 1, 0),
+                        verified_by=self.a.owner.id if status == MilkLog.STATUS_VERIFIED else None,
+                        verified_at=self._at(day, hour + 1, 0) if status == MilkLog.STATUS_VERIFIED else None,
                     ))
+                    if drop:
+                        _share, alert_status, notes = drop
+                        self._add(MilkDropAlert(
+                            tenant_id=self.t, cow_id=self.cows[spec.tag].id, alert_date=day,
+                            missing_milk_liters=usual - litres, status=alert_status,
+                            reason=(f'Warning: Yield of {litres}L is >15% below her {usual:.1f}L average. '
+                                    'Health check recommended.'),
+                            investigation_notes=notes,
+                            investigated_by=self.a.owner.id if notes else None,
+                            investigated_at=self._at(day, 10, 30) if notes else None,
+                        ))
                     if not withheld:
                         saleable += litres
             self.daily_saleable[day] = saleable
@@ -532,6 +648,13 @@ class DemoFarmGenerator:
                         self._payment(customer=customer, day=day, amount=owed, method='M-Pesa')
                         customer_owed[customer.id] = Decimal('0')
 
+        # The kiosk settles this morning, so today's takings aren't empty on the dashboard.
+        kiosk = households[0]
+        if customer_owed[kiosk.id] > 0:
+            self._payment(customer=kiosk, day=self.today, amount=customer_owed[kiosk.id], method='M-Pesa',
+                          hour=7, minute=45)
+            customer_owed[kiosk.id] = Decimal('0')
+
         for customer in households:
             customer.account_balance = customer_owed[customer.id]
 
@@ -567,9 +690,9 @@ class DemoFarmGenerator:
             pay_day = min(pay_day, self._day(1))
             self._payment(buyer=buyer, day=pay_day, amount=amount, method='Bank transfer' if monthly else 'M-Pesa')
 
-    def _payment(self, *, day: date, amount: Decimal, method: str,
-                 customer: Optional[Customer] = None, buyer: Optional[Buyer] = None) -> None:
-        stamp = self._at(day, 18, 30)
+    def _payment(self, *, day: date, amount: Decimal, method: str, customer: Optional[Customer] = None,
+                 buyer: Optional[Buyer] = None, hour: int = 18, minute: int = 30) -> None:
+        stamp = self._at(day, hour, minute)
         self._add(Transaction(
             tenant_id=self.t, farm_id=self.a.farm.id,
             customer_id=customer.id if customer else None, buyer_id=buyer.id if buyer else None,
@@ -608,6 +731,7 @@ class DemoFarmGenerator:
             )
             self._add(item)
             items[name] = item
+        self.items = items
         db.session.flush()
 
         purchases: Dict[date, Decimal] = {}
@@ -633,6 +757,12 @@ class DemoFarmGenerator:
                     if used > 0:
                         self._stock(item, 'OUT', used, cost, day, 'CONSUMPTION', 'Weekly usage')
                         stock -= used
+            if name == 'Maize Germ':
+                # Topped up this morning while the dairy meal delivery is late.
+                topup = Decimal('28')
+                self._stock(item, 'IN', topup, cost, self.today, 'PURCHASE', 'Top-up purchase (dairy meal late)')
+                stock += topup
+                purchases[self.today] = purchases.get(self.today, Decimal('0')) + topup * Decimal(str(cost))
             if name == 'Intramammary Cloxacillin':
                 self._stock(item, 'OUT', Decimal('3'), cost, self._day(_TREATED_DAYS_AGO), 'CONSUMPTION',
                             f'{_TREATED_TAG} mastitis')
@@ -641,8 +771,16 @@ class DemoFarmGenerator:
 
         # The ledger's feed and supplies purchases are the same deliveries as the stock above.
         for day, amount in sorted(purchases.items()):
+            today = day == self.today
             self._expense(day, TransactionCategory.FEED_PURCHASE, amount,
-                          'Weekly feed and supplies delivery', counterparty='Nakuru Agrovet Supplies', method='M-Pesa')
+                          'Maize germ top-up' if today else 'Weekly feed and supplies delivery',
+                          counterparty='Nakuru Agrovet Supplies', method='M-Pesa', hour=8 if today else 12)
+
+        # How the farm measures feed without a scale (Settings: unit helpers).
+        for name, unit_name, kg in [('Dairy Meal (70 kg bag)', 'bag', 70), ('Dairy Meal (70 kg bag)', 'scoop', 2),
+                                    ('Napier Grass (chopped)', 'wheelbarrow', 40), ('Rhodes Grass Hay', 'bale', 15)]:
+            self._add(FarmMeasurementUnit(tenant_id=self.t, item_id=items[name].id, unit_name=unit_name,
+                                          kg_equivalent=_money(kg)))
 
         profiles = [
             ('lactating', 520, 3.4, 16, 2), ('dry', 560, 2.0, 12, 2), ('heifer', 340, 2.5, 14, 2),
@@ -664,6 +802,7 @@ class DemoFarmGenerator:
                          recipe_type='main_meal', feeding_group='dry', quantity_basis='total_ration',
                          created_by=self.a.owner.id)
         self._add(dairy, main, dry)
+        self.recipes = {'dairy': dairy, 'main': main, 'dry': dry}
         db.session.flush()
         for recipe, mix in [
             (dairy, [('Dairy Meal (70 kg bag)', 60), ('Maize Germ', 25), ('Cotton Seed Cake', 13), ('Dairy Mineral Premix', 2)]),
@@ -681,6 +820,62 @@ class DemoFarmGenerator:
             self._add(AnimalYieldTarget(tenant_id=self.t, animal_id=self.cows[spec.tag].id,
                                         target_liters=_money(target), times_to_feed_daily=2,
                                         base_herd_feed_kg=_money(2.0), milking_topup_kg=_money(target * 0.4)))
+
+    # Concentrate eaten per day by the milking herd (the same rates as the weekly stock usage above).
+    _CONCENTRATE_KG_PER_DAY = 17
+    _DRY_RATION_KG_PER_DAY = 50
+
+    def _feed_batches(self) -> None:
+        """Mixed batches, as the Feed Mixing Planner records them: a dairy meal batch every Monday
+        (past ones used up, this week's in use) and a fortnight's dry cow ration mixed last week."""
+        ingredients: Dict[str, Ingredient] = {}
+        for name, *_rest in self._ITEMS:
+            item = self.items[name]
+            if item.category == ItemCategory.MEDICINE:
+                continue
+            ingredient = Ingredient(tenant_id=self.t, name=name, current_cost_per_kg=item.cost_per_kg,
+                                    stock_quantity=max(item.current_qty, Decimal('0')))
+            self._add(ingredient)
+            ingredients[name] = ingredient
+        db.session.flush()
+
+        def mix(recipe: FeedRecipe, name: str, mixed_on: date, days: int, kg_per_day: int,
+                shares: List[tuple], active: bool) -> None:
+            total = Decimal(kg_per_day * days)
+            cost = sum((total * Decimal(share) / 100 * self.items[ing].cost_per_kg for ing, share in shares), Decimal('0'))
+            batch = FeedBatch(tenant_id=self.t, recipe_id=recipe.id, batch_name=name, total_weight=total,
+                              total_cost=cost.quantize(Decimal('0.0001')),
+                              cost_per_kg=(cost / total).quantize(Decimal('0.0001')),
+                              status='ACTIVE' if active else 'DEPLETED', mixed_on=mixed_on,
+                              depleted_on=None if active else mixed_on + timedelta(days=days - 1),
+                              created_by=self.a.herdsman.id, posted_at=self._at(mixed_on, 7, 45))
+            self._add(batch)
+            db.session.flush()
+            for ing, share in shares:
+                item = self.items[ing]
+                self._add(BatchIngredient(tenant_id=self.t, batch_id=batch.id, ingredient_id=ingredients[ing].id,
+                                          weight=(total * Decimal(share) / 100).quantize(Decimal('0.001')),
+                                          percentage=_money(share), locked_cost_per_kg=item.cost_per_kg,
+                                          locked_protein_grams_per_kg=item.protein_grams_per_kg))
+            fed_days = min(days, (self.today - mixed_on).days + 1)
+            for offset in range(fed_days):
+                self._add(FeedBatchConsumptionEvent(
+                    tenant_id=self.t, batch_id=batch.id, feeding_group=recipe.feeding_group,
+                    consumed_weight=Decimal(kg_per_day), consumed_on=mixed_on + timedelta(days=offset),
+                    created_by=self.a.herdsman.id,
+                ))
+
+        dairy_shares = [('Dairy Meal (70 kg bag)', 60), ('Maize Germ', 25), ('Cotton Seed Cake', 13),
+                        ('Dairy Mineral Premix', 2)]
+        this_monday = self.today - timedelta(days=self.today.weekday())
+        for weeks_ago in range(6, -1, -1):
+            monday = this_monday - timedelta(weeks=weeks_ago)
+            mix(self.recipes['dairy'], f'Dairy meal mix, week of {monday:%d %b}', monday, 7,
+                self._CONCENTRATE_KG_PER_DAY, dairy_shares, active=weeks_ago == 0)
+        dry_mixed = this_monday - timedelta(days=4)
+        mix(self.recipes['dry'], f'Dry cow ration, {dry_mixed:%d %b}', dry_mixed, 14, self._DRY_RATION_KG_PER_DAY,
+            [('Napier Grass (chopped)', 65), ('Rhodes Grass Hay', 35)],
+            active=(self.today - dry_mixed).days < 14)
 
     def _stock(self, item, kind, qty, cost, day, reason, notes) -> None:
         self._add(InventoryTransaction(item_id=item.id, transaction_type=kind, quantity=_money(qty),
@@ -727,6 +922,29 @@ class DemoFarmGenerator:
                               f'Salary {month_end:%B %Y}: {employee.full_name}', method='M-Pesa')
             month_end = month_end.replace(day=1) - timedelta(days=1)
 
+        # The same months as payroll runs (the Payroll page), plus this month's draft awaiting review.
+        this_month = self.today.replace(day=1)
+        last_month = this_month - timedelta(days=1)
+        for month_start, status in [((last_month.replace(day=1) - timedelta(days=1)).replace(day=1), PayrollRunStatus.PAID),
+                                    (last_month.replace(day=1), PayrollRunStatus.PAID),
+                                    (this_month, PayrollRunStatus.DRAFT)]:
+            builder = PayrollRunBuilder(month_start.year, month_start.month)
+            lines = builder.build_line_items(builder.eligible(employees))
+            totals = builder.totals(lines)
+            paid = status == PayrollRunStatus.PAID
+            closed = builder.period_end
+            run = PayrollRun(tenant_id=self.t, farm_id=self.a.farm.id, payroll_year=month_start.year,
+                             payroll_month=month_start.month, status=status, generated_by=self.a.owner.id,
+                             generated_at=self._at(closed if paid else self.today, 8, 0),
+                             finalized_by=self.a.owner.id if paid else None,
+                             finalized_at=self._at(closed, 9, 0) if paid else None,
+                             paid_by=self.a.owner.id if paid else None,
+                             paid_at=self._at(closed, 16, 0) if paid else None,
+                             total_gross_pay=totals.gross, total_net_pay=totals.net,
+                             total_deductions=totals.deductions)
+            run.line_items = lines
+            self._add(run)
+
         routines = [
             (time(5, 0), time(7, 0), 'Morning milking', 'Milk all lactating cows; record litres per cow.',
              ['Wash and dry udders', 'Pre-dip and strip', 'Record yield', 'Post-dip teats']),
@@ -762,17 +980,24 @@ class DemoFarmGenerator:
 
     # -- money -------------------------------------------------------------------------
     def _expense(self, day: date, category: TransactionCategory, amount, description: str, *,
-                 method: str = 'Cash', counterparty: Optional[str] = None, cost_class: Optional[CostClass] = None) -> None:
+                 method: str = 'Cash', counterparty: Optional[str] = None, cost_class: Optional[CostClass] = None,
+                 hour: int = 12, cow: Optional[Cow] = None, cost_type: Optional[AnimalCostType] = None) -> Transaction:
+        """A posted expense; with ``cow``, also charged to that animal (its economics report)."""
         from app.services.ledger_category_policy import default_cost_class
 
-        stamp = self._at(day, 12, 0)
-        self._add(Transaction(
+        stamp = self._at(day, hour, 0)
+        tx = Transaction(
             tenant_id=self.t, farm_id=self.a.farm.id, transaction_type=TransactionType.EXPENSE, category=category,
             amount=_money(amount), description=description, counterparty_name=counterparty, payment_method=method,
             cost_class=cost_class or default_cost_class(category), timestamp=stamp, recorded_by=self.a.owner.id,
             payment_status=PaymentStatus.PAID.value, status=TransactionStatus.POSTED.value,
             posted_at=stamp, posted_by=self.a.owner.id,
-        ))
+        )
+        self._add(tx)
+        if cow is not None:
+            self._add(AnimalCostAllocation(tenant_id=self.t, cow_id=cow.id, transaction=tx, cost_type=cost_type,
+                                           amount=tx.amount, occurred_on=day, attribution_method='DIRECT'))
+        return tx
 
     def _expenses_and_income(self) -> None:
         for day in self._history():
@@ -790,11 +1015,13 @@ class DemoFarmGenerator:
             if spec.breeding in ('pregnant', 'pending', 'failed') and spec.bred_days_ago < HISTORY_DAYS:
                 self._expense(self._day(spec.bred_days_ago), TransactionCategory.AI_SERVICE, 1500 + 1800,
                               f'AI service and straw: {spec.tag} {spec.name}', counterparty='County AI Service',
-                              method='M-Pesa')
-        for days_ago, amount, what in [(40, 1500, 'Pregnancy diagnosis'), (26, 3500, 'Hoof treatment'),
-                                       (12, 1200, 'Calf scours treatment'), (_TREATED_DAYS_AGO, 4800, 'Mastitis treatment')]:
-            self._expense(self._day(days_ago), TransactionCategory.VET_FEES, amount, what, counterparty='Dr. Wanjiku Mutua',
-                          method='M-Pesa')
+                              method='M-Pesa', cow=self.cows[spec.tag], cost_type=AnimalCostType.BREEDING)
+        for days_ago, amount, what, tag in [(40, 1500, 'Pregnancy diagnosis', 'SF-004'), (26, 3500, 'Hoof treatment', 'SF-009'),
+                                            (12, 1200, 'Calf scours treatment', 'SF-014'),
+                                            (_TREATED_DAYS_AGO, 4800, 'Mastitis treatment', _TREATED_TAG)]:
+            self._expense(self._day(days_ago), TransactionCategory.VET_FEES, amount, f'{what}: {tag} {self.cows[tag].name}',
+                          counterparty='Dr. Wanjiku Mutua', method='M-Pesa', cow=self.cows[tag],
+                          cost_type=AnimalCostType.VETERINARY)
         self._expense(self._day(33), TransactionCategory.EQUIPMENT_MAINTENANCE, 6500, 'Milking machine service',
                       counterparty='Dairy equipment technician', method='M-Pesa')
 
@@ -815,6 +1042,21 @@ class DemoFarmGenerator:
             payment_status=PaymentStatus.PAID.value, status=TransactionStatus.POSTED.value,
             posted_at=self._at(manure, 15, 0), posted_by=self.a.owner.id,
         ))
+
+    # -- receipts --------------------------------------------------------------------------
+    def _receipts(self) -> None:
+        """Every payment and income has its receipt, as when recorded in the app, dated when it was paid.
+        No PDFs: the demo can't download them, and rendering would slow the daily refresh."""
+        db.session.flush()
+        eligible = (Transaction.query
+                    .filter(Transaction.tenant_id == self.t,
+                            Transaction.transaction_type.in_([TransactionType.PAYMENT, TransactionType.REVENUE]),
+                            Transaction.status == TransactionStatus.POSTED.value, Transaction.amount > 0)
+                    .order_by(Transaction.timestamp, Transaction.id).all())
+        for tx in eligible:
+            ReceiptService.issue(tx, issued_by=self.a.owner.id, farm_id=self.a.farm.id, issued_at=tx.timestamp,
+                                 render_document=False)
+            self.counts['receipts'] = self.counts.get('receipts', 0) + 1
 
 
 # ---------------------------------------------------------------------------

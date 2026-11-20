@@ -359,6 +359,60 @@ class DemoSeedTests(DemoTestCase):
             self.assertFalse(user.has_password)
 
 
+class DemoCompletenessTests(DemoTestCase):
+    """Every page and chart has something to show in the demo (one test: seeding is slow)."""
+
+    def test_every_page_and_chart_has_data(self):
+        headers = self.demo_headers()
+
+        def get(path):
+            response = self.client.get(f'/api/{path}', headers=headers)
+            self.assertEqual(response.status_code, 200, (path, response.get_json()))
+            return response.get_json()
+
+        # Command Center: today's takings and feed cost are on the ledger.
+        summary = get('production/summary')
+        self.assertGreater(summary['revenue_total_kes'], 0)
+        self.assertGreater(summary['feed_cost_total_kes'], 0)
+        self.assertGreaterEqual(summary['anomaly_count'], 1)
+
+        # Ledger: every payment and income has a receipt the preview can open.
+        ledger = get('finance/ledger?per_page=200')['items']
+        paid = [row for row in ledger if row['transaction_type'] in ('Payment', 'Revenue')]
+        self.assertTrue(paid)
+        self.assertTrue(all(row['receipt_available'] and row['receipt'] for row in paid), paid[:2])
+        receipt = get(f"finance/receipts/{paid[0]['receipt']['id']}")
+        self.assertTrue(receipt['receipt_number'].startswith('RCPT-'))
+        self.assertTrue(any(row['animal_cost_allocations'] for row in ledger))
+
+        # Breeding: genetic progress over several birth years.
+        progress = get('herd/genetic-progress')['items']
+        self.assertGreaterEqual(len(progress), 3)
+        self.assertTrue(all(point['daughters_yield'] > point['mothers_yield'] for point in progress), progress)
+
+        # Cow details: timeline and charged costs.
+        cow = self.demo_cow('SF-005')
+        self.assertGreater(get(f'animals/{cow.id}/events')['meta']['total'], 2)
+        self.assertTrue(get(f'reports/animal-economics/{cow.id}')['costs_by_type_kes'])
+
+        # Payroll, feed batches, milk drop alerts, unit helpers.
+        runs = get('hr/payroll/runs/summary')['runs']
+        self.assertEqual(len(runs), 3)
+        self.assertEqual(len(get('v1/nutrition/feeding/today')['active_batches']), 2)
+        self.assertTrue(get('v1/nutrition/analytics/feed-cost-efficiency')['rows'])
+        self.assertTrue(get('v1/nutrition/analytics/active-batch-roi-trend-weekly')['rows'])
+        self.assertEqual(len(get('production/milk-drop-alerts')['items']), 2)
+        self.assertTrue(get('units/conversions'))
+        self.assertTrue(get('tenant/profile')['registration_number'])
+
+    def test_receipt_pdfs_stay_unavailable_in_the_demo(self):
+        headers = self.demo_headers()
+        ledger = self.client.get('/api/finance/ledger?per_page=50', headers=headers).get_json()['items']
+        receipt_id = next(row['receipt']['id'] for row in ledger if row['receipt'])
+        response = self.client.get(f'/api/finance/receipts/{receipt_id}/pdf', headers=headers)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.get_json()['code'], 'DEMO_FEATURE_UNAVAILABLE')
+
 class DemoAccessPolicyTests(BaseTestCase):
     """The pure decision function, independent of HTTP."""
 
