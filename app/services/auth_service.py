@@ -212,6 +212,17 @@ class AuthService:
 
         data = data or {}
         email_changed = False
+        too_long = {
+            field: 'too_long'
+            for field, limit in (('name', 120), ('farm_location', 150))
+            if len((data.get(field) or '').strip() if isinstance(data.get(field), str) else '') > limit
+        }
+        if too_long:
+            return jsonify({
+                "code": "VALIDATION_ERROR",
+                "error": "name is limited to 120 characters and farm_location to 150.",
+                "fields": too_long,
+            }), 400
         try:
             if 'name' in data:
                 user.name = (data.get('name') or '').strip() or user.name

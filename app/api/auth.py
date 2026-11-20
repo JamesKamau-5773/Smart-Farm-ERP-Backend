@@ -12,6 +12,7 @@ from app.services.page_access import normalize_page_access
 from app.services.account_state_service import AccountStateService
 from app.services.session_service import SessionService
 from app.utils.rate_limiting import login_identifier_key
+from app.utils.user_display import ROLE_LABELS
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -101,6 +102,28 @@ def complete_password_reset():
     )
 
 
+@auth_bp.route('/password', methods=['POST'])
+@jwt_required()
+@limiter.limit("5 per 10 minutes")
+def change_password():
+    """Change your own password (or set one, for Google-only accounts) from the profile page.
+
+    Body: {"current_password", "new_password", "confirm_password"}; current_password is not
+    needed when account_flags.has_password is false. Signs out every other session and returns
+    a fresh token for this one.
+    """
+    user_id = get_jwt_identity()
+    user = UserRepository.get_by_id(int(user_id)) if user_id else None
+    if not user:
+        return jsonify({'error': 'User not found.'}), 404
+    return PasswordResetService.change_password(
+        user,
+        request.get_json(silent=True) or {},
+        get_jwt() or {},
+        ip_address=request.remote_addr,
+    )
+
+
 @auth_bp.route('/me', methods=['GET'])
 @jwt_required()
 def me():
@@ -122,6 +145,10 @@ def me():
         'phone_number': phone_number,
         'email': user.email,
         'role': user.role,
+        # For the profile page: how to show the role, since when, and the staff record if linked.
+        'role_label': ROLE_LABELS.get(user.role, 'Team member'),
+        'member_since': user.created_at.date().isoformat() if user.created_at else None,
+        'staff_profile': _staff_profile(user),
         'is_active': user.is_active,
         'requires_password_reset': user.requires_password_reset,
         'farm_location': getattr(user, 'farm_location', None),
@@ -137,6 +164,20 @@ def me():
         'session_expires_at': _session_expires_at(claims),
         **AccountStateService.describe(user, SessionService.auth_method_from_claims(claims)),
     }), 200
+
+
+def _staff_profile(user):
+    """The employee record linked to this login, or None. Only what the person may see of themselves."""
+    employee = getattr(user, 'employee_profile', None)
+    if not employee:
+        return None
+    return {
+        'employee_id': employee.id,
+        'full_name': employee.full_name,
+        'job_title': employee.role,
+        'hire_date': employee.hire_date.isoformat() if employee.hire_date else None,
+        'status': employee.status,
+    }
 
 
 def _session_expires_at(claims):

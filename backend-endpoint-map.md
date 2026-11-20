@@ -42,6 +42,24 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 - `GET /api/auth/me`
 - `GET /api/auth/status`
 
+### Profile page
+
+- `GET /api/auth/me`: the signed-in user. Besides the account and farm fields it sends `role_label`
+  (the role in words), `member_since` (`YYYY-MM-DD`) and `staff_profile`
+  (`{employee_id, full_name, job_title, hire_date, status}`, or null when the login has no employee record).
+- `PATCH /api/auth/me`: edit `name`, `farm_location`, `phone_number`, `email` (send only what changes; `''` or
+  null clears phone or email). A changed phone or email is unverified again; a new email is sent a
+  verification link. Errors: `PHONE_IN_USE` / `EMAIL_IN_USE` (409), `INVALID_PHONE` (400), and
+  `400 VALIDATION_ERROR` with `fields.name` / `fields.farm_location` = `too_long` (120 / 150 characters).
+- `POST /api/auth/password`: change your own password. Body `{current_password, new_password,
+  confirm_password}`; `current_password` is not needed when `account_flags.has_password` is false (Google-only
+  accounts setting a first password). Success signs out every other session and returns a fresh
+  `access_token` (also set as the cookie) for this one. Errors: `INVALID_CURRENT_PASSWORD` with
+  `fields.current_password`; `VALIDATION_ERROR` with `fields.current_password` = `required`,
+  `fields.new_password` = `required` | `unchanged`, `fields.confirm_password` = `mismatch`; `WEAK_PASSWORD`
+  with `violations`; `403 PASSWORD_RESET_REQUIRED` while a forced reset is pending (use
+  `POST /api/auth/change-password`); 429 after 5 attempts in 10 minutes. Demo sessions get `DEMO_READ_ONLY`.
+
 ## HR
 
 - `POST /api/hr/staff`
