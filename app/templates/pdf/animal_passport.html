@@ -10,27 +10,42 @@
 
     body {
       font-family: DejaVu Sans, Arial, sans-serif;
-      color: #1f2937;
+      color: #0f172a;
       font-size: 11pt;
       line-height: 1.45;
     }
 
+    /* The same top as the payment receipt: brand bar, logo top-left (BR-031). */
     .hero {
-      background: linear-gradient(135deg, #12372a 0%, #285943 100%);
-      color: #ffffff;
-      border-radius: 18px;
-      padding: 22px 24px;
+      border-top: 4px solid #0a5f96;
+      border-bottom: 1px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 2px 14px;
       margin-bottom: 18px;
     }
 
+    .hero .logo {
+      width: 40mm;
+      height: auto;
+    }
+
+    .hero .title {
+      text-align: right;
+    }
+
     .hero h1 {
-      margin: 0 0 6px 0;
-      font-size: 24pt;
+      margin: 0;
+      color: #0f172a;
+      font-size: 18pt;
     }
 
     .hero p {
-      margin: 0;
-      opacity: 0.92;
+      margin: 2px 0 0 0;
+      color: #64748b;
+      font-size: 9.5pt;
     }
 
     .grid {
@@ -76,11 +91,11 @@
     .section-title {
       font-size: 14pt;
       margin: 0 0 10px 0;
-      color: #12372a;
+      color: #0a5f96;
     }
 
     .timeline-item {
-      border-left: 4px solid #12372a;
+      border-left: 4px solid #0a5f96;
       padding-left: 12px;
       margin-bottom: 14px;
       page-break-inside: avoid;
@@ -112,8 +127,11 @@
 </head>
 <body>
   <div class="hero">
-    <h1>Animal Passport</h1>
-    <p>Lifetime history summary for {{ animal.tag_number }}</p>
+    {% if logo_src %}<img class="logo" src="{{ logo_src }}" alt="Maziwa Smart">{% endif %}
+    <div class="title">
+      <h1>Animal Passport</h1>
+      <p>Lifetime history summary for {{ animal.tag_number }}</p>
+    </div>
   </div>
 
   <div class="card">
