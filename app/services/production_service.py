@@ -3,14 +3,79 @@ from app.models.supply import MilkLog, MilkSession
 from app.repositories.supply_repo import MilkRepository
 from app.repositories.cow_repo import CowRepository
 from flask import jsonify
+from app import db
 from app.utils.farm_time import farm_timestamp_for, farm_today, to_farm_date
 
 class ProductionService:
     # Set the anomaly threshold (e.g., a drop > 15% triggers a warning)
     ANOMALY_THRESHOLD_PERCENT = 0.15
-    # The drop rule compares a record with the cow's average over this many days before it,
-    # across all sessions. Milk lists send the same baseline as ``vs_avg_litres`` (BR-025).
+    # The drop rule compares a record with the cow's average for the same milking session over
+    # this many days before it. Milk lists send the same baseline as ``vs_avg_litres`` (BR-025).
     ANOMALY_WINDOW_DAYS = 7
+
+    @staticmethod
+    def evaluate_drop(cow_id: int, amount: float, session: str, tenant_id: int, reference_dt):
+        """``(is_drop, average, warning)`` for a record of ``amount`` litres at ``reference_dt``.
+
+        The one milk-drop rule: more than ANOMALY_THRESHOLD_PERCENT below the cow's average for
+        the same session over the ANOMALY_WINDOW_DAYS before the record. No average (no earlier
+        record of that session in the window) means no verdict, so not a drop.
+        """
+        average = MilkRepository.get_cow_average_yield(
+            cow_id, days=ProductionService.ANOMALY_WINDOW_DAYS, tenant_id=tenant_id,
+            as_of=reference_dt, session=session,
+        )
+        if average <= 0:
+            return False, None, None
+        if float(amount) >= average * (1 - ProductionService.ANOMALY_THRESHOLD_PERCENT):
+            return False, average, None
+        percent = round(ProductionService.ANOMALY_THRESHOLD_PERCENT * 100)
+        warning = (
+            f"Warning: Yield of {float(amount):g}L is >{percent}% below her {average:.1f}L "
+            f"{str(session).lower()} average. Health check recommended."
+        )
+        return True, average, warning
+
+    @staticmethod
+    def recheck_drop(log: MilkLog, previous_date, user_id: int | None = None) -> None:
+        """Re-apply the drop rule after a record's litres, session or date changed.
+
+        Keeps the flag, the list status and the milk-drop alerts in step with the corrected record:
+        a new drop raises an alert; a record that is no longer a drop closes its day's alert if no one
+        has started on it and no other record that day is still a drop. Verified records keep their
+        status. Does not commit.
+        """
+        was_drop = bool(log.anomaly_flag)
+        is_drop, average, warning = ProductionService.evaluate_drop(
+            log.cow_id, float(log.amount_liters), log.session, log.tenant_id, log.timestamp,
+        )
+        log.anomaly_flag = is_drop
+        verified = str(log.status or '').upper() == MilkLog.STATUS_VERIFIED or log.verified_at is not None
+        if not verified:
+            log.status = MilkLog.STATUS_FLAGGED if is_drop else \
+                         MilkLog.STATUS_ISOLATED if not log.is_saleable else \
+                         MilkLog.STATUS_RECORDED
+
+        new_date = to_farm_date(log.timestamp)
+        moved = previous_date is not None and previous_date != new_date
+        db.session.flush()
+
+        if was_drop and previous_date is not None and (not is_drop or moved):
+            if not MilkRepository.has_other_flagged_log(log, previous_date):
+                for alert in MilkRepository.unreviewed_drop_alerts(log.cow_id, log.tenant_id, previous_date):
+                    alert.status = 'RESOLVED'
+                    alert.investigation_notes = (
+                        'Closed automatically: the milk record was corrected and is no longer a drop.'
+                    )
+                    alert.investigated_by = int(user_id) if user_id else None
+                    alert.investigated_at = datetime.now(timezone.utc)
+
+        if is_drop and (not was_drop or moved):
+            if not MilkRepository.has_drop_alert(log.cow_id, log.tenant_id, new_date):
+                MilkRepository.create_drop_alert(
+                    cow_id=log.cow_id, tenant_id=log.tenant_id, alert_date=new_date,
+                    missing_milk_liters=average - float(log.amount_liters), reason=warning, commit=False,
+                )
 
     @staticmethod
     def log_daily_yield(cow_id: int, amount: float, session: str, user_id: int, tenant_id: int, milking_date=None,
@@ -56,20 +121,13 @@ class ProductionService:
         # If the livestock is locked for medical reasons, this specific milk log is flagged as NOT saleable.
         is_saleable = not livestock.is_hardlocked
 
-        # 3. Anomaly Detection (The 7-Day Rolling Average), anchored to the submitted milking date
+        # 3. Anomaly Detection (same session, 7-day average), anchored to the submitted milking date
         # so backdated entries are compared against the average leading up to that date, not today.
         now = datetime.now(timezone.utc)
         reference_dt = farm_timestamp_for(milking_date, now) if milking_date else now
-        historical_average = MilkRepository.get_cow_average_yield(livestock_id, days=ProductionService.ANOMALY_WINDOW_DAYS, tenant_id=tenant_id, as_of=reference_dt)
-        is_anomaly = False
-        warning_msg = None
-
-        if historical_average > 0:
-            # Did the yield drop significantly below her 7-day average?
-            drop_limit = historical_average * (1 - ProductionService.ANOMALY_THRESHOLD_PERCENT)
-            if amount < drop_limit:
-                is_anomaly = True
-                warning_msg = f"Warning: Yield of {amount}L is >15% below her {historical_average:.1f}L average. Health check recommended."
+        is_anomaly, historical_average, warning_msg = ProductionService.evaluate_drop(
+            livestock_id, amount, session, tenant_id, reference_dt,
+        )
 
         # 4. Commit the Log
         log = MilkRepository.create_log(

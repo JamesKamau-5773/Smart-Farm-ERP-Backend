@@ -1294,6 +1294,7 @@ def production_yield_legacy(log_id=None):
         if not log:
             return jsonify({'error': 'Production record not found.'}), 404
         data = request.get_json() or {}
+        previous = (float(log.amount_liters), log.session, to_farm_date(log.timestamp))
         if 'amount' in data and data.get('amount') is not None:
             try:
                 amount_float = float(data['amount'])
@@ -1321,6 +1322,10 @@ def production_yield_legacy(log_id=None):
             if milker_error:
                 return milker_error
             log.milker_employee_id = milker_id
+        # A corrected record is judged again by the drop rule, so its flag, status and the day's
+        # milk-drop alert agree with what it now says.
+        if (float(log.amount_liters), log.session, to_farm_date(log.timestamp)) != previous:
+            ProductionService.recheck_drop(log, previous_date=previous[2], user_id=get_jwt_identity())
         db.session.commit()
         return jsonify({
             'id': log.id,
@@ -1329,6 +1334,7 @@ def production_yield_legacy(log_id=None):
             'session': log.session,
             'milkingDate': _milking_date(log),
             'status': _milk_log_status(log),
+            'significant_drop': bool(log.anomaly_flag),
             'milker_id': log.milker_employee_id,
         }), 200
     if request.method == 'DELETE':

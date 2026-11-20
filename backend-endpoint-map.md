@@ -388,11 +388,16 @@ Yield list (`GET /api/production/yield`):
   `milker_id`, `milker_name` is the person who entered the record. `recorded_by_name` is who entered it.
   `POST` and `PATCH` take an optional `milker_id` (an employee id on this farm; `null` on `PATCH` clears
   it); anything else is `400 { "code": "VALIDATION_ERROR", "fields": { "milker_id": "invalid" } }`.
-- Against the cow's average (BR-025): `avg_litres` is the cow's average per record over the 7 days
-  before this one, across all sessions (the milk-drop rule's baseline); `vs_avg_litres` is this record's
-  litres minus it (1 dp). Both null when the cow has no record in that window. `significant_drop` is the
-  drop rule's verdict when the record was entered (more than 15% below that average), the same verdict
-  that set `FLAGGED` and raised the milk-drop alert.
+- Against the cow's average (BR-025): `avg_litres` is the cow's average for the **same session** over
+  the 7 days before this record (the milk-drop rule's baseline); `vs_avg_litres` is this record's litres
+  minus it (1 dp). Both null when the cow has no record of that session in the window.
+  `significant_drop` is the drop rule's verdict (more than 15% below that average), the same verdict that
+  sets `FLAGGED` and raises the milk-drop alert. Records entered before 2026-11-20 keep the verdict of
+  the earlier rule (7 days, all sessions) unless they are edited.
+- Editing a record's `amount`, `session` or `milkingDate` judges it again: the flag and status follow
+  (a verified record stays `VERIFIED`), a new drop raises an alert, and a record that is no longer a drop
+  closes its day's `OPEN` alert, unless another record that day is still a drop. Alerts already
+  `INVESTIGATING` are left alone. The `PATCH` response carries `significant_drop`.
 
 Calf feedings (`GET /api/production/milk-dispositions?date=&calf_id=`): `items`, `count` and
 `total_liters` (sum of `liters` for the same filters, 1 dp).

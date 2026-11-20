@@ -185,20 +185,27 @@ class InventoryRepository:
 
 class MilkRepository:
     @staticmethod
-    def get_cow_average_yield(cow_id: int, days: int, tenant_id: int, as_of=None) -> float:
-        """Calculates the average yield per session for a cow over the N days prior to as_of (default: now)."""
+    def get_cow_average_yield(cow_id: int, days: int, tenant_id: int, as_of=None, session: str | None = None) -> float:
+        """The cow's average litres per record over the N days before ``as_of`` (default: now).
+
+        With ``session``, only records of that milking session count, so an evening record is
+        compared with her evenings, not with mornings that are usually bigger.
+        """
         if days <= 0:
             return 0.0
 
         reference = as_of or datetime.now(timezone.utc)
         start_date = reference - timedelta(days=days)
 
-        avg_yield = db.session.query(func.avg(MilkLog.amount_liters)).filter(
+        query = db.session.query(func.avg(MilkLog.amount_liters)).filter(
             MilkLog.cow_id == cow_id,
             MilkLog.tenant_id == tenant_id,
             MilkLog.timestamp >= start_date,
             MilkLog.timestamp < reference
-        ).scalar()
+        )
+        if session:
+            query = query.filter(func.lower(func.trim(MilkLog.session)) == str(session).strip().lower())
+        avg_yield = query.scalar()
 
         return float(avg_yield or 0.0)
 
@@ -252,12 +259,46 @@ class MilkRepository:
         return log
 
     @staticmethod
-    def create_drop_alert(cow_id: int, tenant_id: int, alert_date, missing_milk_liters: float, reason: str) -> MilkDropAlert:
+    def create_drop_alert(cow_id: int, tenant_id: int, alert_date, missing_milk_liters: float, reason: str,
+                          commit: bool = True) -> MilkDropAlert:
         """Raises a manager-review alert for a detected milk-yield drop."""
         alert = MilkDropAlert(
             cow_id=cow_id, tenant_id=tenant_id, alert_date=alert_date,
             missing_milk_liters=Decimal(str(missing_milk_liters)), reason=reason
         )
         db.session.add(alert)
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        else:
+            db.session.flush()
         return alert
+
+    @staticmethod
+    def unreviewed_drop_alerts(cow_id: int, tenant_id: int, alert_date) -> list[MilkDropAlert]:
+        """Alerts for this cow and day that no one has started looking into."""
+        return MilkDropAlert.query.filter_by(
+            cow_id=cow_id, tenant_id=tenant_id, alert_date=alert_date, status='OPEN',
+        ).all()
+
+    @staticmethod
+    def has_drop_alert(cow_id: int, tenant_id: int, alert_date) -> bool:
+        """Whether an alert for this cow and day is still open or being investigated."""
+        return MilkDropAlert.query.filter(
+            MilkDropAlert.cow_id == cow_id,
+            MilkDropAlert.tenant_id == tenant_id,
+            MilkDropAlert.alert_date == alert_date,
+            MilkDropAlert.status.in_(('OPEN', 'INVESTIGATING')),
+        ).first() is not None
+
+    @staticmethod
+    def has_other_flagged_log(log: MilkLog, milking_date) -> bool:
+        """Whether another of this cow's records on that farm-local day is still flagged as a drop."""
+        candidates = MilkLog.query.filter(
+            MilkLog.tenant_id == log.tenant_id,
+            MilkLog.cow_id == log.cow_id,
+            MilkLog.id != log.id,
+            MilkLog.anomaly_flag.is_(True),
+            MilkLog.timestamp >= datetime.combine(milking_date - timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc),
+            MilkLog.timestamp < datetime.combine(milking_date + timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc),
+        ).all()
+        return any(to_farm_date(other.timestamp) == milking_date for other in candidates)
