@@ -17,7 +17,7 @@ def _required_secret(env_name: str, fallback: str, min_length: int = 32) -> str:
     return value or fallback
 
 
-def _postgres_database_uri(env_name: str, fallback: str) -> str:
+def _postgres_database_uri(env_name: str, fallback: str, *, required_in_production: bool = True) -> str:
     """Return a synchronous PostgreSQL URL using the installed psycopg v3 driver.
 
     Managed PostgreSQL providers, including Render, commonly provide URLs that
@@ -26,7 +26,8 @@ def _postgres_database_uri(env_name: str, fallback: str) -> str:
     provider-supplied URLs work without requiring a second PostgreSQL driver.
     """
     value = os.environ.get(env_name)
-    if os.environ.get('APP_ENV', 'development').lower() == 'production' and not value:
+    production = os.environ.get('APP_ENV', 'development').lower() == 'production'
+    if production and required_in_production and not value:
         raise RuntimeError(f'{env_name} must be set in production.')
     value = value or fallback
     parsed = make_url(value)
@@ -92,6 +93,18 @@ class Config:
         if origin.strip()
     )
 
+    # Headers holding the visitor's IP, set by a proxy we trust (app/utils/client_ip.py).
+    # Production runs on Render behind Cloudflare, which overwrites both headers; set
+    # CLIENT_IP_HEADERS= (empty) for a production server reachable without that proxy.
+    CLIENT_IP_HEADERS = tuple(
+        header.strip()
+        for header in os.environ.get(
+            'CLIENT_IP_HEADERS',
+            'True-Client-IP,CF-Connecting-IP' if APP_ENV == 'production' else '',
+        ).split(',')
+        if header.strip()
+    )
+
     SQLALCHEMY_DATABASE_URI = _postgres_database_uri(
         'DATABASE_URL',
         'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db',
@@ -154,11 +167,16 @@ class TestConfig(Config):
     TESTING = True
     SECRET_KEY = 'test-secret-key-that-is-at-least-thirty-two-characters'
     JWT_SECRET_KEY = 'test-jwt-secret-key-that-is-at-least-thirty-two-characters'
+    # This class body runs on every import of config, production included, where no
+    # test database exists; only the tests themselves need it.
     SQLALCHEMY_DATABASE_URI = _postgres_database_uri(
         'TEST_DATABASE_URL',
         'postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db_test',
+        required_in_production=False,
     )
     RATELIMIT_STORAGE_URI = 'memory://'
+    # Tests set REMOTE_ADDR directly; tests/test_client_ip.py enables the headers itself.
+    CLIENT_IP_HEADERS = ()
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False
     AUTH_CODE_PEPPER = 'test-auth-code-pepper-that-is-at-least-thirty-two-characters'

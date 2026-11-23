@@ -20,6 +20,10 @@ def create_app(config_class=Config):
     app = Flask(__name__)
     app.config.from_object(config_class)
 
+    # Behind Render's proxies REMOTE_ADDR is an internal address; use the visitor's.
+    from app.utils import client_ip
+    client_ip.install(app)
+
     # Override the default rate-limiter key_func to use our tenant-based one.
     # This is done inside create_app to avoid circular imports at the top level.
     from app.utils.rate_limiting import tenant_based_key_func
