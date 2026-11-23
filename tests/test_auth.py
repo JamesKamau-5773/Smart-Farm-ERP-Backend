@@ -310,8 +310,11 @@ class AuthTestCase(BaseTestCase):
         self.assertEqual(coop_resp.status_code, 201)
         coop_data = json.loads(coop_resp.data.decode())
 
+        # The cooperative admin manages its own members through the tenant routes
+        # (the /cooperatives/<id>/... routes are for the platform admin).
+        self.client.delete_cookie('access_token_cookie')
         invite_resp = self.client.post(
-            f"/api/tenant/cooperatives/{coop_data['cooperative_id']}/members",
+            '/api/tenant/members/invite',
             data=json.dumps({
                 'full_name': 'Jane Farmer',
                 'phone_number': '0712333444',
@@ -362,8 +365,9 @@ class AuthTestCase(BaseTestCase):
             'John Farmer,0712333445,Plot B\n'
         )
 
+        self.client.delete_cookie('access_token_cookie')
         import_resp = self.client.post(
-            f"/api/tenant/cooperatives/{coop_data['cooperative_id']}/members/bulk",
+            '/api/tenant/members/import',
             data={
                 'file': (io.BytesIO(csv_payload.encode('utf-8')), 'members.csv'),
             },

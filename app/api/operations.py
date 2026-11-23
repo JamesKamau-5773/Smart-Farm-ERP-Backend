@@ -135,9 +135,12 @@ def _milk_log_status(log):
 
 
 def _user_can_verify_yield():
-    claims = get_jwt() or {}
-    role = (claims.get('role') or '').strip().upper()
-    return role in {Role.FARM_ADMIN, Role.FARM_MANAGER, Role.ADMIN, Role.SUPER_ADMIN, Role.FARMER}
+    # The live role from the database, never the token's claim.
+    try:
+        user = db.session.get(User, int(get_jwt_identity()))
+    except (TypeError, ValueError):
+        user = None
+    return bool(user and user.is_active and user.role in {Role.FARM_ADMIN, Role.FARM_MANAGER, Role.ADMIN, Role.FARMER})
 
 
 def _parse_milker(data, tenant_id):

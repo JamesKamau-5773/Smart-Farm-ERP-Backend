@@ -8,7 +8,7 @@ from app.repositories.user_repo import UserRepository
 ROLE_LABELS = {
     Role.FARMER: 'Farm owner',
     Role.ADMIN: 'Admin',
-    Role.SUPER_ADMIN: 'Admin',
+    Role.SUPER_ADMIN: 'Platform admin',
     Role.FARM_ADMIN: 'Farm admin',
     Role.FARM_MANAGER: 'Farm manager',
     Role.FARM_SUPERVISOR: 'Supervisor',

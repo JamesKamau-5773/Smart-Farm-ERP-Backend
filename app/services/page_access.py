@@ -17,7 +17,8 @@ PAGE_ACCESS = {
 ROLE_DEFAULT_PAGE_ACCESS = {
     'FARMER': list(PAGE_ACCESS),
     'ADMIN': list(PAGE_ACCESS),
-    'SUPER_ADMIN': list(PAGE_ACCESS),
+    # The platform admin has no farm pages (app/services/platform_session_policy.py).
+    'SUPER_ADMIN': [],
     'FARM_HAND': ['production', 'tasks', 'herd', 'feeding'],
     'VETERINARY_DOCTOR': ['herd', 'breeding', 'medical'],
     'FARM_SUPERVISOR': ['production', 'tasks', 'herd', 'breeding', 'medical', 'feed', 'reports', 'safety'],
@@ -137,6 +138,8 @@ def enforce_page_access():
     from app import db
     from app.models.user import User
     user = db.session.get(User, int(actor_id))
+    if user is not None and user.role == 'SUPER_ADMIN':
+        return None  # Farm pages do not apply; app/services/platform_session_policy.py decides.
     page_access = normalize_page_access(getattr(user, 'page_access', None), getattr(user, 'role', None)) if user else []
     if user and not grants(page_access, page_key):
         return jsonify({'error': 'This page is not included in your farm access.'}), 403
