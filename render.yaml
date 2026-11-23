@@ -13,6 +13,12 @@ services:
         value: https://www.maziwasmart.co.ke
       - key: GOOGLE_REDIRECT_URI
         value: https://api.maziwasmart.co.ke/api/auth/google/callback
+      # Public read-only demo farm ("Silato Farm"). scripts/start_web.sh seeds it on the
+      # first deploy with this set; visitors then refresh its dates once a day.
+      - key: DEMO_ENABLED
+        value: "True"
+      - key: DEMO_SESSION_MINUTES
+        value: "45"
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
