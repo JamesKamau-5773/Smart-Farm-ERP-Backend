@@ -44,3 +44,6 @@ pip-wheel-metadata/
 *~
 .DS_Store
 Thumbs.db
+
+# Local audit reports (not committed)
+docs/audit-*.md
