@@ -241,3 +241,180 @@ class PlatformAccountService:
             User.role.in_(owner_roles),
         ).count()
         return others == 0
+
+    # -- moving the super admin out of a farm tenant (flask platform move/split) ---------------------
+    # Rows in these tables do not make a tenant a working farm: an empty farm shell created at
+    # sign-up, and request-replay bookkeeping.
+    _NOT_FARM_DATA = frozenset({'farms', 'idempotency_records'})
+
+    @staticmethod
+    def tenant_contents(tenant_id: int, *, excluding_user_id: Optional[int] = None) -> dict:
+        """Row counts, per table, of everything scoped to this tenant (read-only)."""
+        from sqlalchemy import func, select
+
+        counts = {}
+        for table in sorted(db.metadata.sorted_tables, key=lambda t: t.name):
+            column = table.c.get('tenant_id')
+            if column is None:
+                continue
+            query = select(func.count()).select_from(table).where(column == tenant_id)
+            if table.name == 'users' and excluding_user_id is not None:
+                query = query.where(table.c.id != excluding_user_id)
+            count = db.session.execute(query).scalar()
+            if count:
+                counts[table.name] = count
+        return counts
+
+    @staticmethod
+    def status() -> dict:
+        """Read-only summary for operators (flask platform status)."""
+        from app.services.mfa_service import MfaService
+
+        platform = PlatformTenant.get()
+        admins = User.query.filter_by(role=Role.SUPER_ADMIN).all()
+        report = {'platform_tenant_id': platform.id if platform else None, 'super_admins': []}
+        for admin in admins:
+            report['super_admins'].append({
+                'user_id': admin.id,
+                'username': admin.username,
+                'active': bool(admin.is_active),
+                'tenant_id': admin.tenant_id,
+                'in_platform_tenant': bool(platform and admin.tenant_id == platform.id),
+                'mfa_enrolled': MfaService.is_enrolled(admin),
+                'tenant_contents': PlatformAccountService.tenant_contents(admin.tenant_id, excluding_user_id=admin.id),
+            })
+        return report
+
+    @staticmethod
+    def _legacy_admin(plan: AccountChangePlan):
+        admin = PlatformAccountService.super_admin()
+        platform = PlatformTenant.get()
+        if admin is None:
+            plan.refusal = 'There is no super admin.'
+        elif platform is None:
+            plan.refusal = 'The platform tenant does not exist; run the database migrations first.'
+        elif admin.tenant_id == platform.id:
+            plan.refusal = 'The super admin is already in the platform tenant. Nothing to do.'
+        return admin, platform
+
+    @staticmethod
+    def plan_move(reason: str) -> AccountChangePlan:
+        from app.models.mfa import MfaSession
+
+        plan = AccountChangePlan('Move the super admin account into the platform tenant')
+        plan.refusal = _check_reason(reason)
+        if plan.refused:
+            return plan
+        admin, platform = PlatformAccountService._legacy_admin(plan)
+        if plan.refused:
+            return plan
+
+        contents = PlatformAccountService.tenant_contents(admin.tenant_id, excluding_user_id=admin.id)
+        farm_data = {table: n for table, n in contents.items() if table not in PlatformAccountService._NOT_FARM_DATA}
+        if farm_data:
+            listing = ', '.join(f'{table}: {n}' for table, n in farm_data.items())
+            plan.refusal = (f'Tenant {admin.tenant_id} holds farm data ({listing}). Moving the account would cut '
+                            'that farm off from its owner. Use split-super-admin instead.')
+            return plan
+
+        source = admin.tenant_id
+        plan.changes = [
+            f'super admin {_describe(admin)}:',
+            f'  tenant_id {source} -> {platform.id} (the platform tenant); page access cleared',
+            '  every session ended (token_version + 1); two-factor enrolment kept',
+            f'tenant {source} and its rows are left exactly as they are: '
+            + (', '.join(f'{t}: {n}' for t, n in contents.items()) or 'no rows'),
+            'audit entry SUPER_ADMIN_MOVED with the reason',
+        ]
+
+        def apply():
+            with super_admin_changes_allowed():
+                MfaSession.query.filter_by(user_id=admin.id).delete()
+                admin.tenant_id = platform.id
+                admin.page_access = None
+                SessionService.revoke_all_sessions(admin)
+                record_audit(
+                    user_id=None, action='SUPER_ADMIN_MOVED', entity_type='User', entity_id=admin.id,
+                    old_value={'tenant_id': source},
+                    new_value={'tenant_id': platform.id, 'reason': reason.strip(), **_cli_actor()},
+                    ip_address=None,
+                )
+                db.session.commit()
+
+        plan.apply = apply
+        return plan
+
+    @staticmethod
+    def plan_split(reason: str, *, username: str, name: str, email: Optional[str] = None,
+                   password: Optional[str] = None) -> AccountChangePlan:
+        """For a super admin whose account runs a real farm: the old account becomes that farm's
+        FARMER (its data untouched) and a new account becomes the super admin in the platform tenant.
+
+        ``password`` may be None for a dry run; it is required to apply.
+        """
+        from app.repositories.user_repo import UserRepository
+        from app.services.mfa_service import MfaService
+        from app.utils.password_policy import PasswordPolicy
+
+        plan = AccountChangePlan('Split the super admin from its farm account')
+        plan.refusal = _check_reason(reason)
+        if plan.refused:
+            return plan
+        admin, platform = PlatformAccountService._legacy_admin(plan)
+        if plan.refused:
+            return plan
+
+        username = (username or '').strip()
+        email = (email or '').strip().lower() or None
+        if not username:
+            plan.refusal = '--username is required.'
+        elif UserRepository.get_by_username(username):
+            plan.refusal = f'The username {username!r} is already taken.'
+        elif email and UserRepository.get_by_email_ci(email):
+            plan.refusal = 'That email address is already used by another account.'
+        elif password is not None and PasswordPolicy.violations(password, personal_values=[username, email or '']):
+            plan.refusal = 'The password does not meet the password policy: ' + '; '.join(
+                PasswordPolicy.violations(password, personal_values=[username, email or ''])
+            )
+        if plan.refused:
+            return plan
+
+        contents = PlatformAccountService.tenant_contents(admin.tenant_id, excluding_user_id=admin.id)
+        plan.changes = [
+            f'current super admin {_describe(admin)}:',
+            f'  role SUPER_ADMIN -> FARMER; stays in tenant {admin.tenant_id}',
+            '  two-factor secret and recovery codes deleted; every session ended',
+            f'new super admin {username!r} ({name or username}):',
+            f'  created in the platform tenant {platform.id} with role SUPER_ADMIN, no phone number'
+            + (f', email {email}' if email else ''),
+            '  must enrol two-factor authentication at first sign-in',
+            f'tenant {admin.tenant_id} and its rows are left exactly as they are: '
+            + (', '.join(f'{t}: {n}' for t, n in contents.items()) or 'no rows'),
+            'audit entry SUPER_ADMIN_SPLIT with the reason',
+        ]
+
+        def apply():
+            if password is None:
+                raise ValueError('A password for the new super admin account is required.')
+            with super_admin_changes_allowed():
+                MfaService.clear(admin)
+                admin.role = Role.FARMER
+                SessionService.revoke_all_sessions(admin)
+                db.session.flush()  # Frees the single-super-admin index for the new account.
+                new_admin = PlatformAccountService.create_super_admin(NewSuperAdmin(
+                    username=username, identifier=f'platform_{username}', name=(name or username).strip(),
+                    password=password, email=email,
+                ))
+                record_audit(
+                    user_id=None, action='SUPER_ADMIN_SPLIT', entity_type='User', entity_id=new_admin.id,
+                    old_value={'super_admin_user_id': admin.id, 'tenant_id': admin.tenant_id},
+                    new_value={
+                        'super_admin_user_id': new_admin.id, 'former_account_role': Role.FARMER,
+                        'reason': reason.strip(), **_cli_actor(),
+                    },
+                    ip_address=None,
+                )
+                db.session.commit()
+
+        plan.apply = apply
+        return plan

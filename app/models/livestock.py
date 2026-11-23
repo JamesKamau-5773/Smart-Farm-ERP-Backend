@@ -146,7 +146,10 @@ def _resolve_default_tenant_id():
 
     from app.models.tenant import Tenant
 
-    tenant = Tenant.query.order_by(Tenant.id.asc()).first()
+    # Never the platform workspace (not a farm) or the public demo.
+    tenant = (
+        Tenant.query.filter_by(is_platform=False, is_demo=False).order_by(Tenant.id.asc()).first()
+    )
     return tenant.id if tenant else None
 
 
