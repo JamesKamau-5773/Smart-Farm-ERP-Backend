@@ -84,7 +84,9 @@ def profile():
 @platform_admin_required
 def create_cooperative():
     data = request.get_json(silent=True) or {}
-    return CooperativeService.create_cooperative(data)
+    return CooperativeService.create_cooperative(
+        data, actor_id=require_current_user().id, ip_address=request.remote_addr,
+    )
 
 
 @tenant_bp.route('/cooperatives/<cooperative_id>/members', methods=['POST'])
