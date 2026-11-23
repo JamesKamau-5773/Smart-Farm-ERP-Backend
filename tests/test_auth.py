@@ -266,18 +266,7 @@ class AuthTestCase(BaseTestCase):
         self.assertIsNone(User.query.filter_by(username='platform_admin').first())
 
     def test_superadmin_can_create_cooperative(self):
-        self.create_platform_admin()
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        self.assertEqual(login_resp.status_code, 200)
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         response = self.client.post(
             '/api/tenant/cooperatives',
@@ -291,7 +280,7 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(response.status_code, 201)
         data = json.loads(response.data.decode())
@@ -302,17 +291,7 @@ class AuthTestCase(BaseTestCase):
         self.assertIn('admin', data)
 
     def test_member_invite_can_be_claimed(self):
-        self.create_platform_admin()
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         coop_resp = self.client.post(
             '/api/tenant/cooperatives',
@@ -326,7 +305,7 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(coop_resp.status_code, 201)
         coop_data = json.loads(coop_resp.data.decode())
@@ -358,17 +337,7 @@ class AuthTestCase(BaseTestCase):
         self.assertEqual(claim_data['role'], Role.FARMER)
 
     def test_bulk_member_csv_import_creates_invites(self):
-        self.create_platform_admin()
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         coop_resp = self.client.post(
             '/api/tenant/cooperatives',
@@ -382,7 +351,7 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(coop_resp.status_code, 201)
         coop_data = json.loads(coop_resp.data.decode())

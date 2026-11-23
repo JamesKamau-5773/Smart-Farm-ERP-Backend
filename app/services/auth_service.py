@@ -10,7 +10,7 @@ from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
 from app.models.user import RevokedToken, Role, User
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app import bcrypt
 from app.repositories.user_repo import UserRepository
 from app.services.account_state_service import AccountStateService
@@ -143,7 +143,21 @@ class AuthService:
         return farms[0]
 
     @staticmethod
-    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD, expires_delta=None):
+    def _session_lifetime(user, requested=None):
+        """Token lifetime. The super admin's tokens are short until 2FA passes (MfaService issues
+        the longer verified session itself); None means JWT_ACCESS_TOKEN_EXPIRES."""
+        if requested is not None:
+            return requested
+        if getattr(user, 'role', None) == Role.SUPER_ADMIN:
+            return timedelta(minutes=int(current_app.config.get('PLATFORM_ADMIN_PENDING_MFA_MINUTES') or 10))
+        return None
+
+    @staticmethod
+    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD,
+                                 expires_delta=None, on_issued=None):
+        """Builds the access token. ``on_issued(jti, expires_at)`` runs once the token exists,
+        before the live account state is read into the payload (MFA records its session there)."""
+        expires_delta = AuthService._session_lifetime(user, expires_delta)
         tenant_type = normalize_tenant_type(getattr(tenant, "tenant_type", None))
         available_farms = [(f.id, f.name) for f in farms]
         phone_number = AuthService._resolve_phone_number(user)
@@ -175,13 +189,16 @@ class AuthService:
             additional_claims=additional_claims,
             expires_delta=expires_delta,
         )
+        issued = decode_token(access_token)
+        if on_issued is not None:
+            on_issued(issued['jti'], datetime.fromtimestamp(issued['exp'], tz=timezone.utc))
 
         # Response-only (not in the token): read live from the database.
-        payload.update(AccountStateService.describe(user, auth_method))
+        payload.update(AccountStateService.describe(user, auth_method, jti=issued['jti']))
         return access_token, payload
 
     @staticmethod
-    def start_session(user, *, farm_id=None, auth_method=AuthMethod.PASSWORD, expires_delta=None):
+    def start_session(user, *, farm_id=None, auth_method=AuthMethod.PASSWORD, expires_delta=None, on_issued=None):
         """Issue a session for an already-authenticated user: the access token in
         the JSON body and in the httpOnly cookie. Every sign-in route ends here."""
         if not user.is_active:
@@ -193,6 +210,7 @@ class AuthService:
         except ValueError as e:
             return _error("INVALID_FARM", str(e), 400)
 
+        expires_delta = AuthService._session_lifetime(user, expires_delta)
         try:
             access_token, payload = AuthService._issue_token_and_payload(
                 user=user,
@@ -201,6 +219,7 @@ class AuthService:
                 active_farm=active_farm,
                 auth_method=auth_method,
                 expires_delta=expires_delta,
+                on_issued=on_issued,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 500

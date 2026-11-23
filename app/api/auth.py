@@ -162,7 +162,7 @@ def me():
         'page_access': normalize_page_access(user.page_access, user.role),
         'farm_timezone': farm_timezone_name(),
         'session_expires_at': _session_expires_at(claims),
-        **AccountStateService.describe(user, SessionService.auth_method_from_claims(claims)),
+        **AccountStateService.describe(user, SessionService.auth_method_from_claims(claims), jti=claims.get('jti')),
     }), 200
 
 

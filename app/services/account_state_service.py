@@ -1,6 +1,8 @@
 """Derives the frontend-facing ``auth_state`` and ``account_flags`` for a user."""
 from __future__ import annotations
 
+from typing import Optional
+
 from app.models.user import User
 from app.repositories.social_account_repo import SocialAccountRepository
 from app.services.session_service import AuthMethod
@@ -37,8 +39,10 @@ class AccountStateService:
         }
 
     @staticmethod
-    def describe(user: User, auth_method: str) -> dict:
+    def describe(user: User, auth_method: str, jti: Optional[str] = None) -> dict:
         from app.services.demo_account import DemoAccount
+        from app.services.mfa_service import MfaService
+        from app.services.platform_account_service import PlatformAccountService
 
         return {
             'auth_state': AccountStateService.auth_state(user, auth_method),
@@ -46,4 +50,7 @@ class AccountStateService:
             # is_demo / read_only: the frontend renders the demo banner and hides
             # write controls from these; the server enforces read-only regardless.
             **DemoAccount.describe(user),
+            # Platform admin routing: false/false/false for every farm user.
+            'is_platform_admin': PlatformAccountService.is_platform_super_admin(user),
+            **MfaService.describe(user, jti),
         }

@@ -70,6 +70,17 @@ class Config:
     AUTH_CHALLENGE_TTL_SECONDS = int(os.environ.get('AUTH_CHALLENGE_TTL_SECONDS', 600))
     AUTH_CHALLENGE_MAX_ATTEMPTS = int(os.environ.get('AUTH_CHALLENGE_MAX_ATTEMPTS', 5))
 
+    # Platform admin (SUPER_ADMIN) sessions and two-factor authentication (TOTP).
+    # Fernet keys (comma-separated, newest first) that encrypt TOTP secrets at rest. Generate one with
+    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())".
+    # Without a key the 2FA endpoints answer 503 and the super admin cannot finish signing in.
+    MFA_ENCRYPTION_KEYS = os.environ.get('MFA_ENCRYPTION_KEYS', '')
+    MFA_ISSUER = os.environ.get('MFA_ISSUER', 'Maziwa Smart')
+    # Before 2FA the super admin's token lasts this long and can only complete 2FA or log out.
+    PLATFORM_ADMIN_PENDING_MFA_MINUTES = int(os.environ.get('PLATFORM_ADMIN_PENDING_MFA_MINUTES', 10))
+    # After 2FA. There are no refresh tokens: the super admin signs in again when it ends.
+    PLATFORM_ADMIN_SESSION_MINUTES = int(os.environ.get('PLATFORM_ADMIN_SESSION_MINUTES', 30))
+
     # Google sign-in (OAuth 2.0 / OpenID Connect via Authlib)
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
     GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
@@ -183,6 +194,8 @@ class TestConfig(Config):
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False
     AUTH_CODE_PEPPER = 'test-auth-code-pepper-that-is-at-least-thirty-two-characters'
+    # Test-only Fernet key for TOTP secrets.
+    MFA_ENCRYPTION_KEYS = 'AcmfC5XyLBL-eVB3mQlJGmTVX6QprfLZhK0odfXfeEU='
     AUTH_EMAIL_ASYNC = False
     FRONTEND_BASE_URL = 'https://app.example.test'
     # Isolated from the real instance/uploads tree so test runs never write/delete real files.

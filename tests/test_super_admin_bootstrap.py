@@ -50,7 +50,9 @@ class SuperAdminBootstrapTestCase(BaseTestCase):
         self.assertEqual(response.status_code, 201)
         admin = User.query.filter_by(role=Role.SUPER_ADMIN).one()
         self.assertTrue(admin.tenant.is_platform)
-        self.assertFalse(self.client.get('/api/auth/bootstrap-status').get_json()['bootstrap_available'])
+        # Anonymous visitor (this client now holds the new admin's pre-2FA session cookie).
+        status = self.app.test_client().get('/api/auth/bootstrap-status')
+        self.assertFalse(status.get_json()['bootstrap_available'])
 
     def test_second_bootstrap_is_refused(self):
         self._open()

@@ -77,6 +77,26 @@ class BaseTestCase(unittest.TestCase):
         db.session.commit()
         return user
 
+    def platform_admin_session(self, *, username: str = 'platform_admin', password: str = 'password'):
+        """Creates the super admin, signs in and completes 2FA enrolment.
+
+        Returns (headers for the verified session, TOTP secret, recovery codes).
+        """
+        from app.services.totp_service import TotpService
+
+        self.create_platform_admin(username=username, password=password)
+        login = self.client.post('/api/auth/login', json={'username': username, 'password': password})
+        self.assertEqual(login.status_code, 200)
+        pending = {'Authorization': f"Bearer {login.get_json()['access_token']}"}
+        enrolment = self.client.post('/api/auth/mfa/enrollment', headers=pending)
+        self.assertEqual(enrolment.status_code, 200)
+        secret = enrolment.get_json()['secret']
+        code = TotpService.code_at(secret, TotpService.current_step())
+        confirmed = self.client.post('/api/auth/mfa/enrollment/confirm', json={'code': code}, headers=pending)
+        self.assertEqual(confirmed.status_code, 200, confirmed.get_json())
+        body = confirmed.get_json()
+        return {'Authorization': f"Bearer {body['access_token']}"}, secret, body['recovery_codes']
+
     def get_auth_headers(self, role: str = Role.FARMER):
         username = f'test_{role.lower()}'
         password = 'password'
