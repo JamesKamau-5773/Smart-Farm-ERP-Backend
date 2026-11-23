@@ -24,9 +24,6 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-# Stray untracked 37 MB PostScript file in the repo root, not used by the app.
-sa
-
 # Docker files themselves
 Dockerfile
 docker-compose*.yml
