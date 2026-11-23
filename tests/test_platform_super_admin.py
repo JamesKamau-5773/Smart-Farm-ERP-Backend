@@ -164,6 +164,7 @@ class NoEndpointAssignsSuperAdminTestCase(BaseTestCase):
     def test_bootstrap_refused_once_a_super_admin_exists(self):
         self.create_platform_admin()
         self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY'] = 'bootstrap-secret-2026'
+        self.app.config['ALLOW_SUPER_ADMIN_BOOTSTRAP'] = True
         response = self.client.post('/api/auth/register', json={
             'phone_number': '0712000011', 'password': 'StrongPass123', 'role': 'SUPER_ADMIN',
             'bootstrap_key': 'bootstrap-secret-2026',

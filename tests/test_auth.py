@@ -180,6 +180,7 @@ class AuthTestCase(BaseTestCase):
     def test_register_workspace_allows_super_admin_with_valid_bootstrap_key(self):
         original_key = self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY']
         self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY'] = 'bootstrap-secret-2026'
+        self.app.config['ALLOW_SUPER_ADMIN_BOOTSTRAP'] = True
 
         try:
             with self.client:

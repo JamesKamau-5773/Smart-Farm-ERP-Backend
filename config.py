@@ -50,6 +50,9 @@ class Config:
     JWT_COOKIE_CSRF_PROTECT = os.environ.get('JWT_COOKIE_CSRF_PROTECT', str(APP_ENV == 'production')) == 'True'
     JWT_CSRF_IN_COOKIES = True
     BOOTSTRAP_SUPER_ADMIN_KEY = os.environ.get('BOOTSTRAP_SUPER_ADMIN_KEY', '')
+    # The HTTP bootstrap (POST /api/auth/register with role SUPER_ADMIN) is closed unless this is
+    # True. Open it only to create the first super admin, then switch it off and remove the key.
+    ALLOW_SUPER_ADMIN_BOOTSTRAP = os.environ.get('ALLOW_SUPER_ADMIN_BOOTSTRAP', 'False') == 'True'
 
     # Flask session cookie: only carries Authlib's OAuth state/nonce during the
     # Google redirect, which is a top-level navigation, so Lax is sufficient.

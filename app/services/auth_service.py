@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hmac
+
 from flask import jsonify, current_app
 from flask_jwt_extended import create_access_token, decode_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
@@ -54,10 +56,24 @@ class AuthService:
 
     @staticmethod
     def bootstrap_available():
-        """Return whether the initial super-admin bootstrap can be attempted."""
+        """Whether POST /api/auth/register may create the super admin.
+
+        All three must hold: ALLOW_SUPER_ADMIN_BOOTSTRAP is on (off by default, so the
+        path is closed unless an operator opens it), a BOOTSTRAP_SUPER_ADMIN_KEY is set,
+        and no super admin exists. The partial unique index is the final guard.
+        """
+        if not current_app.config.get('ALLOW_SUPER_ADMIN_BOOTSTRAP'):
+            return False
         if not (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip():
             return False
-        return User.query.filter_by(role=Role.SUPER_ADMIN).first() is None
+        return PlatformAccountService.super_admin() is None
+
+    @staticmethod
+    def _bootstrap_key_matches(supplied: str) -> bool:
+        expected = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
+        supplied = (supplied or '').strip()
+        # Constant time, so response timing reveals nothing about the key.
+        return bool(expected and supplied) and hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8'))
 
     @staticmethod
     def _normalize_phone_number(value):
@@ -311,10 +327,9 @@ class AuthService:
         username = (data.get('username') or '').strip() or phone_username(phone_number)
 
         if requested_role == 'SUPER_ADMIN':
-            expected_bootstrap_key = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
             if not AuthService.bootstrap_available():
                 return _error("BOOTSTRAP_UNAVAILABLE", "SUPER_ADMIN bootstrap is unavailable.", 403)
-            if not bootstrap_key or bootstrap_key != expected_bootstrap_key:
+            if not AuthService._bootstrap_key_matches(bootstrap_key):
                 return _error("INVALID_BOOTSTRAP_KEY", "Invalid bootstrap key for SUPER_ADMIN registration.", 403)
             return AuthService._bootstrap_super_admin(data, phone_number, email, username, password)
         role = 'FARMER'
