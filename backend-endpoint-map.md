@@ -36,11 +36,12 @@ Where implemented, filtering supports `q` and route-specific keys such as `statu
 	- `tenant_name` (optional)
 	- `name` (optional)
 	- `tenant_type` (`single` or `cooperative`, optional)
-	- `role` (optional; defaults to `FARMER`)
+	- `role` (optional; defaults to `FARMER`; `SUPER_ADMIN` only through the closed-by-default bootstrap)
 - `POST /api/auth/switch-farm`
 - `POST /api/auth/logout`
-- `GET /api/auth/me`
+- `GET /api/auth/me` (adds `is_platform_admin`, `mfa_enrolled`, `mfa_verified`; all false for farm users)
 - `GET /api/auth/status`
+- `POST /api/auth/mfa/enrollment`, `POST /api/auth/mfa/enrollment/confirm`, `POST /api/auth/mfa/verify` (platform admin 2FA; see [docs/platform-admin.md](docs/platform-admin.md))
 
 ### Profile page
 
@@ -253,8 +254,7 @@ Frontend should treat `409` as a duplicate-item conflict, not a transport failur
 - `POST /api/finance/buyers/<buyer_id>/invoice/generate`
 - `POST /api/finance/invoices/<invoice_id>/send`
 - `GET /statements/<token>`: disabled (BR-016). Always `404 { "code": "STATEMENT_LINK_INVALID" }` until opaque statement links exist.
-- `POST /api/finance/billing/stk-push`
-- `POST /api/finance/mpesa/callback`
+- M-Pesa: there is no STK push route, and the STK callback (`POST /mpesa/callback`) is not routed until callbacks are verified (Phase 0B).
 
 Posted revenue and payment transactions atomically issue one immutable, tenant- and farm-scoped receipt. Its sequence-backed `RCPT-YYYY-######` number is distinct from the submitted payment reference. The initially rendered PDF bytes and SHA-256 are retained; downloads never rerender the artifact. Corrections void the receipt with a reason and audit event rather than editing or deleting it. Expense and draft transactions are not eligible.
 
@@ -716,9 +716,11 @@ Validation behavior:
 ## Tenant, Export, Tasking
 
 - `GET /api/tenant/profile`
-- `POST /api/tenant/cooperatives`
-- `POST /api/tenant/cooperatives/<cooperative_id>/members`
-- `POST /api/tenant/cooperatives/<cooperative_id>/members/bulk`
+- `POST /api/tenant/cooperatives` (platform admin only, 2FA-verified session)
+- `POST /api/tenant/cooperatives/<cooperative_id>/members` (platform admin only)
+- `POST /api/tenant/cooperatives/<cooperative_id>/members/bulk` (platform admin only)
+- `POST /api/tenant/members/invite`, `POST /api/tenant/members/import` (farm owner, `FARM_ADMIN` or cooperative `ADMIN`, own tenant only)
+- `GET /uploads/<path>` (signed-in users of the owning tenant; 401 anonymous, 404 otherwise)
 - `GET /api/v1/export/animal/<animal_id>/pdf`
 - `POST /api/v1/tasks/<routine_id>/complete`
 - `GET /api/routine/plans`
