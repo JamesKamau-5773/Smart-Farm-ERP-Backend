@@ -61,6 +61,22 @@ class BaseTestCase(unittest.TestCase):
         db.session.commit()
         return user
 
+    def create_platform_admin(self, *, username: str = 'platform_admin', password: str = 'password',
+                              phone_number: Optional[str] = None):
+        """The one SUPER_ADMIN, in the platform tenant, created the only way the app allows."""
+        from app.services.platform_account_service import NewSuperAdmin, PlatformAccountService
+
+        user = PlatformAccountService.create_super_admin(NewSuperAdmin(
+            username=username,
+            identifier=f'{username}_id',
+            name=username,
+            password=password,
+            phone_number=phone_number,
+            email=f'{username}@example.com',
+        ))
+        db.session.commit()
+        return user
+
     def get_auth_headers(self, role: str = Role.FARMER):
         username = f'test_{role.lower()}'
         password = 'password'
