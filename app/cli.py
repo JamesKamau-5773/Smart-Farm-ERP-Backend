@@ -35,13 +35,22 @@ demo_cli = AppGroup('demo', help='Public demo workspace ("Silato Farm").')
 
 
 @demo_cli.command('seed')
-def seed_demo():
+@click.option('--if-missing', is_flag=True,
+              help='Do nothing if the demo workspace already exists (used on every deploy).')
+def seed_demo(if_missing):
     """Create or rebuild the demo workspace with data dated relative to today.
 
     Idempotent: replaces the demo tenant's data, never duplicates it. Runs
     whether or not DEMO_ENABLED is set, so the data can be prepared first.
+    With --if-missing an existing workspace is left alone; the first visitor
+    of each day refreshes its dates anyway.
     """
+    from app.services.demo_account import DemoAccount
     from app.services.demo_seed_service import DemoSeedService
+
+    if if_missing and DemoAccount.owner() is not None:
+        click.echo('Demo workspace already exists; skipping seed.')
+        return
 
     summary = DemoSeedService.seed()
     click.echo(f'Demo workspace ready (tenant {summary.tenant_id}).')

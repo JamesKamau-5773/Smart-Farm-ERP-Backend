@@ -345,6 +345,30 @@ class DemoSeedTests(DemoTestCase):
         self.assertTrue(DemoSeedService.refresh_if_stale())
         self.assertFalse(DemoSeedService.refresh_if_stale())
 
+    def test_seed_command_if_missing_leaves_an_existing_workspace_alone(self):
+        runner = self.app.test_cli_runner()
+        milk_logs = MilkLog.query.filter_by(tenant_id=self.demo_tenant.id).count()
+
+        result = runner.invoke(args=['demo', 'seed', '--if-missing'])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('already exists', result.output)
+        self.assertEqual(MilkLog.query.filter_by(tenant_id=self.demo_tenant.id).count(), milk_logs)
+
+    def test_seed_command_if_missing_seeds_a_fresh_database(self):
+        DemoDataPurger.purge(self.demo_tenant)
+        for user in User.query.filter_by(tenant_id=self.demo_tenant.id).all():
+            db.session.delete(user)
+        db.session.commit()
+        self.assertIsNone(DemoAccount.owner())
+
+        result = self.app.test_cli_runner().invoke(args=['demo', 'seed', '--if-missing'])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('Demo workspace ready', result.output)
+        self.assertIsNotNone(DemoAccount.owner())
+        self.assertEqual(self.start_demo().status_code, 200)
+
     def test_buyers_have_outstanding_balances(self):
         headers = self.demo_headers()
         buyers = self.client.get('/api/finance/buyers', headers=headers).get_json()
