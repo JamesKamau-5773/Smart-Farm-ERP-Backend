@@ -180,6 +180,7 @@ class AuthTestCase(BaseTestCase):
     def test_register_workspace_allows_super_admin_with_valid_bootstrap_key(self):
         original_key = self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY']
         self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY'] = 'bootstrap-secret-2026'
+        self.app.config['ALLOW_SUPER_ADMIN_BOOTSTRAP'] = True
 
         try:
             with self.client:
@@ -199,6 +200,11 @@ class AuthTestCase(BaseTestCase):
                 self.assertEqual(response.status_code, 201)
                 data = json.loads(response.data.decode())
                 self.assertEqual(data['role'], Role.SUPER_ADMIN)
+                # Created straight into the platform tenant, which has no farm.
+                admin = User.query.filter_by(role=Role.SUPER_ADMIN).one()
+                self.assertTrue(admin.tenant.is_platform)
+                self.assertEqual(admin.tenant.farms, [])
+                self.assertIsNone(data['farm_id'])
         finally:
             self.app.config['BOOTSTRAP_SUPER_ADMIN_KEY'] = original_key
 
@@ -233,7 +239,7 @@ class AuthTestCase(BaseTestCase):
             self.assertTrue(data['access_token'])
 
     def test_super_admin_cannot_be_deleted_without_override(self):
-        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
+        self.create_platform_admin()
 
         with self.app.app_context():
             admin = User.query.filter_by(username='platform_admin').first()
@@ -242,33 +248,25 @@ class AuthTestCase(BaseTestCase):
                 db.session.commit()
             db.session.rollback()
 
-    def test_super_admin_can_be_deleted_with_explicit_override(self):
-        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
-        original = self.app.config.get('ALLOW_SUPER_ADMIN_REMOVAL', False)
-        self.app.config['ALLOW_SUPER_ADMIN_REMOVAL'] = True
+    def test_super_admin_can_be_deleted_only_inside_the_platform_change_scope(self):
+        from app.utils.super_admin_guard import super_admin_changes_allowed
 
-        try:
-            with self.app.app_context():
-                admin = User.query.filter_by(username='platform_admin').first()
-                db.session.delete(admin)
-                db.session.commit()
-                self.assertIsNone(User.query.filter_by(username='platform_admin').first())
-        finally:
-            self.app.config['ALLOW_SUPER_ADMIN_REMOVAL'] = original
+        self.create_platform_admin()
+        self.app.config['ALLOW_SUPER_ADMIN_REMOVAL'] = True  # The old config switch no longer works.
+        admin = User.query.filter_by(username='platform_admin').first()
+        db.session.delete(admin)
+        with self.assertRaises(ValueError):
+            db.session.commit()
+        db.session.rollback()
+
+        admin = User.query.filter_by(username='platform_admin').first()
+        with super_admin_changes_allowed():
+            db.session.delete(admin)
+            db.session.commit()
+        self.assertIsNone(User.query.filter_by(username='platform_admin').first())
 
     def test_superadmin_can_create_cooperative(self):
-        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        self.assertEqual(login_resp.status_code, 200)
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         response = self.client.post(
             '/api/tenant/cooperatives',
@@ -282,7 +280,7 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(response.status_code, 201)
         data = json.loads(response.data.decode())
@@ -293,17 +291,7 @@ class AuthTestCase(BaseTestCase):
         self.assertIn('admin', data)
 
     def test_member_invite_can_be_claimed(self):
-        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         coop_resp = self.client.post(
             '/api/tenant/cooperatives',
@@ -317,13 +305,16 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(coop_resp.status_code, 201)
         coop_data = json.loads(coop_resp.data.decode())
 
+        # The cooperative admin manages its own members through the tenant routes
+        # (the /cooperatives/<id>/... routes are for the platform admin).
+        self.client.delete_cookie('access_token_cookie')
         invite_resp = self.client.post(
-            f"/api/tenant/cooperatives/{coop_data['cooperative_id']}/members",
+            '/api/tenant/members/invite',
             data=json.dumps({
                 'full_name': 'Jane Farmer',
                 'phone_number': '0712333444',
@@ -349,17 +340,7 @@ class AuthTestCase(BaseTestCase):
         self.assertEqual(claim_data['role'], Role.FARMER)
 
     def test_bulk_member_csv_import_creates_invites(self):
-        self.create_user(username='platform_admin', password='password', role=Role.SUPER_ADMIN)
-
-        login_resp = self.client.post(
-            '/api/auth/login',
-            data=json.dumps(dict(
-                username='platform_admin',
-                password='password'
-            )),
-            content_type='application/json'
-        )
-        token = json.loads(login_resp.data.decode())['access_token']
+        platform_headers, _, _ = self.platform_admin_session()
 
         coop_resp = self.client.post(
             '/api/tenant/cooperatives',
@@ -373,7 +354,7 @@ class AuthTestCase(BaseTestCase):
                 'admin_password': 'StrongPass123',
             }),
             content_type='application/json',
-            headers={'Authorization': f'Bearer {token}'},
+            headers=platform_headers,
         )
         self.assertEqual(coop_resp.status_code, 201)
         coop_data = json.loads(coop_resp.data.decode())
@@ -384,8 +365,9 @@ class AuthTestCase(BaseTestCase):
             'John Farmer,0712333445,Plot B\n'
         )
 
+        self.client.delete_cookie('access_token_cookie')
         import_resp = self.client.post(
-            f"/api/tenant/cooperatives/{coop_data['cooperative_id']}/members/bulk",
+            '/api/tenant/members/import',
             data={
                 'file': (io.BytesIO(csv_payload.encode('utf-8')), 'members.csv'),
             },

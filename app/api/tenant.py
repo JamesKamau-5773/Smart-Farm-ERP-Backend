@@ -8,14 +8,16 @@ from app.services.admin_password_reset_service import AdminPasswordResetService
 from app.services.cooperative_service import CooperativeService
 from app.utils.current_user import require_current_user
 from app.utils.rate_limiting import authenticated_user_key
-from app.utils.decorators import role_required
+from app.services.platform_access_service import PlatformAccessService
+from app.utils.decorators import platform_admin_required
 from app.utils.jwt_payload import normalize_tenant_type
 
 
 tenant_bp = Blueprint('tenant', __name__)
 
 
-def _member_manager(target_tenant_id=None):
+def _member_manager():
+    """The signed-in member administrator of their own tenant (never another tenant)."""
     user_id = get_jwt_identity()
     user = UserRepository.get_by_id(int(user_id)) if user_id else None
     if not user:
@@ -24,18 +26,8 @@ def _member_manager(target_tenant_id=None):
     role = (user.role or '').strip().upper()
     tenant = getattr(user, 'tenant', None)
     is_single_farm_owner = role == Role.FARMER and normalize_tenant_type(getattr(tenant, 'tenant_type', None)) == 'single'
-    if role not in {Role.SUPER_ADMIN, Role.ADMIN, Role.FARM_ADMIN} and not is_single_farm_owner:
+    if role not in {Role.ADMIN, Role.FARM_ADMIN} and not is_single_farm_owner:
         return None, (jsonify({'error': 'Member administration access is required.'}), 403)
-
-    if target_tenant_id is not None:
-        try:
-            target_pk = int(str(target_tenant_id).replace('tenant_', '').strip())
-        except (TypeError, ValueError):
-            return None, (jsonify({'error': 'Invalid tenant id.'}), 400)
-
-        if role != Role.SUPER_ADMIN and user.tenant_id != target_pk:
-            return None, (jsonify({'error': 'Cannot manage members in another tenant.'}), 403)
-
     return user, None
 
 
@@ -85,32 +77,34 @@ def profile():
     }), 200
 
 
+# Platform administration: the verified platform admin only. Cooperative admins manage their
+# own tenant's members through /members/invite and /members/import below.
 @tenant_bp.route('/cooperatives', methods=['POST'])
 @jwt_required()
-@role_required(Role.SUPER_ADMIN)
+@platform_admin_required
 def create_cooperative():
     data = request.get_json(silent=True) or {}
-    return CooperativeService.create_cooperative(data)
+    return CooperativeService.create_cooperative(
+        data, actor_id=require_current_user().id, ip_address=request.remote_addr,
+    )
 
 
 @tenant_bp.route('/cooperatives/<cooperative_id>/members', methods=['POST'])
 @jwt_required()
+@platform_admin_required
 def invite_member(cooperative_id):
-    user, error = _member_manager(cooperative_id)
-    if error:
-        return error
+    tenant = PlatformAccessService.target_farm_tenant(cooperative_id)
     data = request.get_json(silent=True) or {}
-    return CooperativeService.invite_member(cooperative_id, data, _assignable_roles_for(user))
+    return CooperativeService.invite_member(tenant.id, data, Role.assignable_tenant_member_roles())
 
 
 @tenant_bp.route('/cooperatives/<cooperative_id>/members/bulk', methods=['POST'])
 @jwt_required()
+@platform_admin_required
 def import_members_csv(cooperative_id):
-    user, error = _member_manager(cooperative_id)
-    if error:
-        return error
+    tenant = PlatformAccessService.target_farm_tenant(cooperative_id)
     file_storage = request.files.get('file') or request.files.get('csv_file')
-    return CooperativeService.import_members_from_csv(cooperative_id, file_storage, _assignable_roles_for(user))
+    return CooperativeService.import_members_from_csv(tenant.id, file_storage, Role.assignable_tenant_member_roles())
 
 
 @tenant_bp.route('/members/invite', methods=['POST'])
@@ -138,6 +132,11 @@ def import_current_tenant_members_csv():
 @jwt_required()
 @limiter.limit("10 per hour", key_func=authenticated_user_key)
 def issue_member_password_reset(user_id):
-    """Farm owner/admin creates a one-time reset link for a user in their tenant."""
-    result = AdminPasswordResetService.issue(require_current_user(), user_id, ip_address=request.remote_addr)
+    """Farm owner/admin creates a one-time reset link for a user in their tenant.
+    Only the verified platform admin may do this for a user in another tenant."""
+    actor = require_current_user()
+    result = AdminPasswordResetService.issue(
+        actor, user_id, ip_address=request.remote_addr,
+        cross_tenant=PlatformAccessService.current_platform_admin() is not None,
+    )
     return jsonify(result), 201

@@ -1,11 +1,11 @@
 import secrets
 
-from flask import current_app, has_app_context
-from sqlalchemy import event, inspect
+from sqlalchemy import event, inspect, select
 from sqlalchemy.orm import validates
 
 from app import db, bcrypt
 from app.utils.phone import to_e164
+from app.utils.super_admin_guard import SuperAdminChangeRefused, super_admin_changes_are_allowed
 from datetime import datetime, timezone
 
 
@@ -66,6 +66,11 @@ class User(db.Model):
     __table_args__ = (
         # Case-insensitive email lookups for login and recovery.
         db.Index('ix_users_email_lower', db.func.lower(email)),
+        # At most one SUPER_ADMIN, ever: the database is the final guard.
+        db.Index(
+            'uq_users_single_super_admin', 'role', unique=True,
+            postgresql_where=db.text("role = 'SUPER_ADMIN'"),
+        ),
     )
 
     def set_password(self, password):
@@ -104,26 +109,55 @@ class RevokedToken(db.Model):
     revoked_at = db.Column(db.DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
-def _super_admin_removal_allowed() -> bool:
-    if not has_app_context():
+def _tenant_is_platform(connection, tenant_id) -> bool:
+    if tenant_id is None:
         return False
-    return bool(current_app.config.get('ALLOW_SUPER_ADMIN_REMOVAL', False))
+    from app.models.tenant import Tenant
+
+    tenants = Tenant.__table__
+    return bool(connection.execute(
+        select(tenants.c.is_platform).where(tenants.c.id == tenant_id)
+    ).scalar())
 
 
-@event.listens_for(User, 'before_delete')
-def prevent_super_admin_delete(mapper, connection, target):
-    if target.role == Role.SUPER_ADMIN and not _super_admin_removal_allowed():
-        raise ValueError('Super Admin removal is disabled. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')
+def _check_placement(connection, target) -> None:
+    """The SUPER_ADMIN lives in the platform tenant, and every active account there is the SUPER_ADMIN."""
+    on_platform = _tenant_is_platform(connection, target.tenant_id)
+    if target.role == Role.SUPER_ADMIN and not on_platform:
+        raise SuperAdminChangeRefused('The super admin must belong to the platform tenant.')
+    active = target.is_active is None or bool(target.is_active)
+    if on_platform and active and target.role != Role.SUPER_ADMIN:
+        raise SuperAdminChangeRefused('Only the super admin may hold an active account in the platform tenant.')
+
+
+@event.listens_for(User, 'before_insert')
+def guard_super_admin_insert(mapper, connection, target):
+    if target.role == Role.SUPER_ADMIN and not super_admin_changes_are_allowed():
+        raise SuperAdminChangeRefused('A super admin can only be created by the bootstrap or the platform CLI.')
+    _check_placement(connection, target)
 
 
 @event.listens_for(User, 'before_update')
-def prevent_super_admin_deactivation(mapper, connection, target):
-    if target.role != Role.SUPER_ADMIN or _super_admin_removal_allowed():
-        return
-
+def guard_super_admin_update(mapper, connection, target):
     state = inspect(target)
-    if state.attrs.is_active.history.has_changes() and not target.is_active:
-        raise ValueError('Super Admin cannot be deactivated. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')
+    role_history = state.attrs.role.history
+    changed = any(
+        getattr(state.attrs, name).history.has_changes() for name in ('role', 'tenant_id', 'is_active')
+    )
+    if not changed:
+        return  # Password, profile and verification changes never touch these rules.
 
-    if state.attrs.role.history.has_changes() and target.role != Role.SUPER_ADMIN:
-        raise ValueError('Super Admin role cannot be changed. Set ALLOW_SUPER_ADMIN_REMOVAL=True to override.')
+    was_super_admin = Role.SUPER_ADMIN in (role_history.deleted or ()) or (
+        not role_history.has_changes() and target.role == Role.SUPER_ADMIN
+    )
+    if (was_super_admin or target.role == Role.SUPER_ADMIN) and not super_admin_changes_are_allowed():
+        raise SuperAdminChangeRefused(
+            'The super admin can only be moved, demoted or deactivated with the platform CLI.'
+        )
+    _check_placement(connection, target)
+
+
+@event.listens_for(User, 'before_delete')
+def guard_super_admin_delete(mapper, connection, target):
+    if target.role == Role.SUPER_ADMIN and not super_admin_changes_are_allowed():
+        raise SuperAdminChangeRefused('The super admin account cannot be deleted.')

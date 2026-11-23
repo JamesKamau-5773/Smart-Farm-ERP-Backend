@@ -771,7 +771,7 @@ def list_ingredient_standards():
 @inventory_bp.route('/api/v1/nutrition/ingredient-standards', methods=['POST'])
 @jwt_required()
 @require_tenant_context
-@role_required(Role.FARMER, Role.SUPER_ADMIN)
+@role_required(Role.FARMER)
 def upsert_ingredient_standard():
     tenant_id = get_tenant_id_from_context()
     data = request.get_json() or {}
@@ -797,7 +797,7 @@ def upsert_ingredient_standard():
 @inventory_bp.route('/api/v1/nutrition/ingredient-standards/backfill', methods=['POST'])
 @jwt_required()
 @require_tenant_context
-@role_required(Role.FARMER, Role.SUPER_ADMIN)
+@role_required(Role.FARMER)
 def backfill_ingredient_standards_to_inventory():
     tenant_id = get_tenant_id_from_context()
     if tenant_id is None:

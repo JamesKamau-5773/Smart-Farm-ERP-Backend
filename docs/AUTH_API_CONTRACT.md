@@ -76,6 +76,14 @@ One value. Route on it.
 
 Precedence when several apply: `PASSWORD_RESET_REQUIRED` > `PHONE_VERIFICATION_REQUIRED` > `ACTIVE`.
 
+### 2.1a Platform admin fields — NEW
+Login responses and `GET /api/auth/me` also carry `is_platform_admin`, `mfa_enrolled` and
+`mfa_verified`. They are all `false` for farm users, whose behaviour does not change. For the
+platform admin (`SUPER_ADMIN`): enrol 2FA when `mfa_enrolled` is false, verify when
+`mfa_verified` is false, then show the platform screens. Until 2FA passes, every other request
+returns `403 MFA_REQUIRED`; farm routes always return `403 PLATFORM_SCOPE` for this account.
+See [platform-admin.md](platform-admin.md).
+
 ### 2.2 `account_flags`
 Informational. Use it for banners and nudges.
 
@@ -140,6 +148,10 @@ Request:
 ```
 
 Errors: `400 VALIDATION_ERROR | INVALID_PHONE | WEAK_PASSWORD`, `409 PHONE_IN_USE`, `409 EMAIL_IN_USE`, `403 BOOTSTRAP_UNAVAILABLE | INVALID_BOOTSTRAP_KEY`, `429 RATE_LIMITED`.
+`role: "SUPER_ADMIN"` with `bootstrap_key` creates the platform admin only while
+`ALLOW_SUPER_ADMIN_BOOTSTRAP=True` on the server and no platform admin exists; otherwise
+`403 BOOTSTRAP_UNAVAILABLE`. That account goes into the platform tenant with no farm
+(`farm_id: null`) and must enrol 2FA.
 Existing behaviour is kept: re-registering with an existing phone **and** its correct password returns `200` with `"message": "Workspace already exists"` and a session.
 
 ---
@@ -410,8 +422,8 @@ Errors: `400 RESET_TOKEN_INVALID`, `400 PASSWORD_MISMATCH`, `400 WEAK_PASSWORD`,
 ### 7.4 Admin / farm-owner reset
 
 #### `POST /api/tenant/users/{user_id}/password-reset` — NEW (authenticated, CSRF)
-- **Who may call it:** the farm owner (`FARMER` on a single-farm tenant), `FARM_ADMIN`, `ADMIN` (cooperative admin) and `SUPER_ADMIN`. A `FARMER` who is a member of a cooperative can't.
-- **Who may be reset:** the target must be in the caller's tenant (`SUPER_ADMIN` may reset any tenant), must be active, and must rank strictly lower than the caller.
+- **Who may call it:** the farm owner (`FARMER` on a single-farm tenant), `FARM_ADMIN`, `ADMIN` (cooperative admin) and the platform admin. A `FARMER` who is a member of a cooperative can't.
+- **Who may be reset:** the target must be in the caller's tenant (only the platform admin, in a session that passed 2FA, may reset a user in another tenant), must be active, and must rank strictly lower than the caller.
   Rank, highest first: `SUPER_ADMIN` > `ADMIN` > single-farm owner `FARMER` > `FARM_ADMIN` > cooperative-member `FARMER` > `FARM_MANAGER` > `FARM_SUPERVISOR` > `VETERINARY_DOCTOR` > `FARM_HAND`.
 - **Not allowed:** resetting yourself, resetting a `SUPER_ADMIN`, or resetting an equal or higher rank (for example `FARM_ADMIN` → single-farm owner).
 
@@ -504,6 +516,9 @@ Rate limit: 20/10 min per IP.
 | POST | `/api/auth/password/reset/validate` | new |
 | POST | `/api/auth/password/reset` | new |
 | POST | `/api/tenant/users/{user_id}/password-reset` | new |
+| POST | `/api/auth/mfa/enrollment` | new (platform admin) |
+| POST | `/api/auth/mfa/enrollment/confirm` | new (platform admin) |
+| POST | `/api/auth/mfa/verify` | new (platform admin) |
 | POST | `/api/whatsapp/webhook` | changed behaviour |
 
 ## 12. Deployment notes that affect the frontend

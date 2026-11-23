@@ -29,7 +29,7 @@ class CommandId:
 _MENU_TEXT_SYNONYMS = {'menu', 'cancel', 'restart'}
 
 # Farmhand-facing roles allowed to drive farm actions over WhatsApp.
-ALLOWED_ROLES = {Role.FARM_HAND, Role.FARM_MANAGER, Role.FARM_ADMIN, Role.FARMER, Role.SUPER_ADMIN, Role.ADMIN}
+ALLOWED_ROLES = {Role.FARM_HAND, Role.FARM_MANAGER, Role.FARM_ADMIN, Role.FARMER, Role.ADMIN}
 
 # WhatsApp UX offers Morning/Afternoon/Evening; the milk domain only distinguishes
 # Morning/Midday/Evening, so "Afternoon" is mapped onto the existing Midday session.

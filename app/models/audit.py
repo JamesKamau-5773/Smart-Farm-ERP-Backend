@@ -6,7 +6,8 @@ class AuditLog(db.Model):
     __tablename__ = 'audit_logs'
 
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    # None for server-side commands (flask platform ...), which have no signed-in user.
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     
     # What happened?
     action = db.Column(db.String(50), nullable=False) # e.g., 'UPDATE_HARDLOCK', 'MANUAL_LEDGER_ENTRY'

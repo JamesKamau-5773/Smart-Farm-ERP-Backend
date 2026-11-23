@@ -37,11 +37,13 @@ def _rank(user: User) -> int:
 
 class AdminPasswordResetService:
     @staticmethod
-    def authorize(actor: User, target: User) -> None:
+    def authorize(actor: User, target: User, *, cross_tenant: bool = False) -> None:
+        """cross_tenant: the caller is the verified platform admin (PlatformAccessService);
+        everyone else may only act inside their own tenant."""
         actor_rank = _rank(actor)
         if actor_rank < _MIN_RESETTER_RANK:
             raise AuthError('FORBIDDEN', 'Member administration access is required.', 403)
-        if actor.role != Role.SUPER_ADMIN and target.tenant_id != actor.tenant_id:
+        if not cross_tenant and target.tenant_id != actor.tenant_id:
             # Indistinguishable from a missing user.
             raise AuthError('NOT_FOUND', 'User not found.', 404)
         if target.id == actor.id:
@@ -50,11 +52,11 @@ class AdminPasswordResetService:
             raise AuthError('FORBIDDEN_TARGET', 'You cannot reset the password for this user.', 403)
 
     @staticmethod
-    def issue(actor: User, target_user_id: int, *, ip_address=None) -> dict:
+    def issue(actor: User, target_user_id: int, *, ip_address=None, cross_tenant: bool = False) -> dict:
         target = UserRepository.get_by_id(target_user_id)
         if not target:
             raise AuthError('NOT_FOUND', 'User not found.', 404)
-        AdminPasswordResetService.authorize(actor, target)
+        AdminPasswordResetService.authorize(actor, target, cross_tenant=cross_tenant)
         if not target.is_active:
             raise AuthError('FORBIDDEN_TARGET', 'This account is not active. Send an account invitation instead.', 403)
 

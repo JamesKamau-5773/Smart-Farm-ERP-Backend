@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hmac
+
 from flask import jsonify, current_app
 from flask_jwt_extended import create_access_token, decode_token, get_jwt, set_access_cookies, unset_jwt_cookies, verify_jwt_in_request
 from sqlalchemy.exc import IntegrityError
@@ -8,7 +10,7 @@ from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
 from app.models.user import RevokedToken, Role, User
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app import bcrypt
 from app.repositories.user_repo import UserRepository
 from app.services.account_state_service import AccountStateService
@@ -24,6 +26,8 @@ from app.utils.jwt_payload import (
     parse_public_int_id,
 )
 from app.services.page_access import normalize_page_access
+from app.services.platform_account_service import NewSuperAdmin, PlatformAccountService, SuperAdminExists
+from app.services.platform_tenant import PlatformTenant
 
 def _error(code, message, status):
     return jsonify({"code": code, "error": message}), status
@@ -52,10 +56,24 @@ class AuthService:
 
     @staticmethod
     def bootstrap_available():
-        """Return whether the initial super-admin bootstrap can be attempted."""
+        """Whether POST /api/auth/register may create the super admin.
+
+        All three must hold: ALLOW_SUPER_ADMIN_BOOTSTRAP is on (off by default, so the
+        path is closed unless an operator opens it), a BOOTSTRAP_SUPER_ADMIN_KEY is set,
+        and no super admin exists. The partial unique index is the final guard.
+        """
+        if not current_app.config.get('ALLOW_SUPER_ADMIN_BOOTSTRAP'):
+            return False
         if not (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip():
             return False
-        return User.query.filter_by(role=Role.SUPER_ADMIN).first() is None
+        return PlatformAccountService.super_admin() is None
+
+    @staticmethod
+    def _bootstrap_key_matches(supplied: str) -> bool:
+        expected = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
+        supplied = (supplied or '').strip()
+        # Constant time, so response timing reveals nothing about the key.
+        return bool(expected and supplied) and hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8'))
 
     @staticmethod
     def _normalize_phone_number(value):
@@ -90,6 +108,10 @@ class AuthService:
             user.tenant_id = tenant.id
             user.tenant = tenant
 
+        if PlatformTenant.is_platform(tenant):
+            # The platform workspace never gets a farm: its sessions carry no farm.
+            return tenant, []
+
         farms = list(getattr(tenant, "farms", []) or [])
         if not farms:
             farm = Farm(tenant_id=tenant.id, name="Default Farm")
@@ -102,6 +124,9 @@ class AuthService:
 
     @staticmethod
     def _pick_active_farm(*, tenant, farms, requested_farm_id: str | None):
+        if not farms:
+            return None  # Platform sessions only.
+
         tenant_type = normalize_tenant_type(getattr(tenant, "tenant_type", None))
 
         if tenant_type == "single":
@@ -118,7 +143,21 @@ class AuthService:
         return farms[0]
 
     @staticmethod
-    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD, expires_delta=None):
+    def _session_lifetime(user, requested=None):
+        """Token lifetime. The super admin's tokens are short until 2FA passes (MfaService issues
+        the longer verified session itself); None means JWT_ACCESS_TOKEN_EXPIRES."""
+        if requested is not None:
+            return requested
+        if getattr(user, 'role', None) == Role.SUPER_ADMIN:
+            return timedelta(minutes=int(current_app.config.get('PLATFORM_ADMIN_PENDING_MFA_MINUTES') or 10))
+        return None
+
+    @staticmethod
+    def _issue_token_and_payload(*, user, tenant, farms, active_farm, auth_method=AuthMethod.PASSWORD,
+                                 expires_delta=None, on_issued=None):
+        """Builds the access token. ``on_issued(jti, expires_at)`` runs once the token exists,
+        before the live account state is read into the payload (MFA records its session there)."""
+        expires_delta = AuthService._session_lifetime(user, expires_delta)
         tenant_type = normalize_tenant_type(getattr(tenant, "tenant_type", None))
         available_farms = [(f.id, f.name) for f in farms]
         phone_number = AuthService._resolve_phone_number(user)
@@ -134,8 +173,8 @@ class AuthService:
             tenant_pk=tenant.id,
             tenant_name=tenant.name,
             tenant_type=tenant_type,
-            active_farm_pk=active_farm.id,
-            active_farm_name=active_farm.name,
+            active_farm_pk=active_farm.id if active_farm else None,
+            active_farm_name=active_farm.name if active_farm else None,
             available_farms=available_farms,
             page_access=normalize_page_access(getattr(user, 'page_access', None), user.role),
         )
@@ -150,13 +189,16 @@ class AuthService:
             additional_claims=additional_claims,
             expires_delta=expires_delta,
         )
+        issued = decode_token(access_token)
+        if on_issued is not None:
+            on_issued(issued['jti'], datetime.fromtimestamp(issued['exp'], tz=timezone.utc))
 
         # Response-only (not in the token): read live from the database.
-        payload.update(AccountStateService.describe(user, auth_method))
+        payload.update(AccountStateService.describe(user, auth_method, jti=issued['jti']))
         return access_token, payload
 
     @staticmethod
-    def start_session(user, *, farm_id=None, auth_method=AuthMethod.PASSWORD, expires_delta=None):
+    def start_session(user, *, farm_id=None, auth_method=AuthMethod.PASSWORD, expires_delta=None, on_issued=None):
         """Issue a session for an already-authenticated user: the access token in
         the JSON body and in the httpOnly cookie. Every sign-in route ends here."""
         if not user.is_active:
@@ -168,6 +210,7 @@ class AuthService:
         except ValueError as e:
             return _error("INVALID_FARM", str(e), 400)
 
+        expires_delta = AuthService._session_lifetime(user, expires_delta)
         try:
             access_token, payload = AuthService._issue_token_and_payload(
                 user=user,
@@ -176,6 +219,7 @@ class AuthService:
                 active_farm=active_farm,
                 auth_method=auth_method,
                 expires_delta=expires_delta,
+                on_issued=on_issued,
             )
         except ValueError as e:
             return jsonify({"error": str(e)}), 500
@@ -287,7 +331,7 @@ class AuthService:
         requested_role = (data.get('role') or '').strip().upper()
         bootstrap_key = (data.get('bootstrap_key') or data.get('bootstrapKey') or '').strip()
 
-        if not farm_name:
+        if not farm_name and requested_role != 'SUPER_ADMIN':
             return _error("VALIDATION_ERROR", "farm_name is required", 400)
         if not raw_phone:
             return _error("VALIDATION_ERROR", "phone_number is required", 400)
@@ -302,14 +346,12 @@ class AuthService:
         username = (data.get('username') or '').strip() or phone_username(phone_number)
 
         if requested_role == 'SUPER_ADMIN':
-            expected_bootstrap_key = (current_app.config.get('BOOTSTRAP_SUPER_ADMIN_KEY') or '').strip()
             if not AuthService.bootstrap_available():
                 return _error("BOOTSTRAP_UNAVAILABLE", "SUPER_ADMIN bootstrap is unavailable.", 403)
-            if not bootstrap_key or bootstrap_key != expected_bootstrap_key:
+            if not AuthService._bootstrap_key_matches(bootstrap_key):
                 return _error("INVALID_BOOTSTRAP_KEY", "Invalid bootstrap key for SUPER_ADMIN registration.", 403)
-            role = 'SUPER_ADMIN'
-        else:
-            role = 'FARMER'
+            return AuthService._bootstrap_super_admin(data, phone_number, email, username, password)
+        role = 'FARMER'
 
         existing_user = AuthService._find_user_by_phone(phone_number) or UserRepository.get_by_username(username)
         if existing_user:
@@ -349,12 +391,9 @@ class AuthService:
 
         tenant_name = (data.get('tenant_name') or '').strip() or f"{farm_name} Tenant"
         display_name = (data.get('name') or data.get('full_name') or '').strip() or username
-        # A platform super-admin is housed in a standard tenant; never accept a
-        # client-selected tenant type for the bootstrap account.
-        tenant_type_raw = 'single' if role == 'SUPER_ADMIN' else data.get('tenant_type')
 
         try:
-            tenant_type = normalize_tenant_type(tenant_type_raw)
+            tenant_type = normalize_tenant_type(data.get('tenant_type'))
         except ValueError as e:
             return _error("VALIDATION_ERROR", str(e), 400)
 
@@ -391,6 +430,47 @@ class AuthService:
 
         response = jsonify({
             "message": "Workspace registered successfully",
+            "access_token": access_token,
+            **payload,
+        })
+        set_access_cookies(response, access_token)
+        return response, 201
+
+    @staticmethod
+    def _bootstrap_super_admin(data, phone_number, email, username, password):
+        """Creates the one super admin, in the platform tenant. Only reached with a valid bootstrap key."""
+        if AuthService._find_user_by_phone(phone_number) or UserRepository.get_by_username(username):
+            return _error("PHONE_IN_USE", "phone_number or username is already in use", 409)
+        if email and UserRepository.get_by_email_ci(email):
+            return _error("EMAIL_IN_USE", "email is already in use", 409)
+        try:
+            PasswordPolicy.enforce(password, personal_values=[username, phone_number, (email or '').split('@')[0]])
+        except AuthError as error:
+            return error.to_response()
+
+        try:
+            user = PlatformAccountService.create_super_admin(NewSuperAdmin(
+                username=username,
+                identifier=data.get('identifier') or phone_identifier(phone_number),
+                name=(data.get('name') or data.get('full_name') or '').strip() or username,
+                password=password,
+                phone_number=phone_number,
+                email=email,
+            ))
+            db.session.commit()
+        except SuperAdminExists:
+            db.session.rollback()
+            return _error("BOOTSTRAP_UNAVAILABLE", "SUPER_ADMIN bootstrap is unavailable.", 403)
+        except IntegrityError:
+            db.session.rollback()
+            return _error("DUPLICATE_ACCOUNT", "Could not complete registration due to duplicate fields", 409)
+
+        tenant = user.tenant
+        access_token, payload = AuthService._issue_token_and_payload(
+            user=user, tenant=tenant, farms=[], active_farm=None,
+        )
+        response = jsonify({
+            "message": "Super admin registered successfully",
             "access_token": access_token,
             **payload,
         })

@@ -15,7 +15,8 @@ def get_statement(token):
     return jsonify({'code': 'STATEMENT_LINK_INVALID', 'error': 'This statement link is not valid.'}), 404
 
 
-@webhooks_bp.route('/mpesa/callback', methods=['POST'])
+# Not routed: the callback is unauthenticated and can credit the wrong farm (audit item 16).
+# Re-register it in Phase 0B once callbacks are verified and matched to a stored request.
 def mpesa_callback():
     """
     Public webhook endpoint for Safaricom Daraja.

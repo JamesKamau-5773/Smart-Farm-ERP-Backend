@@ -135,6 +135,39 @@ def enforce_demo_read_only():
     return jsonify(denial.body()), denial.status
 
 
+def enforce_platform_session():
+    """The single enforcement point for SUPER_ADMIN sessions (see app.services.platform_session_policy).
+
+    Until 2FA passes for this session it may only finish 2FA, read /me or log out;
+    afterwards only auth and platform endpoints. The role is read live from the database.
+    """
+    actor_id = getattr(g, 'actor_id', None)
+    if actor_id is None:
+        return None
+
+    from app.models.user import Role, User
+    from app.services.mfa_service import MfaService
+    from app.services.platform_session_policy import denial_for
+
+    try:
+        user = db.session.get(User, int(actor_id))
+    except (TypeError, ValueError):
+        return None
+    if user is None or user.role != Role.SUPER_ADMIN:
+        return None
+
+    claims = get_jwt() or {}
+    denial = denial_for(
+        endpoint=request.endpoint,
+        path=request.path,
+        method=request.method,
+        mfa_verified=MfaService.session_verified(user, claims.get('jti')),
+    )
+    if denial is None:
+        return None
+    return jsonify(denial.body()), denial.status
+
+
 def _google_oauth_intent():
     if not (request.endpoint or '').startswith('auth_google.'):
         return None

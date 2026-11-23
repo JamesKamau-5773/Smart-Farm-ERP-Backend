@@ -12,6 +12,7 @@ from app import db
 from app.models.farm import Farm
 from app.models.tenant import Tenant
 from app.models.user import Role, User
+from app.services.audit_service import record_audit
 from app.services.auth_service import AuthService
 from app.services.account_invitation_service import AccountInvitationService
 from app.services.page_access import normalize_page_access
@@ -60,7 +61,7 @@ class CooperativeService:
         return ''
 
     @staticmethod
-    def create_cooperative(data: dict):
+    def create_cooperative(data: dict, *, actor_id: int | None = None, ip_address: str | None = None):
         cooperative_name = (data.get('name') or data.get('cooperative_name') or '').strip()
         region = (data.get('region') or '').strip() or None
         registration_number = (data.get('registration_number') or data.get('registrationNumber') or '').strip() or None
@@ -110,6 +111,13 @@ class CooperativeService:
             )
             admin_user.set_password(admin_password)
             db.session.add(admin_user)
+            db.session.flush()
+            record_audit(
+                user_id=actor_id, action='COOPERATIVE_CREATED', entity_type='Tenant', entity_id=tenant.id,
+                old_value=None,
+                new_value={'name': tenant.name, 'region': tenant.region, 'admin_user_id': admin_user.id},
+                ip_address=ip_address,
+            )
             db.session.commit()
         except IntegrityError:
             db.session.rollback()

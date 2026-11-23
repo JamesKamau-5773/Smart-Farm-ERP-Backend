@@ -93,11 +93,3 @@ class WhatsAppWebhookTestCase(BaseTestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_data(as_text=True), 'xyz')
-
-    @mock.patch('app.utils.db_init.ensure_super_admin_account', side_effect=RuntimeError('db unavailable'))
-    def test_verification_handshake_skips_bootstrap_db_errors(self, _mock_bootstrap):
-        response = self.client.get(
-            '/api/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=xyz',
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_data(as_text=True), 'xyz')

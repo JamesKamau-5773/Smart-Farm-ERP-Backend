@@ -4,10 +4,10 @@ This is the backend for the Jivu Smart Farm ERP, a comprehensive system designed
 
 ## Features
 
-- **Role-Based Access Control**: Differentiated access for `FARMER`, `FARM_HAND`, `VET`, and `CUSTOMER` roles using JWT.
+- **Role-Based Access Control**: Differentiated access for farm roles (`FARMER`, `FARM_ADMIN`, `FARM_MANAGER`, `FARM_HAND`, `VETERINARY_DOCTOR`, …) using JWT, with roles read live from the database. One platform admin (`SUPER_ADMIN`) with mandatory two-factor authentication; see [docs/platform-admin.md](docs/platform-admin.md).
 - **Livestock Management**: Register and track individual cows.
 - **Clinical Records**: Log veterinary visits and manage milk withdrawal periods with a `hardlock` feature.
-- **Financial Management**: Record transactions, calculate daily unit production costs, and integrate with M-Pesa for billing.
+- **Financial Management**: Record transactions and calculate daily unit production costs. (The M-Pesa STK callback is switched off until callbacks are verified.)
 - **Operational Logging**: Track daily milk production for each cow: who milked and who entered each record,
   how it arrived (app, WhatsApp, import), and its change against the cow's 7-day average for the same
   session, using the same rule that raises milk-drop alerts (corrected records are judged again). Calf feedings are logged against the day's milk, with litre totals.
@@ -116,15 +116,15 @@ DATABASE_URL=postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db
 TEST_DATABASE_URL=postgresql+psycopg://postgres:password@localhost:5433/jivu_farm_db_test
 REDIS_URL=redis://localhost:6379/0
 
-# M-Pesa Sandbox Credentials
-MPESA_CONSUMER_KEY=your_daraja_consumer_key
-MPESA_CONSUMER_SECRET=your_daraja_consumer_secret
-MPESA_BUSINESS_SHORTCODE=174379
-MPESA_PASSKEY=your_mpesa_passkey
-MPESA_CALLBACK_URL=https://your-ngrok-url/api/finance/mpesa/callback
+# Platform admin two-factor authentication (Fernet key; see docs/platform-admin.md)
+MFA_ENCRYPTION_KEYS=generate-with-cryptography-fernet
 ```
 
-**Note**: You will need to replace the placeholder values with your actual credentials, especially for the M-Pesa integration.
+`TEST_DATABASE_URL` must be a separate, local, throwaway database: the tests drop and recreate
+every table, and they refuse to start if it is missing, equals `DATABASE_URL`, has a non-local
+host or has no "test" in its name (`tests/db_guard.py`).
+
+See `.env.example` for every variable.
 
 ### 4. Start the Database
 
@@ -170,7 +170,8 @@ For an existing Render service, set its **Start Command** to:
 ```
 
 Set `DATABASE_URL` to the Render PostgreSQL **internal** connection string and
-set `APP_ENV=production`, `SECRET_KEY`, and `JWT_SECRET_KEY`. Then deploy again.
+set `APP_ENV=production`, `SECRET_KEY`, `JWT_SECRET_KEY` and `MFA_ENCRYPTION_KEYS` (needed for
+the platform admin's two-factor authentication). Then deploy again.
 
 
 #### Moving the Render service to Docker
@@ -198,10 +199,29 @@ The Celery worker isn't deployed on Render today. To run background tasks there,
 To run the test suite, execute the following command from the `backend` directory:
 
 ```bash
-python -m unittest discover -s tests
+python -m pytest -q tests          # or: python -m unittest discover -s tests
 ```
 
-The tests run against a separate PostgreSQL database defined by `TEST_DATABASE_URL` to avoid interfering with your development data.
+The tests run against a separate PostgreSQL database defined by `TEST_DATABASE_URL`. Every test
+drops and recreates the schema, so the suite refuses to start unless that database is local,
+different from `DATABASE_URL` and has "test" in its name (`tests/db_guard.py`;
+`TEST_DATABASE_LOCAL_HOSTS` adds host names such as a compose service).
+
+## Platform admin
+
+There is one platform admin (`SUPER_ADMIN`), housed in a platform tenant that is never a farm,
+with mandatory TOTP two-factor authentication and short sessions. Its recovery commands run on
+the server only:
+
+```bash
+flask platform status
+flask platform reset-2fa --reason "…" [--dry-run]
+flask platform transfer-super-admin --to <phone> --reason "…" [--dry-run]
+flask platform move-super-admin --reason "…" [--dry-run]
+flask platform split-super-admin --username <name> --reason "…" [--dry-run]
+```
+
+See [docs/platform-admin.md](docs/platform-admin.md).
 
 ## Database Backups
 
@@ -239,8 +259,13 @@ A high-level overview of the available API endpoints:
 - `PUT /api/clinical/cows/<id>/hardlock`: Lock/unlock a cow's milk for sale (FARMER only).
 
 - `GET /api/finance/unit-cost`: Calculate the daily cost per liter of milk.
-- `POST /api/finance/billing/stk-push`: Initiate an M-Pesa payment.
-- `POST /api/finance/mpesa/callback`: Webhook for M-Pesa to post transaction status.
+
+- `POST /api/auth/mfa/enrollment`, `POST /api/auth/mfa/enrollment/confirm`, `POST /api/auth/mfa/verify`: platform admin two-factor authentication.
+- `POST /api/tenant/cooperatives` and `/api/tenant/cooperatives/<id>/members[/bulk]`: platform admin only (2FA-verified session).
+- `GET /uploads/<path>`: locally stored photos and certificates, for signed-in users of the owning tenant only.
+
+M-Pesa: there is no STK push route, and the STK callback (`/mpesa/callback`) is not routed until
+callbacks are verified (Phase 0B).
 
 ## Frontend Integration
 
