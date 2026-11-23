@@ -1,6 +1,7 @@
 import os
 import tempfile
 from datetime import timedelta
+from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 from sqlalchemy.engine import make_url
 
@@ -194,8 +195,8 @@ class TestConfig(Config):
     WTF_CSRF_ENABLED = False
     JWT_COOKIE_CSRF_PROTECT = False
     AUTH_CODE_PEPPER = 'test-auth-code-pepper-that-is-at-least-thirty-two-characters'
-    # Test-only Fernet key for TOTP secrets.
-    MFA_ENCRYPTION_KEYS = 'AcmfC5XyLBL-eVB3mQlJGmTVX6QprfLZhK0odfXfeEU='
+    # Test-only key for TOTP secrets, generated per test process (never committed).
+    MFA_ENCRYPTION_KEYS = Fernet.generate_key().decode('ascii')
     AUTH_EMAIL_ASYNC = False
     FRONTEND_BASE_URL = 'https://app.example.test'
     # Isolated from the real instance/uploads tree so test runs never write/delete real files.
